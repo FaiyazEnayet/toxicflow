@@ -1,0 +1,25 @@
+[package]
+name = "toxicflow"
+version = "0.1.0"
+edition = "2021"
+description = "Order-flow toxicity on free crypto data: VPIN, Kyle's lambda, and order flow imbalance from Binance market data."
+license = "MIT"
+
+[[bin]]
+name = "toxicflow"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
+base64 = "0.22"
+parquet = "55"
+arrow = "55"
