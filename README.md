@@ -8,7 +8,7 @@
 
 Toxicity is the market maker's problem. When informed traders dominate the flow, anyone quoting passively gets picked off. They buy right before the price falls and sell right before it rises. Every metric here measures that adverse selection risk in real time.
 
-![VPIN and midprice building over a real 3.25 hour BTCUSDT session](docs/demo.gif)
+![VPIN and midprice building over a real 3.25 hour BTCUSDT session](<docs/dashboard preview.gif>)
 
 **[Live interactive demo](docs/dashboard.html)**. It shows VPIN over time, rolling Kyle's lambda, OFI versus forward returns, predictor calibration, and the market making demo. All from a real 3.25 hour BTCUSDT session. One self contained HTML file. It opens in any browser with no server.
 
