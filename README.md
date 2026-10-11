@@ -10,7 +10,7 @@ Toxicity is the market maker's problem. When informed traders dominate the flow,
 
 ![VPIN and midprice building over a real 3.25 hour BTCUSDT session](<docs/dashboard preview.gif>)
 
-**[Live interactive demo](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)**. It shows VPIN over time, rolling Kyle's lambda, OFI versus forward returns, predictor calibration, and the market making demo. All from a real 3.25 hour BTCUSDT session. One self contained HTML file. It opens in any browser with no server.
+Click this link to see the live interactive demo:**[Live interactive demo](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)**. It shows VPIN over time, rolling Kyle's lambda, OFI versus forward returns, predictor calibration, and the market making demo. All from a real 3.25 hour BTCUSDT session. One self contained HTML file. It opens in any browser with no server.
 
 ## How the pieces fit
 
