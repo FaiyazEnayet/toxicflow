@@ -25,44 +25,45 @@ Data comes from Binance's market data only hosts (`data-stream.binance.vision`),
 
 ## What a real session showed
 
-I recorded 2.5 hours of BTCUSDT: 24,785 trades, 88,891 quotes, 697.4 BTC of volume, price flat between 82932 and 83107. Real analyzer output:
+I recorded about 3.25 hours of BTCUSDT in six 30 minute chunks: 28224 trades, 106735 quotes, 749.6 BTC of volume, price flat between 82932 and 83107. Real analyzer output on the merged session:
 
 ```
-session: 24785 trades, 88891 quotes
-span: 9922.3s, volume: 697.369 base units
+session: 28224 trades, 106735 quotes
+span: 11724.4s, volume: 749.638 base units
 
 VPIN: 50 equal-volume buckets
-VPIN (50 buckets, window 20): mean 0.486, p90 0.640, max 0.681, last 0.439
-Kyle lambda (10s bars, 60-bar window): mean 3.679942 price/vol, last 2.512595
-OFI per 10s bar: mean +0.0848, std 11.0367
+VPIN (50 buckets, window 20): mean 0.523, p90 0.671, max 0.716, last 0.504
+Kyle lambda (10s bars, 60-bar window): mean 3.534752 price/vol, last 0.864679
+OFI per 10s bar: mean +0.2045, std 10.6025
 
 short-horizon prediction (10s bars, 30s horizon):
-  accuracy 0.783 +- 0.412 vs baseline 0.826 (987 bars, 4 folds)
-  brier 0.1630
+  accuracy 0.776 +- 0.417 vs baseline 0.809 (1167 bars, 4 folds)
+  brier 0.1683
   calibration (pred -> realized):
-    0.012 -> 0.103  (n=78)
-    0.060 -> 0.038  (n=78)
-    0.094 -> 0.038  (n=78)
-    0.113 -> 0.038  (n=78)
-    0.156 -> 0.103  (n=78)
-    0.199 -> 0.077  (n=78)
-    0.243 -> 0.192  (n=78)
-    0.277 -> 0.346  (n=78)
-    0.337 -> 0.487  (n=78)
-    0.705 -> 0.333  (n=78)
-    1.000 -> 0.000  (n=8)
+    0.012 -> 0.161  (n=93)
+    0.057 -> 0.043  (n=93)
+    0.095 -> 0.054  (n=93)
+    0.112 -> 0.032  (n=93)
+    0.142 -> 0.075  (n=93)
+    0.197 -> 0.161  (n=93)
+    0.256 -> 0.237  (n=93)
+    0.315 -> 0.280  (n=93)
+    0.385 -> 0.548  (n=93)
+    0.758 -> 0.323  (n=93)
+    1.000 -> 0.000  (n=2)
 
 market-making demo (toy fill model, NOT a strategy):
-  pnl open +13.1094, pnl gated +13.1094 | gated 0/9925s (0%) | turnover 854638.2
+  pnl open -9.8684, pnl gated -10.1491 | gated 121/11727s (1%) | turnover 990264.5
 ```
 
-Read it as: With 2.5 hours of data, 50 buckets gives about 14 BTC per bucket, which is well sized, and VPIN behaves: mean 0.486, max 0.681, against a buy share of 0.479 and a price that went nowhere. The metric now agrees with reality. Calibrate the bucket volume to the session and never compare raw VPIN levels to literature values computed on daily buckets. The `--bucket-btc` flag exists for exactly this.
+Read it as: the bucket lesson from the earlier 12 minute session is confirmed. With 3.25 hours of data, 50 buckets gives about 15 BTC per bucket, which is well sized, and VPIN behaves: mean 0.523, max 0.716, against a buy share of 0.442 and a price that went nowhere. Rerunning with explicit 15 BTC buckets gives mean 0.521, essentially identical. Calibrate the bucket volume to the session and never compare raw VPIN levels to literature values computed on daily buckets. The `--bucket-btc` flag exists for exactly this.
 
-Kyle's lambda of about 3.7 means each BTC of signed flow moved the mid by roughly $3.70 on 10 second bars. Plausible for BTC.
+Kyle's lambda of about 3.5 means each BTC of signed flow moved the mid by roughly $3.50 on 10 second bars. Plausible for BTC.
 
-The predictor found no edge: 0.783 accuracy against a 0.826 majority class baseline, on 987 bars. That is 15 times the data of the earlier session and the honest result is the same. The evaluation framework is the deliverable here: purged walk forward splits, no shuffling, calibration tables. It will tell you just as clearly when there is no edge as when there is one.
+The predictor found no edge: 0.776 accuracy against a 0.809 majority class baseline, on 1167 bars. That is 18 times the data of the earlier session and the honest result is the same. The evaluation framework is the deliverable here: purged walk forward splits, no shuffling, calibration tables. It will tell you just as clearly when there is no edge as when there is one.
 
-The market making demo is a toy with the lesson inverted this time. The gate never triggered because VPIN stayed below the 0.7 threshold for the whole session, so the gated leg equals the always quoting leg. That is correct behavior: a calm market with balanced flow should not trip a toxicity gate. Compare with the 12 minute session where an over sensitive gate stood down 70% of the time. The demo makes the mechanism visible in both directions.
+The market making demo is a toy and this session shows its missing piece. Both legs lost money: open -9.87, gated -10.15. Flow was net selling for three hours (buy share 0.442) into a flat market, and the toy has no inventory control, so it accumulated a long position and ate the spread on every unit. The gate stood down only 1% of the time because VPIN stayed below 0.7 almost everywhere, so the two legs are nearly identical. Compare with the 12 minute session where an over sensitive gate stood down 70% of the time. The demo makes the mechanism visible in both directions, and the real lesson is inventory management, which the toy deliberately omits.
+
 
 ## What is in here
 
@@ -75,7 +76,7 @@ The market making demo is a toy with the lesson inverted this time. The gate nev
 
 ## Honest limitations
 
-- 2.5 hours of BTC is a session, not a study. Microstructure results need days of data across regimes.
+- 3.25 hours of BTC is a session, not a study. Microstructure results need days of data across regimes.
 - Crypto is not equities. No open or close auction, funding rates, 24/7 retail flow. Take any comparison to the equity literature with salt.
 - VPIN itself is debated. It flagged the 2010 flash crash in hindsight and plenty of papers argue it is mostly repackaged volume. My session above is a live demonstration of why calibration matters.
 - The market making demo has a toy fill model: no queue position, no latency, no fees. It demonstrates adverse selection, not a strategy.
