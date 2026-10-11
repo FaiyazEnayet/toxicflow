@@ -56,7 +56,7 @@ market-making demo (toy fill model, NOT a strategy):
   pnl open +13.1094, pnl gated +13.1094 | gated 0/9925s (0%) | turnover 854638.2
 ```
 
-Read it as: the bucket lesson from the earlier 12 minute session is confirmed. With 2.5 hours of data, 50 buckets gives about 14 BTC per bucket, which is well sized, and VPIN behaves: mean 0.486, max 0.681, against a buy share of 0.479 and a price that went nowhere. The metric now agrees with reality. Calibrate the bucket volume to the session and never compare raw VPIN levels to literature values computed on daily buckets. The `--bucket-btc` flag exists for exactly this.
+Read it as: With 2.5 hours of data, 50 buckets gives about 14 BTC per bucket, which is well sized, and VPIN behaves: mean 0.486, max 0.681, against a buy share of 0.479 and a price that went nowhere. The metric now agrees with reality. Calibrate the bucket volume to the session and never compare raw VPIN levels to literature values computed on daily buckets. The `--bucket-btc` flag exists for exactly this.
 
 Kyle's lambda of about 3.7 means each BTC of signed flow moved the mid by roughly $3.70 on 10 second bars. Plausible for BTC.
 
