@@ -1,6 +1,6 @@
 # toxicflow
 
-**Order-flow toxicity on free crypto data.** Sees whether the microstructure ideas from the quant literature actually show up in markets we can touch. For this reason, a full loop in Rust shows: stream Binance market data, maintain a local limit order book, compute toxicity metrics, and test whether order flow predicts short horizon returns.
+**Order-flow toxicity on free crypto data.** Sees whether the microstructure ideas from the quant literature actually show up in markets we can touch. For this reason, a full loop in Rust is being used to: stream Binance market data, maintain a local limit order book, compute toxicity metrics, and test whether order flow predicts short horizon returns.
 
 Toxicity is the market maker's problem. When informed traders dominate the flow, anyone quoting passively gets picked off: they buy right before the price falls and sell right before it rises. The metrics here all try to measure that adverse selection risk in real time.
 
