@@ -39,8 +39,7 @@ python3 scripts/dashboard.py --data runs/dashboard_data --out docs/dashboard.htm
 
 Data comes from Binance's market data only hosts (`data-stream.binance.vision`). No API key needed. Sessions save to parquet: `trades.parquet`, `quotes.parquet`, `meta.json`.
 
-<details>
-<summary><strong>The three metrics</strong></summary>
+## The three metrics
 
 **VPIN.** Easley, Lopez de Prado, O'Hara. I group trades into equal volume buckets instead of time bars, so busy and quiet periods stay comparable. Each bucket scores |buy volume minus sell volume| / volume, and VPIN is the rolling mean over a window of buckets. High VPIN means one sided flow. Someone knows something. Trade direction comes from the exchange's own aggressor flag, so I never need the tick rule.
 
@@ -48,10 +47,7 @@ Data comes from Binance's market data only hosts (`data-stream.binance.vision`).
 
 **OFI.** Cont, Kukanov, Stoikov (2014). I build order flow imbalance from every quote change at the touch: bid size added when the bid ticks up, removed when it ticks down, mirrored on the ask side. Their result is that this quantity predicts the next midprice move. I test that claim directly.
 
-</details>
-
-<details>
-<summary><strong>What a real session showed</strong></summary>
+## What a real session showed
 
 I recorded about 3.25 hours of BTCUSDT in six 30 minute chunks: 28224 trades, 106735 quotes, 749.6 BTC of volume, price flat between 82932 and 83107. Real analyzer output on the merged session:
 
@@ -92,10 +88,7 @@ The predictor found no edge: 0.776 accuracy against a 0.809 majority class basel
 
 The market making demo is a toy and this session shows its missing piece. Both legs lost money: open -9.87, gated -10.15. Flow was net selling for three hours (buy share 0.442) into a flat market, and the toy has no inventory control, so it accumulated a long position and ate the spread on every unit. The gate stood down only 1% of the time because VPIN stayed below 0.7 almost everywhere, so the two legs are nearly identical. Compare with the 12 minute session where an over sensitive gate stood down 70% of the time. The demo makes the mechanism visible in both directions, and the real lesson is inventory management, which the toy deliberately omits.
 
-</details>
-
-<details>
-<summary><strong>Module tour</strong></summary>
+## Module tour
 
 - `src/orderbook.rs`: local L2 book with the exchange's snapshot plus diff sync procedure, gap detection, resync.
 - `src/recorder.rs`: tokio websocket client, reconnect with backoff, parquet sessions.
@@ -107,10 +100,7 @@ The market making demo is a toy and this session shows its missing piece. Both l
 - `scripts/dashboard.py`: builds `docs/dashboard.html` from the export output. Single self contained file, plotly.js embedded.
 - `scripts/make_demo_gif.py`: renders `docs/demo.gif` from the same export output. Every frame is real session data.
 
-</details>
-
-<details>
-<summary><strong>Regenerating the dashboard and the GIF</strong></summary>
+## Regenerating the dashboard and the GIF
 
 Both artifacts are generated, never hand made. To rebuild them from a new session:
 
@@ -122,8 +112,6 @@ python3 scripts/make_demo_gif.py --data runs/dashboard_data --out docs/demo.gif
 ```
 
 `scripts/dashboard.py` takes `--data` and `--out`. `scripts/make_demo_gif.py` takes the same, plus `--frames`.
-
-</details>
 
 ## Honest limitations
 
