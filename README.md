@@ -1,12 +1,12 @@
 # toxicflow
 
-**Order-flow toxicity on free crypto data.** Sees whether the microstructure ideas from the quant literature actually show up in markets we can touch. For this reason, a full loop in Rust is being used to: stream Binance market data, maintain a local limit order book, compute toxicity metrics, and test whether order flow predicts short horizon returns.
+**Order-flow toxicity on free crypto data.** Sees whether the microstructure ideas from the quant literature actually show up in markets we can touch. For this reason, a full loop in Rust is being used to: stream Binance market data, maintain a local limit order book, compute toxicity metrics, and test whether order flow predicts short-horizon returns.
 
 Toxicity is the market maker's problem. When informed traders dominate the flow, anyone quoting passively gets picked off: they buy right before the price falls and sell right before it rises. The metrics here all try to measure that adverse selection risk in real time.
 
 ## The three metrics
 
-**VPIN.** Easley, Lopez de Prado, O'Hara. Group trades into equal volume buckets (not time bars, so busy and quiet periods are comparable), measure |buy volume minus sell volume| / volume in each bucket, average over a rolling window. High VPIN means one sided flow: someone knows something. Trade direction comes from the exchange's own aggressor flag, so no tick rule needed.
+**VPIN.** Easley, Lopez de Prado, O'Hara. Group trades into equal volume buckets (not time bars, so busy and quiet periods are comparable), measure |buy volume minus sell volume| / volume in each bucket, average over a rolling window. High VPIN means one-sided flow: someone knows something. Trade direction comes from the exchange's own aggressor flag, so no tick rule needed.
 
 **Kyle's lambda.** The price impact coefficient: rolling OLS slope of midprice changes on signed order flow. High lambda means each unit of flow moves the price a lot. That is a thin book, and thin books are where market makers bleed.
 
@@ -21,11 +21,11 @@ cargo build --release
 ./target/release/toxicflow live --symbol BTCUSDT   # terminal dashboard
 ```
 
-Data comes from Binance's market data only hosts (`data-stream.binance.vision`), which need no API key. Sessions save to parquet: `trades.parquet`, `quotes.parquet`, `meta.json`.
+Data comes from Binance's market data-only hosts (`data-stream.binance.vision`) and requires no API key. Sessions save to parquet: `trades.parquet`, `quotes.parquet`, `meta.json`.
 
 ## What a real session showed
 
-I recorded about 3.25 hours of BTCUSDT in six 30 minute chunks: 28224 trades, 106735 quotes, 749.6 BTC of volume, price flat between 82932 and 83107. Real analyzer output on the merged session:
+I recorded about 3.25 hours of BTCUSDT in six 30-minute chunks: 28224 trades, 106735 quotes, 749.6 BTC of volume, price flat between 82932 and 83107. Real analyzer output on the merged session:
 
 ```
 session: 28224 trades, 106735 quotes
@@ -56,13 +56,13 @@ market-making demo (toy fill model, NOT a strategy):
   pnl open -9.8684, pnl gated -10.1491 | gated 121/11727s (1%) | turnover 990264.5
 ```
 
-Read it as: With 3.25 hours of data, 50 buckets gives about 15 BTC per bucket, which is well sized, and VPIN behaves: mean 0.523, max 0.716, against a buy share of 0.442 and a price that went nowhere. Rerunning with explicit 15 BTC buckets gives mean 0.521, essentially identical. Calibrate the bucket volume to the session and never compare raw VPIN levels to literature values computed on daily buckets. The `--bucket-btc` flag exists for exactly this.
+Read it as: With 3.25 hours of data, 50 buckets give about 15 BTC per bucket, which is well sized, and VPIN behaves: mean 0.523, max 0.716, against a buy share of 0.442 and a price that went nowhere. Rerunning with explicit 15 BTC buckets gives mean 0.521, essentially identical. Calibrate the bucket volume to the session and never compare raw VPIN levels to literature values computed on daily buckets. The `--bucket-btc` flag exists for exactly this.
 
-Kyle's lambda of about 3.5 means each BTC of signed flow moved the mid by roughly $3.50 on 10 second bars. Plausible for BTC.
+Kyle's lambda of about 3.5 means each BTC of signed flow moved the mid by roughly $3.50 on 10-second bars. Plausible for BTC.
 
-The predictor found no edge: 0.776 accuracy against a 0.809 majority class baseline, on 1167 bars. That is 18 times the data of the earlier session and the honest result is the same. The evaluation framework is the deliverable here: purged walk forward splits, no shuffling, calibration tables. It will tell you just as clearly when there is no edge as when there is one.
+The predictor found no edge: 0.776 accuracy against a 0.809 majority-class baseline, on 1167 bars. That is 18 times the data of the earlier session and the honest result is the same. The evaluation framework is the deliverable here: purged walk-forward splits, no shuffling, calibration tables. It will tell you just as clearly when there is no edge as when there is one.
 
-The market making demo is a toy and this session shows its missing piece. Both legs lost money: open -9.87, gated -10.15. Flow was net selling for three hours (buy share 0.442) into a flat market, and the toy has no inventory control, so it accumulated a long position and ate the spread on every unit. The gate stood down only 1% of the time because VPIN stayed below 0.7 almost everywhere, so the two legs are nearly identical. Compare with the 12 minute session where an over sensitive gate stood down 70% of the time. The demo makes the mechanism visible in both directions, and the real lesson is inventory management, which the toy deliberately omits.
+The market making demo is a toy and this session shows its missing piece. Both legs lost money: open -9.87, gated -10.15. Flow was net selling for three hours (buy share 0.442) into a flat market, and the toy has no inventory control, so it accumulated a long position and ate the spread on every unit. The gate stood down only 1% of the time because VPIN stayed below 0.7 almost everywhere, so the two legs are nearly identical. Compare with the 12-minute session where an oversensitive gate stood down 70% of the time. The demo makes the mechanism visible in both directions, and the real lesson is inventory management, which the toy deliberately omits.
 
 
 ## What is in here
@@ -70,15 +70,15 @@ The market making demo is a toy and this session shows its missing piece. Both l
 - `src/orderbook.rs`: local L2 book with the exchange's snapshot plus diff sync procedure, gap detection, resync.
 - `src/recorder.rs`: tokio websocket client, reconnect with backoff, parquet sessions.
 - `src/metrics.rs`: VPIN, Kyle's lambda, OFI. Pure functions, unit tested on synthetic flow.
-- `src/predict.rs`: hand rolled logistic regression, walk forward evaluation with a purge gap. Time series are never shuffled.
-- `src/strategy.rs`: toxicity gated market making demo. Toy fill model, clearly labeled. It exists to show the direction of the effect, not to trade.
-- `src/net.rs`: the sandbox I built this in has no direct internet, so websocket connections tunnel through the egress proxy via CONNECT. You will not need this on a normal machine, but it is harmless there.
+- `src/predict.rs`: hand-rolled logistic regression, walk-forward evaluation with a purge gap. Time series are never shuffled.
+- `src/strategy.rs`: toxicity-gated market-making demo. Toy fill model, clearly labeled. It exists to show the direction of the effect, not to trade.
+- `src/net.rs`: the sandbox I built this in has no direct internet, so WebSocket connections tunnel through the egress proxy via CONNECT. You will not need this on a normal machine, but it is harmless there.
 
 ## Honest limitations
 
 - 3.25 hours of BTC is a session, not a study. Microstructure results need days of data across regimes.
-- Crypto is not equities. No open or close auction, funding rates, 24/7 retail flow. Take any comparison to the equity literature with salt.
-- VPIN itself is debated. It flagged the 2010 flash crash in hindsight and plenty of papers argue it is mostly repackaged volume. My session above is a live demonstration of why calibration matters.
+- Crypto is not equities. No open or close auction, funding rates, 24/7 retail flow. Take any comparison to the equity literature with that in mind.
+- VPIN itself is debated. It flagged the 2010 flash crash in hindsight, and plenty of papers argue it is mostly repackaged volume. My session above is a live demonstration of why calibration matters.
 - The market making demo has a toy fill model: no queue position, no latency, no fees. It demonstrates adverse selection, not a strategy.
 - This is research code, not trading advice. Nothing here should touch real money.
 
