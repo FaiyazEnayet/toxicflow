@@ -1,6 +1,6 @@
 //! Toxicity-gated market-making DEMO.
 //!
-//! This is a toy, not a strategy. The fill model is deliberately naive:
+//! This is a toy, not a strategy. The fill model is naive on purpose:
 //! each second we post `size` on both sides at the touch, and we assume we
 //! get filled by incoming market orders up to our size. There is no queue
 //! position, no latency, no fees. Its only purpose is to show the
