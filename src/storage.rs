@@ -70,34 +70,34 @@ pub fn write_quotes(path: &str, quotes: &[Quote]) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-fn col_i64(batch: &RecordBatch, name: &str) -> Vec<i64> {
+fn col_i64(batch: &RecordBatch, name: &str) -> Result<Vec<i64>, Box<dyn Error>> {
     let a = batch
         .column_by_name(name)
-        .unwrap()
+        .ok_or_else(|| format!("parquet batch is missing column '{name}'"))?
         .as_any()
         .downcast_ref::<Int64Array>()
-        .unwrap();
-    (0..a.len()).map(|i| a.value(i)).collect()
+        .ok_or_else(|| format!("parquet column '{name}' is not int64"))?;
+    Ok((0..a.len()).map(|i| a.value(i)).collect())
 }
 
-fn col_f64(batch: &RecordBatch, name: &str) -> Vec<f64> {
+fn col_f64(batch: &RecordBatch, name: &str) -> Result<Vec<f64>, Box<dyn Error>> {
     let a = batch
         .column_by_name(name)
-        .unwrap()
+        .ok_or_else(|| format!("parquet batch is missing column '{name}'"))?
         .as_any()
         .downcast_ref::<Float64Array>()
-        .unwrap();
-    (0..a.len()).map(|i| a.value(i)).collect()
+        .ok_or_else(|| format!("parquet column '{name}' is not float64"))?;
+    Ok((0..a.len()).map(|i| a.value(i)).collect())
 }
 
-fn col_bool(batch: &RecordBatch, name: &str) -> Vec<bool> {
+fn col_bool(batch: &RecordBatch, name: &str) -> Result<Vec<bool>, Box<dyn Error>> {
     let a = batch
         .column_by_name(name)
-        .unwrap()
+        .ok_or_else(|| format!("parquet batch is missing column '{name}'"))?
         .as_any()
         .downcast_ref::<BooleanArray>()
-        .unwrap();
-    (0..a.len()).map(|i| a.value(i)).collect()
+        .ok_or_else(|| format!("parquet column '{name}' is not boolean"))?;
+    Ok((0..a.len()).map(|i| a.value(i)).collect())
 }
 
 pub fn read_trades(path: &str) -> Result<Vec<Trade>, Box<dyn Error>> {
@@ -106,10 +106,10 @@ pub fn read_trades(path: &str) -> Result<Vec<Trade>, Box<dyn Error>> {
     let mut out = Vec::new();
     for batch in reader {
         let b = batch?;
-        let time = col_i64(&b, "time");
-        let price = col_f64(&b, "price");
-        let qty = col_f64(&b, "qty");
-        let mbm = col_bool(&b, "is_buyer_maker");
+        let time = col_i64(&b, "time")?;
+        let price = col_f64(&b, "price")?;
+        let qty = col_f64(&b, "qty")?;
+        let mbm = col_bool(&b, "is_buyer_maker")?;
         for i in 0..b.num_rows() {
             out.push(Trade {
                 time_ms: time[i],
@@ -128,11 +128,11 @@ pub fn read_quotes(path: &str) -> Result<Vec<Quote>, Box<dyn Error>> {
     let mut out = Vec::new();
     for batch in reader {
         let b = batch?;
-        let time = col_i64(&b, "time");
-        let bp = col_f64(&b, "bid_px");
-        let bq = col_f64(&b, "bid_sz");
-        let ap = col_f64(&b, "ask_px");
-        let aq = col_f64(&b, "ask_sz");
+        let time = col_i64(&b, "time")?;
+        let bp = col_f64(&b, "bid_px")?;
+        let bq = col_f64(&b, "bid_sz")?;
+        let ap = col_f64(&b, "ask_px")?;
+        let aq = col_f64(&b, "ask_sz")?;
         for i in 0..b.num_rows() {
             out.push(Quote {
                 time_ms: time[i],

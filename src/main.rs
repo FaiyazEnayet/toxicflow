@@ -185,6 +185,42 @@ mod tests {
         assert!(r.is_err(), "empty session should fail");
         std::fs::remove_dir_all(&tmp).unwrap();
     }
+
+    #[test]
+    fn read_trades_rejects_wrong_schema_without_panicking() {
+        use arrow::array::{Float64Array, Int64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+
+        // Parquet file missing the "price" column: must be an Err, not a panic.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("qty", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1i64, 2])),
+                Arc::new(Float64Array::from(vec![0.5f64, 0.5])),
+            ],
+        )
+        .unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("toxicflow_bad_schema_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("trades.parquet");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let r = storage::read_trades(path.to_str().unwrap());
+        assert!(r.is_err(), "wrong-schema parquet should be an Err");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 }
 
 fn percentile(mut xs: Vec<f64>, p: f64) -> f64 {
