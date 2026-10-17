@@ -35,7 +35,7 @@ A synchronized local order book feeds VPIN, rolling Kyle lambda and order-flow i
 
 ## Updating this project
 
-Dashboard source language: **Rust and Python**. Generator: `scripts/dashboard.py`. To keep the interactive page, figures, data animation, and README consistent, follow [the coding-agent update guide](AGENT-DASHBOARD-GUIDE.md). The local interactive output is `docs/dashboard.html`.
+Dashboard source language: **Rust and Python**. Generator: `scripts/dashboard.py`. The local interactive output is `docs/dashboard.html`.
 
 ## Run locally
 
