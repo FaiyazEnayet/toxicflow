@@ -138,6 +138,27 @@ impl OrderBook {
     pub fn is_empty(&self) -> bool {
         self.bids.is_empty() && self.asks.is_empty()
     }
+
+    /// True when the book holds both sides and best bid >= best ask.
+    ///
+    /// A crossed book cannot arise from a correctly synchronized exchange
+    /// stream; it signals stale data, a missed update, or a bad snapshot.
+    pub fn is_crossed(&self) -> bool {
+        match (self.best_bid(), self.best_ask()) {
+            (Some((b, _)), Some((a, _))) => b >= a,
+            _ => false,
+        }
+    }
+
+    /// Bid levels as (price, qty), ascending by price.
+    pub fn bid_levels(&self) -> Vec<(f64, f64)> {
+        self.bids.iter().map(|(t, q)| (from_ticks(*t), *q)).collect()
+    }
+
+    /// Ask levels as (price, qty), ascending by price.
+    pub fn ask_levels(&self) -> Vec<(f64, f64)> {
+        self.asks.iter().map(|(t, q)| (from_ticks(*t), *q)).collect()
+    }
 }
 
 #[cfg(test)]
@@ -205,5 +226,141 @@ mod tests {
         assert_eq!(b.midprice(), None);
         assert_eq!(b.touch(), None);
         assert_eq!(b.imbalance(5), None);
+    }
+
+    #[test]
+    fn exact_next_update_applies() {
+        let mut b = book();
+        let r = b.apply_diff(11, 11, &[(100.0, 8.0)], &[]);
+        assert_eq!(r, SyncResult::Applied);
+        assert_eq!(b.last_id, 11);
+        assert_eq!(b.best_bid(), Some((100.0, 8.0)));
+    }
+
+    #[test]
+    fn overlapping_redelivery_is_idempotent() {
+        let mut b = book();
+        // same range re-applied: state must not change
+        let r = b.apply_diff(9, 10, &[(100.0, 5.0)], &[(100.1, 4.0)]);
+        assert_eq!(r, SyncResult::Applied);
+        assert_eq!(b.last_id, 10);
+        assert_eq!(b.best_bid(), Some((100.0, 5.0)));
+        assert_eq!(b.best_ask(), Some((100.1, 4.0)));
+    }
+
+    #[test]
+    fn partially_overlapping_event_applies() {
+        let mut b = book();
+        // U <= last_id < u: newer tail must be honored
+        let r = b.apply_diff(10, 12, &[(100.0, 9.0)], &[]);
+        assert_eq!(r, SyncResult::Applied);
+        assert_eq!(b.last_id, 12);
+        assert_eq!(b.best_bid(), Some((100.0, 9.0)));
+    }
+
+    #[test]
+    fn duplicate_update_id_applies_idempotently() {
+        let mut b = book();
+        let r = b.apply_diff(10, 10, &[(100.0, 5.0)], &[]);
+        assert_eq!(r, SyncResult::Applied);
+        assert_eq!(b.last_id, 10);
+        assert_eq!(b.best_bid(), Some((100.0, 5.0)));
+    }
+
+    #[test]
+    fn one_past_boundary_is_gap() {
+        let mut b = book();
+        // U == last_id + 2 misses exactly one update
+        let r = b.apply_diff(12, 12, &[], &[]);
+        assert_eq!(r, SyncResult::Gap);
+        assert_eq!(b.last_id, 10);
+    }
+
+    #[test]
+    fn fully_stale_range_ignored() {
+        let mut b = book();
+        // u < last_id: entirely in the past
+        let r = b.apply_diff(7, 9, &[(100.0, 1.0)], &[(100.1, 1.0)]);
+        assert_eq!(r, SyncResult::Stale);
+        assert_eq!(b.best_bid(), Some((100.0, 5.0)));
+        assert_eq!(b.best_ask(), Some((100.1, 4.0)));
+    }
+
+    #[test]
+    fn snapshot_replaces_book_entirely() {
+        let mut b = book();
+        b.from_snapshot(&[(200.0, 1.0)], &[(200.5, 1.0)], 500);
+        assert_eq!(b.best_bid(), Some((200.0, 1.0)));
+        assert_eq!(b.best_ask(), Some((200.5, 1.0)));
+        assert_eq!(b.last_id, 500);
+        assert_eq!(b.len(), 2);
+        // old levels are gone
+        assert_eq!(b.bid_levels(), vec![(200.0, 1.0)]);
+    }
+
+    #[test]
+    fn snapshot_drops_zero_and_negative_qty() {
+        let mut b = OrderBook::new();
+        b.from_snapshot(
+            &[(100.0, 5.0), (99.9, 0.0), (99.8, -2.0)],
+            &[(100.1, 0.0)],
+            1,
+        );
+        assert_eq!(b.bid_levels(), vec![(100.0, 5.0)]);
+        assert_eq!(b.ask_levels(), Vec::<(f64, f64)>::new());
+    }
+
+    #[test]
+    fn crossed_book_detected() {
+        let mut b = OrderBook::new();
+        // bid above ask: crossed
+        b.from_snapshot(&[(100.2, 5.0)], &[(100.1, 4.0)], 1);
+        assert!(b.is_crossed());
+        // a diff that uncrosses clears the flag
+        b.apply_diff(2, 2, &[(100.2, 0.0), (99.9, 5.0)], &[]);
+        assert!(!b.is_crossed());
+    }
+
+    #[test]
+    fn crossed_book_edge_cases() {
+        let b = OrderBook::new();
+        assert!(!b.is_crossed()); // empty: not crossed, just empty
+        let mut one_sided = OrderBook::new();
+        one_sided.from_snapshot(&[(100.0, 5.0)], &[], 1);
+        assert!(!one_sided.is_crossed());
+        // locked market (bid == ask) counts as crossed
+        let mut locked = OrderBook::new();
+        locked.from_snapshot(&[(100.0, 5.0)], &[(100.0, 4.0)], 1);
+        assert!(locked.is_crossed());
+    }
+
+    #[test]
+    fn level_accessors_cover_whole_book() {
+        let b = book();
+        assert_eq!(b.bid_levels(), vec![(99.9, 3.0), (100.0, 5.0)]);
+        assert_eq!(b.ask_levels(), vec![(100.1, 4.0), (100.2, 2.0)]);
+    }
+
+    #[test]
+    fn removing_absent_level_is_noop() {
+        let mut b = book();
+        let before = b.bid_levels();
+        let r = b.apply_diff(11, 11, &[(77.7, 0.0)], &[(88.8, 0.0)]);
+        assert_eq!(r, SyncResult::Applied);
+        assert_eq!(b.bid_levels(), before);
+    }
+
+    #[test]
+    fn book_emptied_by_diffs_stays_usable() {
+        let mut b = book();
+        b.apply_diff(11, 11, &[(100.0, 0.0), (99.9, 0.0)], &[(100.1, 0.0), (100.2, 0.0)]);
+        assert!(b.is_empty());
+        assert_eq!(b.best_bid(), None);
+        assert_eq!(b.midprice(), None);
+        assert!(!b.is_crossed());
+        // and can be repopulated
+        let r = b.apply_diff(12, 12, &[(100.0, 5.0)], &[(100.1, 4.0)]);
+        assert_eq!(r, SyncResult::Applied);
+        assert_eq!(b.best_bid(), Some((100.0, 5.0)));
     }
 }

@@ -130,11 +130,23 @@ impl Session {
 
     /// Merge a fetched snapshot with the buffered diffs. Returns true when
     /// the book is in sync afterwards.
+    ///
+    /// Follows the exchange procedure: events fully covered by the snapshot
+    /// (u <= lastUpdateId) are dropped, and the first remaining event must
+    /// satisfy U <= lastUpdateId + 1; otherwise the snapshot is too old and
+    /// we refetch.
     fn merge_snapshot(&mut self, snap: &Snapshot) -> bool {
-        let first_u = self.buffer.first().and_then(|e| e["U"].as_i64());
-        if let Some(fu) = first_u {
-            if snap.last_update_id < fu {
-                return false; // snapshot older than our buffer: refetch
+        let first_live_u = self.buffer.iter().find_map(|e| {
+            let u = e["u"].as_i64().unwrap_or(0);
+            if u > snap.last_update_id {
+                e["U"].as_i64()
+            } else {
+                None
+            }
+        });
+        if let Some(fu) = first_live_u {
+            if snap.last_update_id + 1 < fu {
+                return false; // snapshot too old to continue the stream: refetch
             }
         }
         let bids: Vec<(f64, f64)> = snap.bids.iter().map(parse_pair).collect();
@@ -305,4 +317,159 @@ pub async fn record_session(
         serde_json::to_string_pretty(&meta)?,
     )?;
     Ok(meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A depthUpdate-shaped event, as received on the websocket stream.
+    fn depth_event(
+        u_first: i64,
+        u_last: i64,
+        bids: &[(f64, f64)],
+        asks: &[(f64, f64)],
+    ) -> serde_json::Value {
+        let pairs = |lv: &[(f64, f64)]| {
+            lv.iter()
+                .map(|(p, q)| vec![p.to_string(), q.to_string()])
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "e": "depthUpdate",
+            "E": 1_700_000_000_000i64,
+            "U": u_first,
+            "u": u_last,
+            "b": pairs(bids),
+            "a": pairs(asks),
+        })
+    }
+
+    fn snapshot(last_update_id: i64) -> Snapshot {
+        Snapshot {
+            last_update_id,
+            bids: vec![
+                ("100.0".to_string(), "5.0".to_string()),
+                ("99.9".to_string(), "3.0".to_string()),
+            ],
+            asks: vec![
+                ("100.1".to_string(), "4.0".to_string()),
+                ("100.2".to_string(), "2.0".to_string()),
+            ],
+        }
+    }
+
+    #[test]
+    fn merge_applies_buffered_diffs_after_snapshot() {
+        let mut s = Session::new();
+        s.buffer.push(depth_event(101, 102, &[(100.0, 6.0)], &[]));
+        s.buffer
+            .push(depth_event(103, 103, &[(99.9, 0.0)], &[(100.2, 9.0)]));
+        assert!(s.merge_snapshot(&snapshot(100)));
+        assert!(s.buffer.is_empty());
+        assert_eq!(s.book.best_bid(), Some((100.0, 6.0)));
+        // 99.9 removed, only 100.0 remains on the bid side
+        assert_eq!(s.book.bid_levels(), vec![(100.0, 6.0)]);
+        assert_eq!(s.book.ask_levels(), vec![(100.1, 4.0), (100.2, 9.0)]);
+        assert_eq!(s.book.last_id, 103);
+        // each applied event recorded a quote
+        assert_eq!(s.quotes.len(), 2);
+    }
+
+    #[test]
+    fn merge_skips_buffered_events_older_than_snapshot() {
+        let mut s = Session::new();
+        // fully stale: u <= snapshot id
+        s.buffer.push(depth_event(95, 98, &[(100.0, 99.0)], &[]));
+        // overlapping the snapshot edge
+        s.buffer.push(depth_event(99, 101, &[(100.0, 7.0)], &[]));
+        assert!(s.merge_snapshot(&snapshot(100)));
+        assert_eq!(s.book.best_bid(), Some((100.0, 7.0)));
+        assert_eq!(s.book.last_id, 101);
+    }
+
+    #[test]
+    fn merge_refetches_when_snapshot_predates_buffer() {
+        let mut s = Session::new();
+        s.buffer.push(depth_event(201, 202, &[(100.0, 6.0)], &[]));
+        // snapshot is older than the first buffered event: cannot merge
+        assert!(!s.merge_snapshot(&snapshot(100)));
+        // book untouched, buffer retained for the next attempt
+        assert_eq!(s.book.last_id, -1);
+        assert_eq!(s.buffer.len(), 1);
+    }
+
+    #[test]
+    fn merge_refetches_on_gap_inside_buffer() {
+        let mut s = Session::new();
+        s.buffer.push(depth_event(101, 102, &[(100.0, 6.0)], &[]));
+        // update 103 never arrived
+        s.buffer.push(depth_event(104, 104, &[(100.0, 8.0)], &[]));
+        assert!(!s.merge_snapshot(&snapshot(100)));
+    }
+
+    #[test]
+    fn merge_with_empty_buffer_syncs_to_snapshot() {
+        let mut s = Session::new();
+        assert!(s.merge_snapshot(&snapshot(100)));
+        assert_eq!(s.book.best_bid(), Some((100.0, 5.0)));
+        assert_eq!(s.book.last_id, 100);
+        assert!(s.quotes.is_empty());
+    }
+
+    #[test]
+    fn on_depth_gap_keeps_triggering_event_for_resync() {
+        let mut s = Session::new();
+        // drive the session to synced state first
+        s.buffer.push(depth_event(101, 101, &[], &[]));
+        assert!(s.merge_snapshot(&snapshot(100)));
+        s.synced = true;
+
+        // a gap: the triggering event must be retained as the new buffer head
+        let gap = depth_event(110, 111, &[(100.0, 6.0)], &[]);
+        s.on_depth(&gap, "BTCUSDT");
+        assert!(!s.synced);
+        assert_eq!(s.buffer.len(), 1);
+        assert_eq!(s.buffer[0]["U"].as_i64(), Some(110));
+
+        // a snapshot that cannot continue the stream forces another refetch:
+        // first live event has U=110, so lastUpdateId must be >= 109
+        let mut too_old = snapshot(100);
+        too_old.last_update_id = 108;
+        assert!(!s.merge_snapshot(&too_old));
+        // lastUpdateId = 109 satisfies U <= lastUpdateId + 1: merges cleanly
+        let mut snap2 = snapshot(100);
+        snap2.last_update_id = 109;
+        assert!(s.merge_snapshot(&snap2));
+        assert_eq!(s.book.best_bid(), Some((100.0, 6.0)));
+        assert_eq!(s.book.last_id, 111);
+    }
+
+    #[test]
+    fn merge_accepts_snapshot_covering_part_of_buffer() {
+        // The snapshot may be newer than some buffered events; those are
+        // simply skipped as stale and the stream continues.
+        let mut s = Session::new();
+        s.buffer.push(depth_event(101, 102, &[(100.0, 6.0)], &[]));
+        s.buffer.push(depth_event(103, 104, &[(100.0, 8.0)], &[]));
+        let mut snap = snapshot(100);
+        snap.last_update_id = 103;
+        assert!(s.merge_snapshot(&snap));
+        assert_eq!(s.book.best_bid(), Some((100.0, 8.0)));
+        assert_eq!(s.book.last_id, 104);
+    }
+
+    #[test]
+    fn on_depth_stale_event_leaves_book_alone() {
+        let mut s = Session::new();
+        s.buffer.push(depth_event(101, 101, &[], &[]));
+        assert!(s.merge_snapshot(&snapshot(100)));
+        s.synced = true;
+        let before = s.book.bid_levels();
+        let n_quotes = s.quotes.len();
+        s.on_depth(&depth_event(90, 95, &[(100.0, 1.0)], &[]), "BTCUSDT");
+        assert!(s.synced);
+        assert_eq!(s.book.bid_levels(), before);
+        assert_eq!(s.quotes.len(), n_quotes); // stale event records nothing
+    }
 }
