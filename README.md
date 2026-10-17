@@ -1,17 +1,18 @@
-<p align="center"><img src="docs/readme-banner.svg" alt="Toxicflow: Order-flow measurement and execution-risk research" width="1200"></p>
+<p align="center"><img src="docs/readme-banner.svg?v=type-20261017b" alt="Toxicflow: Order-flow measurement and execution-risk research" width="1200"></p>
 
 [![Tests](https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml/badge.svg)](https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-007EC6)](LICENSE) ![Rust 2021 edition](https://img.shields.io/badge/Rust-2021%20edition-A65E2E) ![Built with Tokio + Parquet](https://img.shields.io/badge/built%20with-Tokio%20%2B%20Parquet-555555) [![Interactive demo](https://img.shields.io/badge/demo-interactive-4C9D39)](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)
 
-<p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><b>Open interactive demo</b></a> · <a href="docs/dashboard.html">HTML file</a> · <a href="#method">Method</a> · <a href="#run-locally">Run locally</a> · <a href="#limitations">Limitations</a></p>
+<p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><b>Open interactive demo</b></a> · <a href="#method">Method</a> · <a href="#run-locally">Run locally</a></p>
 
 # Toxicflow
 
 Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information. The dashboard keeps weak results visible rather than turning diagnostics into trading claims.
 
-**Rust · Tokio · Parquet · Python visualization**
 
-[![Toxicflow demo](docs/demo.gif?v=data-20261017)](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)
+[![Toxicflow demo](docs/demo.gif?v=showcase-20261017b)](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)
 
+
+The important question is whether a toxicity signal arrives early enough to change an execution decision. Price, order flow and VPIN should therefore be read on the same clock, alongside calibration and baseline comparisons. The recorded experiment remains visible even where predictive performance offers little advantage over a simple reference model.
 
 ## Explore
 
