@@ -10,7 +10,7 @@ Toxicflow records exchange order flow, reconstructs market state and tests wheth
 
 **Rust · Tokio · Parquet · Python visualization**
 
-[![Toxicflow demo](docs/demo.gif)](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)
+[![Toxicflow demo](docs/demo.gif?v=data-20261017)](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)
 
 
 ## Explore
