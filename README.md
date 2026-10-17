@@ -1,6 +1,6 @@
 # toxicflow
 
-![tests](https://img.shields.io/badge/tests-23%2F23%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-51%2F51%20passing-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![rust](https://img.shields.io/badge/rust-1.99-orange)
 
