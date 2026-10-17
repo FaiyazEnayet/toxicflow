@@ -1,3 +1,5 @@
 beautifulsoup4>=4.11
 
 plotly>=5.0
+
+pandas>=1.5
