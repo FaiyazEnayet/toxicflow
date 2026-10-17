@@ -202,9 +202,20 @@ def main():
     args = ap.parse_args()
     fig = build(args.data)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    fig.write_html(args.out, include_plotlyjs=True, full_html=True)
+    with open(args.out, "w", encoding="utf-8") as fh:
+        fh.write(_portfolio_html(fig.to_html(include_plotlyjs=True, full_html=True)))
     print(f"dashboard written -> {args.out}")
 
+
+
+def _portfolio_html(raw):
+    """Presentation-only transform of this run’s freshly calculated figures."""
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "portfolio_ui"))
+    from renderer import render_html
+    return render_html(root, 'toxicflow', raw)[0]
 
 if __name__ == "__main__":
     main()
