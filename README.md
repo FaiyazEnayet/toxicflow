@@ -33,6 +33,10 @@ A synchronized local order book feeds VPIN, rolling Kyle lambda and order-flow i
 | Toy market-making PnL | Open -9.87; toxicity-gated -10.15 |
 | Conclusion | No demonstrated predictive or trading edge in this session |
 
+## Updating this project
+
+Dashboard source language: **Rust and Python**. Generator: `scripts/dashboard.py`. To keep the interactive page, figures, data animation, and README consistent, follow [the coding-agent update guide](AGENT-DASHBOARD-GUIDE.md). The local interactive output is `docs/dashboard.html`.
+
 ## Run locally
 
 
