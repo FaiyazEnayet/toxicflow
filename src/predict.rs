@@ -335,4 +335,40 @@ mod tests {
             rep.baseline
         );
     }
+
+    #[test]
+    fn build_dataset_prefix_invariant_to_appended_quote() {
+        // 50 quotes every 10s, then one far-future quote after a gap.
+        // Rows built from the prefix alone must match the rows built when
+        // the future quote is appended: no feature may see the future.
+        let mut quotes: Vec<Quote> = (0..50)
+            .map(|i| {
+                let mid = 100.0 + i as f64 * 0.01;
+                Quote {
+                    time_ms: i as i64 * 10_000,
+                    bid_px: mid - 0.05,
+                    bid_sz: 6.0,
+                    ask_px: mid + 0.05,
+                    ask_sz: 4.0,
+                }
+            })
+            .collect();
+        let prefix = quotes.clone();
+        quotes.push(Quote {
+            time_ms: 600_000,
+            bid_px: 119.95,
+            bid_sz: 2.0,
+            ask_px: 120.05,
+            ask_sz: 8.0,
+        });
+        let trades: Vec<Trade> = Vec::new();
+        let ds_prefix = build_dataset(&prefix, &trades, 10_000, 2);
+        let ds_full = build_dataset(&quotes, &trades, 10_000, 2);
+        assert!(ds_prefix.len() >= 40, "only {} rows", ds_prefix.len());
+        assert!(ds_full.len() > ds_prefix.len());
+        for (i, (a, b)) in ds_prefix.iter().zip(ds_full.iter()).enumerate() {
+            assert_eq!(a.features(), b.features(), "row {i} changed after appending a future quote");
+            assert_eq!(a.target, b.target, "row {i} target changed after appending a future quote");
+        }
+    }
 }
