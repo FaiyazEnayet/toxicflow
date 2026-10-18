@@ -236,6 +236,12 @@ pub async fn record_session(
     minutes: f64,
     out_dir: &str,
 ) -> Result<SessionMeta, Box<dyn Error>> {
+    // Validate the connection policy before the retry loop: a bad proxy
+    // URL will never succeed, so retrying it until the deadline would
+    // just burn the whole session. Fail fast with an actionable error.
+    let proxy = crate::net::ProxyConfig::from_env()
+        .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+    eprintln!("record: connecting via {}", proxy.describe());
     let sym = symbol.to_lowercase();
     let url = format!("{WS_HOST}/stream?streams={sym}@aggTrade/{sym}@depth@100ms");
     let deadline = Instant::now() + Duration::from_secs_f64(minutes * 60.0);
@@ -471,5 +477,44 @@ mod tests {
         assert!(s.synced);
         assert_eq!(s.book.bid_levels(), before);
         assert_eq!(s.quotes.len(), n_quotes); // stale event records nothing
+    }
+
+    /// Serializes tests that mutate the proxy env vars (process-global).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn record_session_fails_fast_on_bad_proxy_config() {
+        // An invalid proxy URL is a configuration error, not a transient
+        // network failure: record_session must return it immediately
+        // instead of retrying until the session deadline.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev_lower = std::env::var("https_proxy").ok();
+        let prev_upper = std::env::var("HTTPS_PROXY").ok();
+        std::env::set_var("https_proxy", "socks5://proxy:8080");
+        std::env::remove_var("HTTPS_PROXY");
+        let t0 = std::time::Instant::now();
+        // 3-second deadline: without fail-fast this would take ~3s of
+        // backoff retries; with fail-fast it returns in milliseconds.
+        let err = record_session("BTCUSDT", 0.05, "/tmp/tf8-should-not-exist")
+            .await
+            .expect_err("bad proxy config must fail");
+        let elapsed = t0.elapsed();
+        match prev_lower {
+            Some(v) => std::env::set_var("https_proxy", v),
+            None => std::env::remove_var("https_proxy"),
+        }
+        match prev_upper {
+            Some(v) => std::env::set_var("HTTPS_PROXY", v),
+            None => std::env::remove_var("HTTPS_PROXY"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("invalid proxy configuration: "),
+            "actionable error, got: {msg}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "failed fast in {elapsed:?}, not after the deadline"
+        );
     }
 }

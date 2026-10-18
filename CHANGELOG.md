@@ -1,5 +1,9 @@
 # Changelog
 
+## [v1.2.3] - 2026-10-18
+### Fixed
+- Connection policy (`src/net.rs`): the recorder no longer assumes an authenticated egress proxy. With no proxy configured it connects directly via TLS; with a proxy URL it tunnels through HTTP CONNECT, accepting both `http://host:port` and `http://user:pass@host:port` forms. A malformed proxy URL is validated once up front and fails fast with an actionable error instead of being retried until the session deadline (`record_session` checks the policy before its retry loop). Credentials are redacted in all log and error output. Regression tests: direct / unauthenticated-proxy / authenticated-proxy fixtures against local endpoints, proxy refusal surfacing, and a fail-fast test proving a bad proxy URL returns immediately rather than burning the deadline.
+
 ## [v1.2.2] - 2026-10-18
 ### Fixed
 - `run_mm` no longer peeks at the future: the volume-bucket size is frozen from a leading 300-second calibration window instead of whole-session volume; each second is quoted at the last quote observed strictly before that second starts (second 0 is never quoted); the VPIN gate reads only VPIN completed strictly before the second starts. Appending future trades now leaves earlier bucket thresholds, posted quotes, gate decisions and PnL unchanged. Regression tests: a hand-computed two-trade fixture matching inventory/cash with the decision delay, and a future-trades invariance check (both fail on the old simulation). README toy PnL refreshed on the recorded session: open -11.34, gated -0.84. Test count: 56 → 58.
