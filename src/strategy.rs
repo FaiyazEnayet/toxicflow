@@ -7,11 +7,18 @@
 //! *direction* of the effect: standing down when VPIN is high avoids
 //! trading into informed flow in the simulator.
 //!
+//! The simulation is causal: the bucket volume is frozen from a leading
+//! calibration window (never from whole-session volume), the quote posted
+//! for second `i` is the last quote observed strictly before second `i`
+//! starts, and the gate for second `i` uses only VPIN completed strictly
+//! before second `i` starts. Appending future trades cannot change earlier
+//! bucket thresholds, posted quotes, gate decisions or PnL.
+//!
 //! Do not trade this.
 
 use std::collections::BTreeMap;
 
-use crate::metrics::{vpin, volume_buckets, Quote, Trade};
+use crate::metrics::{vpin, volume_buckets_sized, Quote, Trade};
 
 pub struct MmConfig {
     /// quote size in base units per side per second
@@ -20,6 +27,8 @@ pub struct MmConfig {
     pub vpin_threshold: f64,
     pub vpin_buckets: usize,
     pub vpin_window: usize,
+    /// leading seconds used to size volume buckets; frozen afterwards
+    pub calibration_secs: usize,
 }
 
 impl Default for MmConfig {
@@ -29,6 +38,7 @@ impl Default for MmConfig {
             vpin_threshold: 0.7,
             vpin_buckets: 50,
             vpin_window: 20,
+            calibration_secs: 300,
         }
     }
 }
@@ -45,6 +55,12 @@ pub struct MmReport {
 
 /// Run the quoting simulation. Returns marked-to-mid PnL with the gate on
 /// and off, in quote currency.
+///
+/// Causal discipline: the volume-bucket size is frozen from the leading
+/// `calibration_secs` (later trades cannot move earlier bucket thresholds);
+/// second `i` is quoted at the last quote observed strictly before second
+/// `i` starts (second 0 is never quoted); the gate for second `i` reads
+/// only VPIN completed strictly before second `i` starts.
 pub fn run_mm(
     quotes: &[Quote],
     trades: &[Trade],
@@ -60,15 +76,15 @@ pub fn run_mm(
     if n < 30 {
         return None;
     }
-    let mut bid = vec![f64::NAN; n];
-    let mut ask = vec![f64::NAN; n];
+    let mut sec_bid = vec![f64::NAN; n];
+    let mut sec_ask = vec![f64::NAN; n];
     let mut buy_v = vec![0.0; n];
     let mut sell_v = vec![0.0; n];
     for q in quotes {
         let i = ((q.time_ms - t0) / 1000) as usize;
         if i < n {
-            bid[i] = q.bid_px;
-            ask[i] = q.ask_px;
+            sec_bid[i] = q.bid_px;
+            sec_ask[i] = q.ask_px;
         }
     }
     for t in trades {
@@ -85,16 +101,28 @@ pub fn run_mm(
     let mut lb = f64::NAN;
     let mut la = f64::NAN;
     for i in 0..n {
-        if bid[i].is_nan() {
-            bid[i] = lb;
-            ask[i] = la;
+        if sec_bid[i].is_nan() {
+            sec_bid[i] = lb;
+            sec_ask[i] = la;
         } else {
-            lb = bid[i];
-            la = ask[i];
+            lb = sec_bid[i];
+            la = sec_ask[i];
         }
     }
-    // trailing VPIN sampled per second
-    let buckets = volume_buckets(trades, cfg.vpin_buckets);
+    // Bucket size from the calibration window only: frozen before the
+    // session, so later trades cannot move earlier bucket thresholds.
+    let calib_end = t0 + cfg.calibration_secs as i64 * 1000;
+    let calib_vol: f64 = trades
+        .iter()
+        .filter(|t| t.time_ms < calib_end)
+        .map(|t| t.qty)
+        .sum();
+    if calib_vol <= 0.0 {
+        return None;
+    }
+    let buckets = volume_buckets_sized(trades, calib_vol / cfg.vpin_buckets as f64);
+    // trailing VPIN sampled per second; a bucket completed at time t is
+    // visible to the gate only for seconds starting strictly after t.
     let vp = vpin(&buckets, cfg.vpin_window);
     let mut vpin_by_sec = BTreeMap::new();
     for (t, v) in &vp {
@@ -102,7 +130,7 @@ pub fn run_mm(
     }
     let vpin_at = |sec: usize| -> f64 {
         let key = (t0 / 1000 + sec as i64) as i64;
-        vpin_by_sec.range(..=key).next_back().map(|(_, v)| *v).unwrap_or(0.0)
+        vpin_by_sec.range(..key).next_back().map(|(_, v)| *v).unwrap_or(0.0)
     };
 
     let mut cash_open = 0.0;
@@ -112,26 +140,29 @@ pub fn run_mm(
     let mut turnover = 0.0;
     let mut gated_secs = 0usize;
     for i in 0..n {
-        if bid[i].is_nan() {
+        // decision delay: second i quotes at the last quote seen strictly
+        // before second i starts; second 0 has no prior quote and is skipped.
+        if i == 0 || sec_bid[i - 1].is_nan() {
             continue;
         }
+        let (bid, ask) = (sec_bid[i - 1], sec_ask[i - 1]);
         let fill_b = cfg.size.min(sell_v[i]); // we buy: pay the bid
         let fill_a = cfg.size.min(buy_v[i]); // we sell: earn the ask
         // ungated leg always quotes
-        cash_open -= fill_b * bid[i];
-        cash_open += fill_a * ask[i];
+        cash_open -= fill_b * bid;
+        cash_open += fill_a * ask;
         inv_open += fill_b - fill_a;
         // gated leg stands down in toxic regimes
         if vpin_at(i) > cfg.vpin_threshold {
             gated_secs += 1;
             continue;
         }
-        cash_gated -= fill_b * bid[i];
-        cash_gated += fill_a * ask[i];
+        cash_gated -= fill_b * bid;
+        cash_gated += fill_a * ask;
         inv_gated += fill_b - fill_a;
-        turnover += (fill_b + fill_a) * (bid[i] + ask[i]) / 2.0;
+        turnover += (fill_b + fill_a) * (bid + ask) / 2.0;
     }
-    let last_mid = (bid[n - 1] + ask[n - 1]) / 2.0;
+    let last_mid = (sec_bid[n - 1] + sec_ask[n - 1]) / 2.0;
     Some(MmReport {
         seconds: n,
         seconds_gated: gated_secs,
@@ -205,5 +236,67 @@ mod tests {
         let r = run_mm(&q, &t, &cfg).expect("sim failed");
         assert_eq!(r.seconds_gated, 0);
         assert!((r.pnl_gated - r.pnl_open).abs() < 1e-9);
+    }
+
+    fn quote_at(t: i64, bid: f64, ask: f64) -> Quote {
+        Quote { time_ms: t, bid_px: bid, bid_sz: 5.0, ask_px: ask, ask_sz: 5.0 }
+    }
+
+    #[test]
+    fn hand_computed_two_trade_fixture() {
+        // Decision delay, hand-computed: second 0 is never quoted (no prior
+        // quote); second 1 fills at second 0's quote (bid 99 / ask 101),
+        // not at the quote printed inside second 1 (bid 199 / ask 201).
+        // Trade A (second 0) is never filled; trade B (second 1, buyer
+        // takes) sells 0.01 at 101. Mark at the last mid, 110.
+        let quotes = vec![
+            quote_at(0, 99.0, 101.0),
+            quote_at(1_200, 199.0, 201.0),
+            quote_at(60_000, 109.0, 111.0),
+        ];
+        let trades = vec![
+            Trade { time_ms: 500, price: 100.0, qty: 0.01, is_buyer_maker: true },
+            Trade { time_ms: 1_500, price: 100.0, qty: 0.01, is_buyer_maker: false },
+        ];
+        let cfg = MmConfig {
+            size: 0.01,
+            vpin_threshold: 2.0,
+            calibration_secs: 30,
+            ..MmConfig::default()
+        };
+        let r = run_mm(&quotes, &trades, &cfg).expect("sim failed");
+        assert_eq!(r.seconds, 61);
+        assert_eq!(r.seconds_gated, 0);
+        assert!((r.inventory_end + 0.01).abs() < 1e-9, "inv {}", r.inventory_end);
+        assert!((r.turnover - 1.0).abs() < 1e-9, "turnover {}", r.turnover);
+        // cash +1.01 from the fill, marked short 0.01 at 110
+        assert!((r.pnl_open + 0.09).abs() < 1e-9, "pnl_open {}", r.pnl_open);
+        assert!((r.pnl_gated + 0.09).abs() < 1e-9, "pnl_gated {}", r.pnl_gated);
+    }
+
+    #[test]
+    fn appended_future_trades_do_not_change_history() {
+        // Trades appended after the last quote extend no simulated second
+        // and sit outside the calibration window: bucket thresholds,
+        // posted quotes, gate decisions and PnL must be bit-identical.
+        let (q, t) = synth(600, true);
+        let mut t2 = t.clone();
+        for i in 0..2400 {
+            t2.push(Trade {
+                time_ms: 600_000 + i as i64 * 250,
+                price: 120.0,
+                qty: 0.05,
+                is_buyer_maker: i % 2 == 0,
+            });
+        }
+        let cfg = MmConfig { vpin_threshold: 0.55, ..MmConfig::default() };
+        let r1 = run_mm(&q, &t, &cfg).expect("sim failed");
+        let r2 = run_mm(&q, &t2, &cfg).expect("sim failed");
+        assert_eq!(r1.seconds, r2.seconds);
+        assert_eq!(r1.seconds_gated, r2.seconds_gated);
+        assert!((r1.pnl_open - r2.pnl_open).abs() < 1e-12, "{} vs {}", r1.pnl_open, r2.pnl_open);
+        assert!((r1.pnl_gated - r2.pnl_gated).abs() < 1e-12, "{} vs {}", r1.pnl_gated, r2.pnl_gated);
+        assert!((r1.turnover - r2.turnover).abs() < 1e-12);
+        assert!((r1.inventory_end - r2.inventory_end).abs() < 1e-12);
     }
 }
