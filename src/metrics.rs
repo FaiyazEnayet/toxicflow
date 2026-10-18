@@ -222,23 +222,36 @@ pub fn ofi_events(quotes: &[Quote]) -> Vec<f64> {
 
 /// Aggregate per-event OFI into fixed-length bars (bar_ms milliseconds).
 /// Returns (bar start ms, ofi sum, last mid, last spread, last imbalance).
+///
+/// Bars with no quotes carry forward the most recently *observed* quote's
+/// mid, spread and imbalance with zero OFI. The incoming quote is never
+/// used to backfill bars it arrived after, so prefix bars are unaffected
+/// by quotes appended later.
 pub fn ofi_bars(quotes: &[Quote], events: &[f64], bar_ms: i64) -> Vec<(i64, f64, f64, f64, f64)> {
     if quotes.is_empty() || bar_ms <= 0 {
         return Vec::new();
     }
     let t0 = quotes[0].time_ms / bar_ms * bar_ms;
     let mut bars: Vec<(i64, f64, f64, f64, f64)> = Vec::new();
+    let mut prev = &quotes[0];
     for (q, e) in quotes.iter().zip(events.iter()) {
         let b = q.time_ms / bar_ms * bar_ms - t0;
         let idx = b as usize / bar_ms as usize;
         while bars.len() <= idx {
-            bars.push((t0 + bars.len() as i64 * bar_ms, 0.0, q.mid(), q.spread(), q.imbalance()));
+            bars.push((
+                t0 + bars.len() as i64 * bar_ms,
+                0.0,
+                prev.mid(),
+                prev.spread(),
+                prev.imbalance(),
+            ));
         }
         let row = &mut bars[idx];
         row.1 += e;
         row.2 = q.mid();
         row.3 = q.spread();
         row.4 = q.imbalance();
+        prev = q;
     }
     bars
 }
@@ -352,5 +365,65 @@ mod tests {
         let bars = ofi_bars(&qs, &e, 10_000);
         assert_eq!(bars.len(), 10);
         assert!(bars.iter().all(|b| b.1.abs() < 1e-9));
+    }
+
+    #[test]
+    fn ofi_bars_gap_carries_last_observed_quote() {
+        // Quotes at 0s (mid 100) and 30s (mid 110): the empty 10s and 20s
+        // bars must carry the 0s quote, never the future 30s quote.
+        let qs = vec![
+            q(0, 99.95, 6.0, 100.05, 4.0),
+            q(30_000, 109.9, 3.0, 110.1, 7.0),
+        ];
+        let e = ofi_events(&qs);
+        let bars = ofi_bars(&qs, &e, 10_000);
+        assert_eq!(bars.len(), 4);
+        for b in &bars[1..3] {
+            assert!((b.2 - 100.0).abs() < 1e-9, "empty bar mid must come from the 0s quote, got {}", b.2);
+            assert!((b.3 - 0.1).abs() < 1e-9, "empty bar spread must come from the 0s quote");
+            assert!((b.4 - 0.2).abs() < 1e-9, "empty bar imbalance must come from the 0s quote");
+            assert!(b.1.abs() < 1e-9, "empty bar OFI must be zero");
+        }
+        assert!((bars[3].2 - 110.0).abs() < 1e-9);
+        assert!((bars[3].1 - e[1]).abs() < 1e-9, "the 30s event belongs to the 30s bar only");
+        assert!(bars[0].1.abs() < 1e-9);
+    }
+
+    #[test]
+    fn ofi_bars_prefix_invariant_to_appended_quote() {
+        // Appending a later quote must not change any already-emitted bar.
+        // With quotes at 0s and 30s, a third quote at 60s must leave the
+        // first four bars exactly as they were.
+        let qs = vec![
+            q(0, 99.95, 6.0, 100.05, 4.0),
+            q(30_000, 109.9, 3.0, 110.1, 7.0),
+            q(60_000, 119.95, 2.0, 120.05, 8.0),
+        ];
+        let e = ofi_events(&qs);
+        let before = ofi_bars(&qs[..2], &e[..2], 10_000);
+        let after = ofi_bars(&qs, &e, 10_000);
+        assert_eq!(before.len(), 4);
+        assert_eq!(before, after[..4]);
+    }
+
+    #[test]
+    fn ofi_bars_mid_session_gap() {
+        // Gap between the 10s and 40s quotes: the 20s/30s bars carry the
+        // 10s quote; the 40s event lands in the 40s bar only.
+        let qs = vec![
+            q(0, 99.95, 6.0, 100.05, 4.0),
+            q(10_000, 100.95, 6.0, 101.05, 4.0),
+            q(40_000, 104.95, 2.0, 105.05, 8.0),
+        ];
+        let e = ofi_events(&qs);
+        let bars = ofi_bars(&qs, &e, 10_000);
+        assert_eq!(bars.len(), 5);
+        for b in &bars[2..4] {
+            assert!((b.2 - 101.0).abs() < 1e-9, "gap bar mid must come from the 10s quote, got {}", b.2);
+            assert!(b.1.abs() < 1e-9);
+        }
+        assert!((bars[4].2 - 105.0).abs() < 1e-9);
+        assert!((bars[4].1 - e[2]).abs() < 1e-9);
+        assert!((bars[1].1 - e[1]).abs() < 1e-9);
     }
 }
