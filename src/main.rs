@@ -463,6 +463,7 @@ fn export_session(
         },
         "ofi": { "mean": ofi_m, "std": ofi_sd },
         "predict": rep.as_ref().map(|r| serde_json::json!({
+            "feature_version": r.feature_version,
             "accuracy": r.accuracy, "accuracy_std": r.accuracy_std,
             "baseline": r.baseline, "n_bars": r.n_bars,
             "n_folds": r.n_folds, "brier": r.brier,

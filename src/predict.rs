@@ -15,12 +15,27 @@ use crate::metrics::{ofi_bars, ofi_events, Quote, Trade};
 
 pub const N_FEATURES: usize = 5;
 
+/// Feature-frame version, frozen at build_dataset's semantics.
+/// v1 (implicit, pre-N1) computed rolling variance from sliding sums of
+/// squares (E[x^2] - E[x]^2), which cancels catastrophically when the
+/// mean dwarfs the variance and leaves a non-zero residue on constant
+/// windows; it had no degenerate-spread marker. v2 uses a numerically
+/// stable two-pass rolling variance, flags zero-variance spread windows
+/// explicitly, and pins their z-score to exactly 0.
+pub const FEATURE_VERSION: &str = "v2";
+pub const LEGACY_FEATURE_VERSION: &str = "v1";
+
 #[derive(Debug, Clone)]
 pub struct Bar {
     pub ofi: f64,
     pub ofi_z: f64,
     pub imbalance: f64,
     pub spread_z: f64,
+    /// True when the rolling spread window behind `spread_z` had zero
+    /// variance (e.g. an economically constant one-tick spread). The
+    /// z-score of a zero-variance window is defined as exactly 0 and the
+    /// row is flagged here instead of emitting a garbage ratio.
+    pub spread_degenerate: bool,
     pub signed_vol: f64,
     pub target: u8,
 }
@@ -31,26 +46,37 @@ impl Bar {
     }
 }
 
+/// Trailing rolling mean / population sd over the last `window` values
+/// (all values so far while the window fills). Entries are NaN until the
+/// window holds at least 5 values.
+///
+/// Numerics (N1): each window is computed independently with a two-pass
+/// mean-subtracted sum of squares, never E[x^2] - E[x]^2 over sliding
+/// sums. The sliding form cancels catastrophically when the mean dwarfs
+/// the variance and drifts as entries are added/removed, so a window of
+/// identical values could report sd ~1e-9 instead of 0. Here a window of
+/// bit-identical values yields sd exactly 0. Because every window is a
+/// pure function of its own slice, results are prefix-invariant bitwise.
 fn rolling_mean_sd(xs: &[f64], window: usize) -> (Vec<f64>, Vec<f64>) {
     let n = xs.len();
     let mut mean = vec![f64::NAN; n];
     let mut sd = vec![f64::NAN; n];
-    let mut sum = 0.0;
-    let mut sum2 = 0.0;
     for i in 0..n {
-        sum += xs[i];
-        sum2 += xs[i] * xs[i];
-        if i >= window {
-            sum -= xs[i - window];
-            sum2 -= xs[i - window] * xs[i - window];
+        let k = (i + 1).min(window);
+        if k < 5 {
+            continue;
         }
-        let k = (i + 1).min(window) as f64;
-        if k >= 5.0 {
-            let m = sum / k;
-            let v = (sum2 / k - m * m).max(0.0);
-            mean[i] = m;
-            sd[i] = v.sqrt();
+        let w = &xs[i + 1 - k..=i];
+        let first = w[0];
+        if w.iter().all(|&x| x == first) {
+            mean[i] = first;
+            sd[i] = 0.0;
+            continue;
         }
+        let m = w.iter().sum::<f64>() / k as f64;
+        let v = w.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / k as f64;
+        mean[i] = m;
+        sd[i] = v.sqrt();
     }
     (mean, sd)
 }
@@ -91,11 +117,20 @@ pub fn build_dataset(
             continue;
         }
         let fwd = mids[i + horizon] / mids[i] - 1.0;
+        // A zero-variance spread window (constant spread, e.g. one tick
+        // for the whole window) has no meaningful z-score: pin it to
+        // exactly 0 and flag the row instead of dividing by a residue.
+        let spread_degenerate = sp_s[i] == 0.0;
         out.push(Bar {
             ofi: ofi[i],
             ofi_z: (ofi[i] - ofi_m[i]) / (ofi_s[i] + 1e-12),
             imbalance: imbs[i],
-            spread_z: (spreads[i] - sp_m[i]) / (sp_s[i] + 1e-12),
+            spread_z: if spread_degenerate {
+                0.0
+            } else {
+                (spreads[i] - sp_m[i]) / (sp_s[i] + 1e-12)
+            },
+            spread_degenerate,
             signed_vol: signed[i],
             target: u8::from(fwd > 0.0),
         });
@@ -177,6 +212,9 @@ pub fn predict_proba(x: &[f64; N_FEATURES], w: &[f64; N_FEATURES + 1]) -> f64 {
 
 #[derive(Debug)]
 pub struct EvalReport {
+    /// Feature-frame version the evaluated bars were built with
+    /// (see FEATURE_VERSION).
+    pub feature_version: &'static str,
     pub n_bars: usize,
     pub n_folds: usize,
     pub accuracy: f64,
@@ -241,6 +279,7 @@ pub fn walk_forward(bars: &[Bar], n_splits: usize, horizon: usize) -> Option<Eva
         calibration.push((mp, rl, chunk.len()));
     }
     Some(EvalReport {
+        feature_version: FEATURE_VERSION,
         n_bars: n,
         n_folds: n_splits,
         accuracy: acc,
@@ -370,5 +409,222 @@ mod tests {
             assert_eq!(a.features(), b.features(), "row {i} changed after appending a future quote");
             assert_eq!(a.target, b.target, "row {i} target changed after appending a future quote");
         }
+    }
+
+    // ======================= N1 fixtures =======================
+    // Stage 3 N1: stable one-tick spread numerics. These fixtures pin the
+    // rolling-variance numerics and the degenerate-spread handling.
+
+    /// Exact copy of the pre-N1 sliding sum / sum-of-squares implementation,
+    /// kept only so the fixtures can record old-vs-new numbers on identical
+    /// inputs. Not used by any production path.
+    fn legacy_rolling_mean_sd(xs: &[f64], window: usize) -> (Vec<f64>, Vec<f64>) {
+        let n = xs.len();
+        let mut mean = vec![f64::NAN; n];
+        let mut sd = vec![f64::NAN; n];
+        let mut sum = 0.0;
+        let mut sum2 = 0.0;
+        for i in 0..n {
+            sum += xs[i];
+            sum2 += xs[i] * xs[i];
+            if i >= window {
+                sum -= xs[i - window];
+                sum2 -= xs[i - window] * xs[i - window];
+            }
+            let k = (i + 1).min(window) as f64;
+            if k >= 5.0 {
+                let m = sum / k;
+                let v = (sum2 / k - m * m).max(0.0);
+                mean[i] = m;
+                sd[i] = v.sqrt();
+            }
+        }
+        (mean, sd)
+    }
+
+    #[test]
+    fn n1_known_variance_fixture() {
+        // xs = 1e6 + (i mod 30). Every trailing window of length k contains
+        // residues {0..k-1} (growing phase) or a rotation of {0..29} (full
+        // windows), so the population variance is (k^2 - 1) / 12 in closed
+        // form. The 1e6 offset is what exposes the legacy formula: at that
+        // scale E[x^2] - E[x]^2 cancels ~10 significant digits.
+        let n = 300;
+        let xs: Vec<f64> = (0..n).map(|i| 1e6 + (i % 30) as f64).collect();
+        let (_, sd) = rolling_mean_sd(&xs, 30);
+        let mut worst = 0.0f64;
+        for i in 4..n {
+            let k = (i + 1).min(30) as f64;
+            let var_true = (k * k - 1.0) / 12.0;
+            let var_got = sd[i] * sd[i];
+            let rel = (var_got - var_true).abs() / var_true;
+            worst = worst.max(rel);
+            assert!(
+                rel <= 1e-10,
+                "i={i} k={k}: var {var_got} vs analytic {var_true} (rel err {rel:e})"
+            );
+        }
+        // Record the legacy error on the same fixture: it must NOT meet the
+        // 1e-10 bar (this is the before/after record for the fixture).
+        let (_, sd_old) = legacy_rolling_mean_sd(&xs, 30);
+        let mut worst_old = 0.0f64;
+        for i in 4..n {
+            let k = (i + 1).min(30) as f64;
+            let var_true = (k * k - 1.0) / 12.0;
+            let rel = (sd_old[i] * sd_old[i] - var_true).abs() / var_true;
+            worst_old = worst_old.max(rel);
+        }
+        eprintln!("n1 fixture: rolling variance rel err new={worst:e} legacy={worst_old:e}");
+        assert!(
+            worst_old > 1e-10,
+            "legacy formula unexpectedly met the bar (rel err {worst_old:e}); fixture too weak"
+        );
+    }
+
+    fn n1_quotes(n: usize, spread_at: impl Fn(usize) -> (f64, f64)) -> Vec<Quote> {
+        // One quote per 10s bar at a constant mid of 100; sizes vary via a
+        // deterministic xorshift so OFI is non-trivial.
+        let mut s: u64 = 0x9e3779b97f4a7c15;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s % 1000) as f64 / 1000.0
+        };
+        (0..n)
+            .map(|i| {
+                let (bid, ask) = spread_at(i);
+                Quote {
+                    time_ms: i as i64 * 10_000,
+                    bid_px: bid,
+                    bid_sz: 4.0 + 3.0 * rnd(),
+                    ask_px: ask,
+                    ask_sz: 4.0 + 3.0 * rnd(),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn n1_constant_one_tick_spread_z_zero() {
+        // Bid/ask pinned at 99.99 / 100.01 for the whole session: the bar
+        // spread is one bit-identical value, so every rolling spread window
+        // has zero variance and z must be exactly 0, never a garbage ratio
+        // of two rounding residues. 2000 bars so any sliding-sum drift in
+        // the statistic has room to show up.
+        let quotes = n1_quotes(2000, |_| (99.99, 100.01));
+        let ds = build_dataset(&quotes, &[], 10_000, 2);
+        assert!(ds.len() > 1000, "only {} rows", ds.len());
+        for (i, row) in ds.iter().enumerate() {
+            assert!(row.spread_z.is_finite(), "row {i}: spread_z not finite");
+            assert_eq!(row.spread_z, 0.0, "row {i}: spread_z must be exactly 0");
+            assert!(
+                row.spread_degenerate,
+                "row {i}: constant-spread window must be flagged degenerate"
+            );
+        }
+    }
+
+    #[test]
+    fn n1_spread_diagnostic_extremes() {
+        // Constructed diagnostic at archived scale (200 bars): bars 0..50
+        // alternate a 4-cent and 2-cent spread, bars 50..200 sit on a
+        // constant 2-cent spread. Rows whose 30-bar window lies fully in
+        // the constant region must have sd exactly 0 (hence z exactly 0)
+        // under the current code; the legacy extremes on the same rows are
+        // recorded for the before/after record.
+        let quotes = n1_quotes(200, |i| {
+            if i < 50 && i % 2 == 0 {
+                (99.98, 100.02)
+            } else {
+                (99.99, 100.01)
+            }
+        });
+        let events = ofi_events(&quotes);
+        let bars = ofi_bars(&quotes, &events, 10_000);
+        let spreads: Vec<f64> = bars.iter().map(|b| b.3).collect();
+        let (m_new, s_new) = rolling_mean_sd(&spreads, 30);
+        let (m_old, s_old) = legacy_rolling_mean_sd(&spreads, 30);
+        let (mut max_new, mut max_old, mut max_sd_old) = (0.0f64, 0.0f64, 0.0f64);
+        for i in 79..spreads.len() {
+            assert_eq!(s_new[i], 0.0, "bar {i}: sd of a constant window must be exactly 0");
+            let z_new = (spreads[i] - m_new[i]) / (s_new[i] + 1e-12);
+            max_new = max_new.max(z_new.abs());
+            if s_old[i].is_finite() {
+                max_sd_old = max_sd_old.max(s_old[i]);
+                let z_old = (spreads[i] - m_old[i]) / (s_old[i] + 1e-12);
+                max_old = max_old.max(z_old.abs());
+            }
+        }
+        eprintln!(
+            "n1 diagnostic: constant region: max |spread_z| new={max_new:e} legacy={max_old:e}; \
+             legacy sd residue up to {max_sd_old:e} (new sd is exactly 0)"
+        );
+        assert_eq!(max_new, 0.0);
+        // Dataset level: trailing rows (windows fully in the constant
+        // region) are all flagged degenerate with z exactly 0.
+        let ds = build_dataset(&quotes, &[], 10_000, 2);
+        assert!(ds.len() > 100, "only {} rows", ds.len());
+        for (i, row) in ds.iter().enumerate().skip(100) {
+            assert!(row.spread_degenerate, "row {i} should be degenerate");
+            assert_eq!(row.spread_z, 0.0, "row {i} spread_z");
+        }
+    }
+
+    #[test]
+    fn n1_prefix_invariance_of_features() {
+        // Features for a prefix computed standalone must equal the same
+        // rows computed from the full series: 0 violations. Spread varies
+        // bar to bar (2/3/4 cents) so the rolling stats are genuinely
+        // exercised.
+        let full = n1_quotes(240, |i| match i % 3 {
+            0 => (99.99, 100.01),
+            1 => (99.985, 100.015),
+            _ => (99.98, 100.02),
+        });
+        let prefix = full[..120].to_vec();
+        let ds_pre = build_dataset(&prefix, &[], 10_000, 2);
+        let ds_full = build_dataset(&full, &[], 10_000, 2);
+        assert!(ds_pre.len() > 60, "only {} prefix rows", ds_pre.len());
+        assert!(ds_full.len() > ds_pre.len());
+        let mut violations = 0;
+        for (a, b) in ds_pre.iter().zip(ds_full.iter()) {
+            if a.features() != b.features()
+                || a.target != b.target
+                || a.spread_degenerate != b.spread_degenerate
+            {
+                violations += 1;
+            }
+        }
+        assert_eq!(violations, 0, "prefix rows changed when the series was extended");
+    }
+
+    #[test]
+    fn n1_logistic_probabilities_finite() {
+        // Fit on a mix of varying-spread and constant-spread fixture rows;
+        // every fitted weight and predicted probability must be finite.
+        let varying = n1_quotes(240, |i| match i % 3 {
+            0 => (99.99, 100.01),
+            1 => (99.985, 100.015),
+            _ => (99.98, 100.02),
+        });
+        let constant = n1_quotes(200, |_| (99.99, 100.01));
+        let mut bars = build_dataset(&varying, &[], 10_000, 2);
+        bars.extend(build_dataset(&constant, &[], 10_000, 2));
+        assert!(bars.len() > 100, "only {} rows", bars.len());
+        let xs: Vec<[f64; N_FEATURES]> = bars.iter().map(|b| b.features()).collect();
+        let ys: Vec<u8> = bars.iter().map(|b| b.target).collect();
+        let w = fit_logistic(&xs, &ys, 1.0, 2000, 0.5);
+        assert!(w.iter().all(|x| x.is_finite()), "non-finite weights: {w:?}");
+        for (i, x) in xs.iter().enumerate() {
+            let p = predict_proba(x, &w);
+            assert!(p.is_finite() && (0.0..=1.0).contains(&p), "row {i}: p={p}");
+        }
+        // The eval report carries the frozen feature version (v2; the
+        // pre-N1 frame was v1).
+        let rep = walk_forward(&bars, 3, 2).expect("eval on fixture bars");
+        assert_eq!(rep.feature_version, FEATURE_VERSION);
+        assert_eq!(FEATURE_VERSION, "v2");
+        assert_eq!(LEGACY_FEATURE_VERSION, "v1");
     }
 }
