@@ -80,6 +80,7 @@ fn full_pipeline_toxic_second_half() {
             time_ms: w[1].0,
             signed_vol: 0.1,
             dmid: w[1].2 - w[0].2,
+            gap_before: false,
         })
         .collect();
     let lam = kyle_lambda(&fb, 30);

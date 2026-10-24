@@ -175,6 +175,43 @@ mod tests {
     }
 
     #[test]
+    fn n2_flow_bars_flag_gap_bars() {
+        // Quotes/trades on 1 s bars 0..=4, a 5-bar hole, then 10..=14.
+        let mut quotes = Vec::new();
+        let mut trades = Vec::new();
+        for i in (0..=4).chain(10..=14) {
+            let t = i as i64 * 1000;
+            quotes.push(Quote {
+                time_ms: t,
+                bid_px: 100.0,
+                bid_sz: 5.0,
+                ask_px: 100.1,
+                ask_sz: 5.0,
+            });
+            trades.push(Trade {
+                time_ms: t + 10,
+                price: 100.05,
+                qty: 0.1,
+                is_buyer_maker: false,
+            });
+        }
+        let bars = flow_bars(&trades, &quotes, 1000);
+        let flags: Vec<bool> = bars.iter().map(|b| b.gap_before).collect();
+        // Emitted grid bars are 1..=14. Carried bars 5..=9 and the
+        // first post-gap bar 10 are flagged; the rest are not.
+        assert_eq!(bars.len(), 14);
+        assert_eq!(
+            flags,
+            vec![
+                false, false, false, false, // 1..=4
+                true, true, true, true, true, // 5..=9 carried
+                true, // 10 first post-gap
+                false, false, false, false, // 11..=14
+            ]
+        );
+    }
+
+    #[test]
     fn export_rejects_empty_session() {
         let tmp = std::env::temp_dir().join(format!("toxicflow_export_empty_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -462,6 +499,16 @@ fn export_session(
             "last": lams.last().copied().unwrap_or(f64::NAN),
         },
         "ofi": { "mean": ofi_m, "std": ofi_sd },
+        "gaps": {
+            // N2 denominators: exact bar accounting on the 10 s grid.
+            // Unobserved bars are carried-forward placeholders, never
+            // fresh observations; dataset rows are post-censoring.
+            "bar_ms": 10_000,
+            "n_bars": ob.len(),
+            "n_unobserved_bars": toxicflow::metrics::bar_status(&quotes, 10_000)
+                .iter().filter(|s| !s.observed).count(),
+            "n_dataset_rows": ds.len(),
+        },
         "predict": rep.as_ref().map(|r| serde_json::json!({
             "feature_version": r.feature_version,
             "accuracy": r.accuracy, "accuracy_std": r.accuracy_std,
@@ -491,6 +538,7 @@ fn flow_bars(trades: &[Trade], quotes: &[Quote], bar_ms: i64) -> Vec<FlowBar> {
     let n = ((quotes.last().unwrap().time_ms - t0) / bar_ms + 1).max(1) as usize;
     let mut signed = vec![0.0; n];
     let mut mid = vec![f64::NAN; n];
+    let mut obs = vec![false; n];
     for t in trades {
         let i = ((t.time_ms - t0) / bar_ms) as usize;
         if i < n {
@@ -501,6 +549,7 @@ fn flow_bars(trades: &[Trade], quotes: &[Quote], bar_ms: i64) -> Vec<FlowBar> {
         let i = ((q.time_ms - t0) / bar_ms) as usize;
         if i < n {
             mid[i] = q.mid();
+            obs[i] = true;
         }
     }
     let mut last = f64::NAN;
@@ -516,6 +565,10 @@ fn flow_bars(trades: &[Trade], quotes: &[Quote], bar_ms: i64) -> Vec<FlowBar> {
                 time_ms: t0 + i as i64 * bar_ms,
                 signed_vol: signed[i],
                 dmid: mid[i] - mid[i - 1],
+                // N2: flag carried bars and the first bar after a
+                // hole, so rolling consumers can restart at the gap
+                // instead of treating the outage as continuous time.
+                gap_before: !obs[i] || !obs[i - 1],
             });
         }
     }

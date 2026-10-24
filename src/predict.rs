@@ -21,8 +21,11 @@ pub const N_FEATURES: usize = 5;
 /// mean dwarfs the variance and leaves a non-zero residue on constant
 /// windows; it had no degenerate-spread marker. v2 uses a numerically
 /// stable two-pass rolling variance, flags zero-variance spread windows
-/// explicitly, and pins their z-score to exactly 0.
-pub const FEATURE_VERSION: &str = "v2";
+/// explicitly, and pins their z-score to exactly 0. v3 (N2) censors
+/// every supervised row whose trailing feature window or forward
+/// target window touches a bar with no observed quote, so no row
+/// trains on carried-forward bars or crosses a feed gap.
+pub const FEATURE_VERSION: &str = "v3";
 pub const LEGACY_FEATURE_VERSION: &str = "v1";
 
 #[derive(Debug, Clone)]
@@ -111,10 +114,23 @@ pub fn build_dataset(
 
     let (ofi_m, ofi_s) = rolling_mean_sd(&ofi, 30);
     let (sp_m, sp_s) = rolling_mean_sd(&spreads, 30);
+    // N2 gap censoring: a row is supervised only if every bar feeding
+    // its features (trailing 30-bar rolling windows) and every bar in
+    // its forward target window was actually observed. Carried-forward
+    // bars are never promoted to fresh observations.
+    let status = crate::metrics::bar_status(quotes, bar_ms);
     let mut out = Vec::new();
     for i in 0..n {
         if i + horizon >= n || ofi_s[i].is_nan() || sp_s[i].is_nan() {
             continue;
+        }
+        if status.len() == n {
+            let lo = i.saturating_sub(29);
+            let features_observed = status[lo..=i].iter().all(|s| s.observed);
+            let target_observed = status[i + 1..=i + horizon].iter().all(|s| s.observed);
+            if !features_observed || !target_observed {
+                continue;
+            }
         }
         let fwd = mids[i + horizon] / mids[i] - 1.0;
         // A zero-variance spread window (constant spread, e.g. one tick
@@ -404,7 +420,12 @@ mod tests {
         let ds_prefix = build_dataset(&prefix, &trades, 10_000, 2);
         let ds_full = build_dataset(&quotes, &trades, 10_000, 2);
         assert!(ds_prefix.len() >= 40, "only {} rows", ds_prefix.len());
-        assert!(ds_full.len() > ds_prefix.len());
+        // N2: the appended quote sits after a 10-bar hole (bars 50..=59
+        // unobserved), so it adds no supervised rows: every candidate
+        // past the prefix has a target window touching the hole and is
+        // censored. Before N2 this asserted strictly more rows, which
+        // encoded the pre-censoring semantics.
+        assert_eq!(ds_full.len(), ds_prefix.len());
         for (i, (a, b)) in ds_prefix.iter().zip(ds_full.iter()).enumerate() {
             assert_eq!(a.features(), b.features(), "row {i} changed after appending a future quote");
             assert_eq!(a.target, b.target, "row {i} target changed after appending a future quote");
@@ -620,11 +641,77 @@ mod tests {
             let p = predict_proba(x, &w);
             assert!(p.is_finite() && (0.0..=1.0).contains(&p), "row {i}: p={p}");
         }
-        // The eval report carries the frozen feature version (v2; the
-        // pre-N1 frame was v1).
+        // The eval report carries the frozen feature version (v3; v2
+        // was the N1 frame, the pre-N1 frame was v1).
         let rep = walk_forward(&bars, 3, 2).expect("eval on fixture bars");
         assert_eq!(rep.feature_version, FEATURE_VERSION);
-        assert_eq!(FEATURE_VERSION, "v2");
+        assert_eq!(FEATURE_VERSION, "v3");
         assert_eq!(LEGACY_FEATURE_VERSION, "v1");
+    }
+
+    /// Two 60-bar quote segments on a 10 s grid. `b_start` is the first
+    /// post-gap quote time: 1_510_100 leaves exactly 91 unobserved bars
+    /// (a 920.1 s hole after the bar-59 quote); 600_000 closes the gap
+    /// entirely (contiguous bars 0..=119).
+    fn gap_fixture(b_start: i64) -> (Vec<Quote>, Vec<Trade>) {
+        let mut quotes = Vec::new();
+        let mut trades = Vec::new();
+        for k in 0..60i64 {
+            let level = 100.0 + 0.01 * k as f64;
+            quotes.push(Quote {
+                time_ms: k * 10_000,
+                bid_px: level - 0.05,
+                bid_sz: 5.0,
+                ask_px: level + 0.05,
+                ask_sz: 5.0,
+            });
+            trades.push(Trade {
+                time_ms: k * 10_000 + 100,
+                price: level,
+                qty: 0.1,
+                is_buyer_maker: k % 2 == 0,
+            });
+        }
+        for k in 0..60i64 {
+            let g = if b_start == 600_000 { 60 + k } else { 151 + k };
+            let level = 100.0 + 0.01 * g as f64;
+            let t = b_start + k * 10_000;
+            quotes.push(Quote {
+                time_ms: t,
+                bid_px: level - 0.05,
+                bid_sz: 5.0,
+                ask_px: level + 0.05,
+                ask_sz: 5.0,
+            });
+            trades.push(Trade {
+                time_ms: t + 100,
+                price: level,
+                qty: 0.1,
+                is_buyer_maker: k % 2 == 0,
+            });
+        }
+        (quotes, trades)
+    }
+
+    #[test]
+    fn n2_dataset_censors_rows_crossing_gap() {
+        // A row survives only if its actual trailing feature window
+        // (up to 30 bars; shorter at the series start, where the
+        // rolling stats first become defined at i = 4) and its 3-bar
+        // target window are fully observed.
+        // Segment A (bars 0..=59) yields i in 4..=56 (53 rows);
+        // segment B (bars 151..=210) yields i in 180..=207 (28 rows):
+        // B rows before 180 have feature windows reaching back into
+        // the 91-bar hole. Any row crossing the hole breaks the count.
+        let (quotes, trades) = gap_fixture(1_510_100);
+        let ds = build_dataset(&quotes, &trades, 10_000, 3);
+        assert_eq!(ds.len(), 81, "gapped dataset row count");
+
+        // Control: identical quotes with the hole closed. 120 bars
+        // yield i in 4..=116 (113 rows), so the censor removes exactly
+        // the gap-crossing and gap-adjacent rows.
+        let (quotes, trades) = gap_fixture(600_000);
+        let ds = build_dataset(&quotes, &trades, 10_000, 3);
+        assert_eq!(ds.len(), 113, "control dataset row count");
     }
 }
