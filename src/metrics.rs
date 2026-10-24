@@ -153,15 +153,83 @@ pub struct FlowBar {
     pub time_ms: i64,
     pub signed_vol: f64,
     pub dmid: f64,
+    /// True when this bar is not a fresh observation in an unbroken
+    /// run: either the bar itself had no observed quote (its mid is
+    /// carried forward) or the preceding bar was unobserved, so this
+    /// bar's `dmid` spans a feed gap. Segment-aware consumers (Kyle's
+    /// lambda) treat it as the boundary of a new segment.
+    pub gap_before: bool,
+}
+
+/// Per-bar observation status on the fixed bar grid used by
+/// `ofi_bars` (same `t0` alignment and bar count).
+#[derive(Debug, Clone, Copy)]
+pub struct BarStatus {
+    pub time_ms: i64,
+    /// True when at least one quote was observed inside this bar.
+    /// Carried-forward bars are `false`: a missing quote is never
+    /// promoted to an observed one.
+    pub observed: bool,
+    /// Milliseconds from the end of this bar back to the most recent
+    /// observed quote. Small for fresh bars; grows across an outage.
+    pub quote_age_ms: i64,
+}
+
+/// Observation status for every bar on the `ofi_bars` grid.
+pub fn bar_status(quotes: &[Quote], bar_ms: i64) -> Vec<BarStatus> {
+    if quotes.is_empty() || bar_ms <= 0 {
+        return Vec::new();
+    }
+    let t0 = quotes[0].time_ms / bar_ms * bar_ms;
+    let n = ((quotes.last().unwrap().time_ms - t0) / bar_ms + 1).max(1) as usize;
+    let mut observed = vec![false; n];
+    for q in quotes {
+        let idx = ((q.time_ms - t0) / bar_ms) as usize;
+        if idx < n {
+            observed[idx] = true;
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut last_q = quotes[0].time_ms;
+    let mut qi = 0usize;
+    for i in 0..n {
+        let bar_end = t0 + (i as i64 + 1) * bar_ms;
+        while qi < quotes.len() && quotes[qi].time_ms < bar_end {
+            last_q = quotes[qi].time_ms;
+            qi += 1;
+        }
+        out.push(BarStatus {
+            time_ms: t0 + i as i64 * bar_ms,
+            observed: observed[i],
+            quote_age_ms: bar_end - last_q,
+        });
+    }
+    out
 }
 
 /// Rolling OLS slope of dmid on signed_vol: lambda and R^2 per bar.
 /// `None` where the window is too short or flow variance is zero.
+///
+/// Windows restart at segment boundaries (N2): a window never spans a
+/// feed gap. The regression points for bar `i` are the bars after the
+/// most recent `gap_before` bar at or before `i` (the boundary bar
+/// itself is excluded, since its `dmid` spans the gap), clipped to the
+/// trailing `window` bars.
 pub fn kyle_lambda(bars: &[FlowBar], window: usize) -> Vec<Option<(f64, f64)>> {
+    // seg_start[i] = index of the first regression point of bar i's
+    // segment: one past the latest boundary bar, or 0.
+    let mut seg_start = vec![0usize; bars.len()];
+    let mut cur = 0usize;
+    for (i, b) in bars.iter().enumerate() {
+        if b.gap_before {
+            cur = i + 1;
+        }
+        seg_start[i] = cur;
+    }
     bars.iter()
         .enumerate()
         .map(|(i, _)| {
-            let start = i.saturating_sub(window - 1);
+            let start = (i + 1).saturating_sub(window).max(seg_start[i]);
             let xs: Vec<f64> = bars[start..=i].iter().map(|b| b.signed_vol).collect();
             let ys: Vec<f64> = bars[start..=i].iter().map(|b| b.dmid).collect();
             let n = xs.len();
@@ -320,7 +388,7 @@ mod tests {
         let bars: Vec<FlowBar> = (0..60)
             .map(|i| {
                 let x = (i as f64 - 30.0) / 10.0;
-                FlowBar { time_ms: i, signed_vol: x, dmid: 2.0 * x }
+                FlowBar { time_ms: i, signed_vol: x, dmid: 2.0 * x, gap_before: false }
             })
             .collect();
         let lam = kyle_lambda(&bars, 60);
@@ -332,9 +400,69 @@ mod tests {
     #[test]
     fn kyle_lambda_none_on_flat_flow() {
         let bars: Vec<FlowBar> = (0..60)
-            .map(|i| FlowBar { time_ms: i, signed_vol: 1.0, dmid: i as f64 * 0.01 })
+            .map(|i| FlowBar { time_ms: i, signed_vol: 1.0, dmid: i as f64 * 0.01, gap_before: false })
             .collect();
         assert!(kyle_lambda(&bars, 60).last().unwrap().is_none());
+    }
+
+    #[test]
+    fn n2_bar_status_counts_unobserved_bars() {
+        // Quotes every 10 s, then a 920.1 s hole, then every 10 s again.
+        // The hole spans exactly 91 empty 10 s bars (grid bars 11..=101).
+        let mut quotes = Vec::new();
+        for k in 0..=10 {
+            quotes.push(q(k * 10_000, 100.0, 1.0, 100.1, 1.0));
+        }
+        for k in 0..=10 {
+            quotes.push(q(1_020_100 + k * 10_000, 100.0, 1.0, 100.1, 1.0));
+        }
+        let st = bar_status(&quotes, 10_000);
+        assert_eq!(st.len(), 113);
+        assert_eq!(st.iter().filter(|s| !s.observed).count(), 91);
+        assert!(st[10].observed && !st[11].observed);
+        assert!(!st[101].observed && st[102].observed);
+        // Quote age grows across the hole and resets at the first
+        // post-gap bar.
+        assert!(st[101].quote_age_ms > st[11].quote_age_ms);
+        assert!(st[102].quote_age_ms < 10_000);
+    }
+
+    #[test]
+    fn n2_kyle_window_restarts_at_segment_boundary() {
+        // Pre-gap slope 2, a flagged boundary bar, post-gap slope 5.
+        // The rolling OLS must never mix the two segments.
+        let mut bars: Vec<FlowBar> = Vec::new();
+        for i in 0..15 {
+            let x = i as f64 + 1.0;
+            bars.push(FlowBar {
+                time_ms: i as i64 * 10_000,
+                signed_vol: x,
+                dmid: 2.0 * x,
+                gap_before: false,
+            });
+        }
+        bars.push(FlowBar {
+            time_ms: 150_000,
+            signed_vol: 1.0,
+            dmid: 999.0,
+            gap_before: true,
+        });
+        for i in 0..15 {
+            let x = i as f64 + 1.0;
+            bars.push(FlowBar {
+                time_ms: 160_000 + i as i64 * 10_000,
+                signed_vol: x,
+                dmid: 5.0 * x,
+                gap_before: false,
+            });
+        }
+        let lam = kyle_lambda(&bars, 60);
+        let (l_pre, _) = lam[14].unwrap();
+        assert!((l_pre - 2.0).abs() < 1e-9, "pre-gap lambda {l_pre}");
+        assert!(lam[15].is_none(), "boundary bar opens a new segment");
+        assert!(lam[24].is_none(), "only 9 post-gap bars so far");
+        let (l_post, _) = lam[25].unwrap();
+        assert!((l_post - 5.0).abs() < 1e-9, "post-gap lambda {l_post}");
     }
 
     fn q(t: i64, bp: f64, bq: f64, ap: f64, aq: f64) -> Quote {
