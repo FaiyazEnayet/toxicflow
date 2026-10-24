@@ -6,7 +6,7 @@
   <a href="https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml"><img src="https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml/badge.svg?label=CI&labelColor=24292f" alt="CI"></a>
   <img src="https://img.shields.io/badge/license-MIT-e5a17e?labelColor=24292f" alt="License: MIT">
   <img src="https://img.shields.io/badge/Rust-2021%20edition-A65E2E?labelColor=24292f" alt="Rust 2021 edition">
-  <img src="https://img.shields.io/badge/built%20with-Tokio%20%2B%20Parquet-41474b?labelColor=24292f" alt="Built with Tokio + Parquet">
+  <img src="https://img.shields.io/badge/built%20with-Tokio%20%2B%20Parquet-301934?labelColor=24292f" alt="Built with Tokio + Parquet">
 </p>
 
 <p align="center">
