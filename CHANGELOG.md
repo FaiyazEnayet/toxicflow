@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Docs
+- Centered the README header: uniform dark badge labels and three action buttons in the dashboard palette (Open Demo, Explore Method, Run Locally).
+
 ### Fixed
 - Prediction feature numerics (Stage 3 N1): `rolling_mean_sd` no longer uses sliding sums of squares (E[x^2] - E[x]^2). Each trailing window is computed independently with a two-pass mean-subtracted sum of squares, and a bit-identical window yields sd exactly 0. On the archived 3.25h BTCUSDT session the bar spread is an economically constant one tick (two f64 values near 0.01 differing at the 1e-12 level), and the old formula turned that into spread z-scores in [-14.07, +9.70] with 293 of 1,167 rows beyond |z| = 5 (legacy sd sat in (0, 1e-9) on 671 bars: pure cancellation residue). After the fix the same rows give z in [-3.89, +3.89] with no row beyond |z| = 5. Zero-variance spread windows are flagged explicitly (`Bar.spread_degenerate`, z pinned to exactly 0; 413 of 1,167 archived rows). The feature frame is frozen as `FEATURE_VERSION = "v2"` (v1 = pre-N1), carried on `EvalReport` and in the export summary JSON. Regression fixtures: analytic-variance series under a 1e6 offset (relative error 1.4e-5 before, 2.2e-16 after, against a 1e-10 bar), constant one-tick spread, prefix invariance, finite logistic probabilities. Test count: 69 → 74. No version bump.
 

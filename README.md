@@ -1,15 +1,24 @@
 <p align="center"><img src="docs/readme-banner.svg?v=type-20261017b" alt="Toxicflow: Order-flow measurement and execution-risk research" width="1200"></p>
 
-[![Tests](https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml/badge.svg)](https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-007EC6)](LICENSE) ![Rust 2021 edition](https://img.shields.io/badge/Rust-2021%20edition-A65E2E) ![Built with Tokio + Parquet](https://img.shields.io/badge/built%20with-Tokio%20%2B%20Parquet-555555) [![Interactive demo](https://img.shields.io/badge/demo-interactive-4C9D39)](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)
+<h1 align="center">Toxicflow</h1>
 
-<p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><b>Open interactive demo</b></a> · <a href="#method">Method</a> · <a href="#run-locally">Run locally</a></p>
+<p align="center">
+  <a href="https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml"><img src="https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml/badge.svg?label=CI&labelColor=24292f" alt="CI"></a>
+  <img src="https://img.shields.io/badge/license-MIT-e5a17e?labelColor=24292f" alt="License: MIT">
+  <img src="https://img.shields.io/badge/Rust-2021%20edition-A65E2E?labelColor=24292f" alt="Rust 2021 edition">
+  <img src="https://img.shields.io/badge/built%20with-Tokio%20%2B%20Parquet-41474b?labelColor=24292f" alt="Built with Tokio + Parquet">
+</p>
 
-# Toxicflow
+<p align="center">
+  <a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><img src="https://img.shields.io/badge/Open-Demo-e5a17e?style=for-the-badge&labelColor=17191b" alt="Open Demo"></a>
+  <a href="#method"><img src="https://img.shields.io/badge/Explore-Method-41474b?style=for-the-badge&labelColor=17191b" alt="Explore Method"></a>
+  <a href="#run-locally"><img src="https://img.shields.io/badge/Run-Locally-202326?style=for-the-badge&labelColor=17191b" alt="Run Locally"></a>
+</p>
 
 Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information. The dashboard keeps weak results visible rather than turning diagnostics into trading claims.
 
 
-[![Toxicflow demo](docs/demo.gif?v=showcase-20261017b)](https://faiyazenayet.github.io/toxicflow/docs/dashboard.html)
+<p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><img src="docs/demo.gif?v=showcase-20261017b" alt="Toxicflow demo"></a></p>
 
 
 The important question is whether a toxicity signal arrives early enough to change an execution decision. Price, order flow and VPIN should therefore be read on the same clock, alongside calibration and baseline comparisons. The recorded experiment remains visible even where predictive performance offers little advantage over a simple reference model.
