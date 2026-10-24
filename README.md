@@ -2,8 +2,6 @@
 
 <h1 align="center">Toxicflow</h1>
 
-<p align="center">Order-flow measurement and execution-risk research on recorded BTCUSDT data.</p>
-
 <p align="center">
   <a href="https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml"><img src="https://github.com/FaiyazEnayet/toxicflow/actions/workflows/ci.yml/badge.svg?label=CI&labelColor=24292f" alt="CI"></a>
   <img src="https://img.shields.io/badge/license-MIT-e5a17e?labelColor=24292f" alt="License: MIT">
