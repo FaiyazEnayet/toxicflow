@@ -39,7 +39,7 @@ A synchronized local order book feeds VPIN, rolling Kyle lambda and order-flow i
 | :--- | :--- |
 | Recorded session | 28,224 trades; 106,735 quotes; about 3.25 hours |
 | Direction-model accuracy | 0.791 versus a 0.786 majority-class baseline on gap-censored rows (walk-forward export; 123 of 1,167 rows censored for touching the session's 920.1 s outage) |
-| Toy market-making PnL | Open -11.34; toxicity-gated -0.84 |
+| Toy market-making PnL | Open -14.51; toxicity-gated -3.58 |
 | Conclusion | No demonstrated predictive or trading edge in this session |
 
 ## Updating this project
