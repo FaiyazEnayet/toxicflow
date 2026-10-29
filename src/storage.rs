@@ -126,8 +126,12 @@ pub fn write_trades(path: &str, trades: &[Trade]) -> Result<(), Box<dyn Error>> 
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(Int64Array::from_iter_values(trades.iter().map(|t| t.time_ms))),
-            Arc::new(Float64Array::from_iter_values(trades.iter().map(|t| t.price()))),
+            Arc::new(Int64Array::from_iter_values(
+                trades.iter().map(|t| t.time_ms),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                trades.iter().map(|t| t.price()),
+            )),
             Arc::new(Float64Array::from_iter_values(trades.iter().map(|t| t.qty))),
             Arc::new(BooleanArray::from_iter(
                 trades.iter().map(|t| Some(t.is_buyer_maker)),
@@ -146,11 +150,21 @@ pub fn write_quotes(path: &str, quotes: &[Quote]) -> Result<(), Box<dyn Error>> 
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(Int64Array::from_iter_values(quotes.iter().map(|q| q.time_ms))),
-            Arc::new(Float64Array::from_iter_values(quotes.iter().map(|q| q.bid_px))),
-            Arc::new(Float64Array::from_iter_values(quotes.iter().map(|q| q.bid_sz))),
-            Arc::new(Float64Array::from_iter_values(quotes.iter().map(|q| q.ask_px))),
-            Arc::new(Float64Array::from_iter_values(quotes.iter().map(|q| q.ask_sz))),
+            Arc::new(Int64Array::from_iter_values(
+                quotes.iter().map(|q| q.time_ms),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                quotes.iter().map(|q| q.bid_px),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                quotes.iter().map(|q| q.bid_sz),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                quotes.iter().map(|q| q.ask_px),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                quotes.iter().map(|q| q.ask_sz),
+            )),
         ],
     )?;
     let file = File::create(path)?;

@@ -79,7 +79,11 @@ impl ProxyConfig {
                 "proxy port is not a number (got {port:?}); expected http://[user:pass@]host:port"
             ))
         })?;
-        Ok(ProxyConfig::Http { host: host.to_string(), port, auth })
+        Ok(ProxyConfig::Http {
+            host: host.to_string(),
+            port,
+            auth,
+        })
     }
 
     /// Read the standard proxy env vars (`https_proxy` / `HTTPS_PROXY`).
@@ -272,8 +276,7 @@ mod tests {
                     break;
                 }
             }
-            *seen_clone.lock().unwrap() =
-                Some(String::from_utf8_lossy(&head).to_string());
+            *seen_clone.lock().unwrap() = Some(String::from_utf8_lossy(&head).to_string());
             sock.write_all(status.as_bytes()).await.unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         });
@@ -304,7 +307,10 @@ mod tests {
             .await
             .expect("tunnel");
         let req = seen.lock().unwrap().clone().expect("proxy saw a request");
-        assert!(req.starts_with("CONNECT example.com:443 "), "tunnels the target: {req}");
+        assert!(
+            req.starts_with("CONNECT example.com:443 "),
+            "tunnels the target: {req}"
+        );
         let want = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             "user:pass".as_bytes(),
@@ -342,7 +348,12 @@ mod tests {
             port,
             auth: None,
         };
-        let err = tcp_stream("example.com", 443, &proxy).await.expect_err("refused");
-        assert!(err.to_string().contains("407"), "surfaces the refusal: {err}");
+        let err = tcp_stream("example.com", 443, &proxy)
+            .await
+            .expect_err("refused");
+        assert!(
+            err.to_string().contains("407"),
+            "surfaces the refusal: {err}"
+        );
     }
 }

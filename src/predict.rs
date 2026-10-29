@@ -45,7 +45,13 @@ pub struct Bar {
 
 impl Bar {
     fn features(&self) -> [f64; N_FEATURES] {
-        [self.ofi, self.ofi_z, self.imbalance, self.spread_z, self.signed_vol]
+        [
+            self.ofi,
+            self.ofi_z,
+            self.imbalance,
+            self.spread_z,
+            self.signed_vol,
+        ]
     }
 }
 
@@ -85,12 +91,7 @@ fn rolling_mean_sd(xs: &[f64], window: usize) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// Build the feature/target frame. Returns empty vec when data is thin.
-pub fn build_dataset(
-    quotes: &[Quote],
-    trades: &[Trade],
-    bar_ms: i64,
-    horizon: usize,
-) -> Vec<Bar> {
+pub fn build_dataset(quotes: &[Quote], trades: &[Trade], bar_ms: i64, horizon: usize) -> Vec<Bar> {
     let events = ofi_events(quotes);
     let bars = ofi_bars(quotes, &events, bar_ms);
     if bars.len() < 40 {
@@ -176,8 +177,8 @@ pub fn fit_logistic(
             mu[j] += row[j];
         }
     }
-    for j in 0..d {
-        mu[j] /= n;
+    for m in mu.iter_mut().take(d) {
+        *m /= n;
     }
     for row in xs {
         for j in 0..d {
@@ -185,8 +186,8 @@ pub fn fit_logistic(
             sd[j] += z * z;
         }
     }
-    for j in 0..d {
-        sd[j] = (sd[j] / n).sqrt() + 1e-12;
+    for s in sd.iter_mut().take(d) {
+        *s = (*s / n).sqrt() + 1e-12;
     }
     let mut w = [0.0; N_FEATURES + 1];
     for _ in 0..iters {
@@ -286,7 +287,7 @@ pub fn walk_forward(bars: &[Bar], n_splits: usize, horizon: usize) -> Option<Eva
     let mut order: Vec<usize> = (0..probs_all.len()).collect();
     order.sort_by(|&i, &j| probs_all[i].partial_cmp(&probs_all[j]).unwrap());
     let mut calibration = Vec::new();
-    for chunk in order.chunks(order.len() / 10.max(1)) {
+    for chunk in order.chunks(order.len() / 10) {
         if chunk.is_empty() {
             continue;
         }
@@ -328,7 +329,11 @@ mod tests {
             let t = i as i64 * 1000;
             // regimes last 60s, longer than the 20s prediction horizon
             let drift = if predictable {
-                if i % 120 < 60 { 0.02 } else { -0.02 }
+                if i % 120 < 60 {
+                    0.02
+                } else {
+                    -0.02
+                }
             } else {
                 0.0
             };
@@ -344,7 +349,11 @@ mod tests {
             });
             mid += drift + rnd() * 0.01;
             // a trade each second, direction follows drift when predictable
-            let buy = if predictable { drift > 0.0 } else { rnd() > 0.0 };
+            let buy = if predictable {
+                drift > 0.0
+            } else {
+                rnd() > 0.0
+            };
             trades.push(Trade {
                 time_ms: t + 100,
                 price: mid,
@@ -427,8 +436,15 @@ mod tests {
         // encoded the pre-censoring semantics.
         assert_eq!(ds_full.len(), ds_prefix.len());
         for (i, (a, b)) in ds_prefix.iter().zip(ds_full.iter()).enumerate() {
-            assert_eq!(a.features(), b.features(), "row {i} changed after appending a future quote");
-            assert_eq!(a.target, b.target, "row {i} target changed after appending a future quote");
+            assert_eq!(
+                a.features(),
+                b.features(),
+                "row {i} changed after appending a future quote"
+            );
+            assert_eq!(
+                a.target, b.target,
+                "row {i} target changed after appending a future quote"
+            );
         }
     }
 
@@ -568,7 +584,10 @@ mod tests {
         let (m_old, s_old) = legacy_rolling_mean_sd(&spreads, 30);
         let (mut max_new, mut max_old, mut max_sd_old) = (0.0f64, 0.0f64, 0.0f64);
         for i in 79..spreads.len() {
-            assert_eq!(s_new[i], 0.0, "bar {i}: sd of a constant window must be exactly 0");
+            assert_eq!(
+                s_new[i], 0.0,
+                "bar {i}: sd of a constant window must be exactly 0"
+            );
             let z_new = (spreads[i] - m_new[i]) / (s_new[i] + 1e-12);
             max_new = max_new.max(z_new.abs());
             if s_old[i].is_finite() {
@@ -617,7 +636,10 @@ mod tests {
                 violations += 1;
             }
         }
-        assert_eq!(violations, 0, "prefix rows changed when the series was extended");
+        assert_eq!(
+            violations, 0,
+            "prefix rows changed when the series was extended"
+        );
     }
 
     #[test]

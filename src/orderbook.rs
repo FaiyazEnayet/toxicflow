@@ -91,7 +91,10 @@ impl OrderBook {
     }
 
     pub fn best_bid(&self) -> Option<(f64, f64)> {
-        self.bids.iter().next_back().map(|(t, q)| (from_ticks(*t), *q))
+        self.bids
+            .iter()
+            .next_back()
+            .map(|(t, q)| (from_ticks(*t), *q))
     }
 
     pub fn best_ask(&self) -> Option<(f64, f64)> {
@@ -152,12 +155,18 @@ impl OrderBook {
 
     /// Bid levels as (price, qty), ascending by price.
     pub fn bid_levels(&self) -> Vec<(f64, f64)> {
-        self.bids.iter().map(|(t, q)| (from_ticks(*t), *q)).collect()
+        self.bids
+            .iter()
+            .map(|(t, q)| (from_ticks(*t), *q))
+            .collect()
     }
 
     /// Ask levels as (price, qty), ascending by price.
     pub fn ask_levels(&self) -> Vec<(f64, f64)> {
-        self.asks.iter().map(|(t, q)| (from_ticks(*t), *q)).collect()
+        self.asks
+            .iter()
+            .map(|(t, q)| (from_ticks(*t), *q))
+            .collect()
     }
 }
 
@@ -353,7 +362,12 @@ mod tests {
     #[test]
     fn book_emptied_by_diffs_stays_usable() {
         let mut b = book();
-        b.apply_diff(11, 11, &[(100.0, 0.0), (99.9, 0.0)], &[(100.1, 0.0), (100.2, 0.0)]);
+        b.apply_diff(
+            11,
+            11,
+            &[(100.0, 0.0), (99.9, 0.0)],
+            &[(100.1, 0.0), (100.2, 0.0)],
+        );
         assert!(b.is_empty());
         assert_eq!(b.best_bid(), None);
         assert_eq!(b.midprice(), None);
