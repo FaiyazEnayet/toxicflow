@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::metrics::{vpin, volume_buckets_sized, Quote, Trade};
+use crate::metrics::{volume_buckets_sized, vpin, Quote, Trade};
 
 pub struct MmConfig {
     /// quote size in base units per side per second
@@ -93,11 +93,7 @@ pub struct MmDecision {
 /// gate for second `i` reads only VPIN completed strictly before second
 /// `i` starts. Each scored decision is recorded with its decision
 /// timestamp, latest observed quote timestamp, and VPIN completion time.
-pub fn run_mm(
-    quotes: &[Quote],
-    trades: &[Trade],
-    cfg: &MmConfig,
-) -> Option<MmReport> {
+pub fn run_mm(quotes: &[Quote], trades: &[Trade], cfg: &MmConfig) -> Option<MmReport> {
     if quotes.is_empty() || trades.is_empty() {
         return None;
     }
@@ -288,7 +284,10 @@ mod tests {
     #[test]
     fn gate_avoids_toxic_half() {
         let (q, t) = synth(600, true);
-        let cfg = MmConfig { vpin_threshold: 0.55, ..MmConfig::default() };
+        let cfg = MmConfig {
+            vpin_threshold: 0.55,
+            ..MmConfig::default()
+        };
         let r = run_mm(&q, &t, &cfg).expect("sim failed");
         assert!(r.seconds_gated > 0, "gate never triggered");
         // informed buying lifts price: quoting into it loses vs standing down
@@ -303,14 +302,23 @@ mod tests {
     #[test]
     fn no_gate_triggers_on_clean_flow() {
         let (q, t) = synth(600, false);
-        let cfg = MmConfig { vpin_threshold: 0.95, ..MmConfig::default() };
+        let cfg = MmConfig {
+            vpin_threshold: 0.95,
+            ..MmConfig::default()
+        };
         let r = run_mm(&q, &t, &cfg).expect("sim failed");
         assert_eq!(r.seconds_gated, 0);
         assert!((r.pnl_gated - r.pnl_open).abs() < 1e-9);
     }
 
     fn quote_at(t: i64, bid: f64, ask: f64) -> Quote {
-        Quote { time_ms: t, bid_px: bid, bid_sz: 5.0, ask_px: ask, ask_sz: 5.0 }
+        Quote {
+            time_ms: t,
+            bid_px: bid,
+            bid_sz: 5.0,
+            ask_px: ask,
+            ask_sz: 5.0,
+        }
     }
 
     #[test]
@@ -330,8 +338,18 @@ mod tests {
             quote_at(60_000, 109.0, 111.0),
         ];
         let trades = vec![
-            Trade { time_ms: 500, price: 100.0, qty: 0.01, is_buyer_maker: true },
-            Trade { time_ms: 1_500, price: 100.0, qty: 0.01, is_buyer_maker: false },
+            Trade {
+                time_ms: 500,
+                price: 100.0,
+                qty: 0.01,
+                is_buyer_maker: true,
+            },
+            Trade {
+                time_ms: 1_500,
+                price: 100.0,
+                qty: 0.01,
+                is_buyer_maker: false,
+            },
         ];
         let cfg = MmConfig {
             size: 0.01,
@@ -342,11 +360,19 @@ mod tests {
         let r = run_mm(&quotes, &trades, &cfg).expect("sim failed");
         assert_eq!(r.seconds, 61);
         assert_eq!(r.seconds_gated, 0);
-        assert!((r.inventory_end + 0.01).abs() < 1e-9, "inv {}", r.inventory_end);
+        assert!(
+            (r.inventory_end + 0.01).abs() < 1e-9,
+            "inv {}",
+            r.inventory_end
+        );
         assert!((r.turnover - 1.0).abs() < 1e-9, "turnover {}", r.turnover);
         // cash +1.01 from the fill, marked short 0.01 at 110
         assert!((r.pnl_open + 0.09).abs() < 1e-9, "pnl_open {}", r.pnl_open);
-        assert!((r.pnl_gated + 0.09).abs() < 1e-9, "pnl_gated {}", r.pnl_gated);
+        assert!(
+            (r.pnl_gated + 0.09).abs() < 1e-9,
+            "pnl_gated {}",
+            r.pnl_gated
+        );
     }
 
     #[test]
@@ -364,13 +390,26 @@ mod tests {
                 is_buyer_maker: i % 2 == 0,
             });
         }
-        let cfg = MmConfig { vpin_threshold: 0.55, ..MmConfig::default() };
+        let cfg = MmConfig {
+            vpin_threshold: 0.55,
+            ..MmConfig::default()
+        };
         let r1 = run_mm(&q, &t, &cfg).expect("sim failed");
         let r2 = run_mm(&q, &t2, &cfg).expect("sim failed");
         assert_eq!(r1.seconds, r2.seconds);
         assert_eq!(r1.seconds_gated, r2.seconds_gated);
-        assert!((r1.pnl_open - r2.pnl_open).abs() < 1e-12, "{} vs {}", r1.pnl_open, r2.pnl_open);
-        assert!((r1.pnl_gated - r2.pnl_gated).abs() < 1e-12, "{} vs {}", r1.pnl_gated, r2.pnl_gated);
+        assert!(
+            (r1.pnl_open - r2.pnl_open).abs() < 1e-12,
+            "{} vs {}",
+            r1.pnl_open,
+            r2.pnl_open
+        );
+        assert!(
+            (r1.pnl_gated - r2.pnl_gated).abs() < 1e-12,
+            "{} vs {}",
+            r1.pnl_gated,
+            r2.pnl_gated
+        );
         assert!((r1.turnover - r2.turnover).abs() < 1e-12);
         assert!((r1.inventory_end - r2.inventory_end).abs() < 1e-12);
     }

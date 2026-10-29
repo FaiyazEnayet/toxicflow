@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use toxicflow::metrics::{
-    kyle_lambda, ofi_bars, ofi_events, vpin, volume_buckets, FlowBar, Quote, Trade,
+    kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, Quote, Trade,
 };
 use toxicflow::orderbook::{OrderBook, SyncResult};
 use toxicflow::{predict, recorder, storage, strategy};
@@ -66,7 +66,11 @@ enum Cmd {
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Record { symbol, minutes, out } => {
+        Cmd::Record {
+            symbol,
+            minutes,
+            out,
+        } => {
             println!("recording {symbol} for {minutes} min -> {out}");
             let meta = recorder::record_session(&symbol, minutes, &out).await?;
             println!(
@@ -134,20 +138,15 @@ mod tests {
     #[test]
     fn export_writes_all_files() {
         let (quotes, trades) = synth_session();
-        let tmp = std::env::temp_dir().join(format!("toxicflow_export_test_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("toxicflow_export_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &trades).unwrap();
         storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &quotes).unwrap();
         let out = tmp.join("out");
-        export_session(
-            tmp.to_str().unwrap(),
-            out.to_str().unwrap(),
-            50,
-            20,
-            None,
-        )
-        .expect("export failed");
+        export_session(tmp.to_str().unwrap(), out.to_str().unwrap(), 50, 20, None)
+            .expect("export failed");
 
         let vpin = std::fs::read_to_string(out.join("vpin.csv")).unwrap();
         assert!(vpin.starts_with("time_ms,vpin\n"));
@@ -213,12 +212,19 @@ mod tests {
 
     #[test]
     fn export_rejects_empty_session() {
-        let tmp = std::env::temp_dir().join(format!("toxicflow_export_empty_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("toxicflow_export_empty_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &[]).unwrap();
         storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &[]).unwrap();
-        let r = export_session(tmp.to_str().unwrap(), tmp.join("out").to_str().unwrap(), 50, 20, None);
+        let r = export_session(
+            tmp.to_str().unwrap(),
+            tmp.join("out").to_str().unwrap(),
+            50,
+            20,
+            None,
+        );
         assert!(r.is_err(), "empty session should fail");
         std::fs::remove_dir_all(&tmp).unwrap();
     }
@@ -244,8 +250,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let tmp =
-            std::env::temp_dir().join(format!("toxicflow_bad_schema_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("toxicflow_bad_schema_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let path = tmp.join("trades.parquet");
@@ -280,8 +285,7 @@ fn analyze(
     if trades.is_empty() || quotes.is_empty() {
         return Ok(());
     }
-    let secs =
-        (trades.last().unwrap().time_ms - trades.first().unwrap().time_ms) as f64 / 1000.0;
+    let secs = (trades.last().unwrap().time_ms - trades.first().unwrap().time_ms) as f64 / 1000.0;
     let vol: f64 = trades.iter().map(|t| t.qty).sum();
     println!("span: {secs:.1}s, volume: {vol:.3} base units");
 
@@ -389,12 +393,18 @@ fn export_session(
         return Err("empty session".into());
     }
     std::fs::create_dir_all(out)?;
-    let secs =
-        (trades.last().unwrap().time_ms - trades.first().unwrap().time_ms) as f64 / 1000.0;
+    let secs = (trades.last().unwrap().time_ms - trades.first().unwrap().time_ms) as f64 / 1000.0;
     let vol: f64 = trades.iter().map(|t| t.qty).sum();
-    let buy_vol: f64 = trades.iter().filter(|t| !t.is_buyer_maker).map(|t| t.qty).sum();
+    let buy_vol: f64 = trades
+        .iter()
+        .filter(|t| !t.is_buyer_maker)
+        .map(|t| t.qty)
+        .sum();
     let lo = trades.iter().map(|t| t.price).fold(f64::INFINITY, f64::min);
-    let hi = trades.iter().map(|t| t.price).fold(f64::NEG_INFINITY, f64::max);
+    let hi = trades
+        .iter()
+        .map(|t| t.price)
+        .fold(f64::NEG_INFINITY, f64::max);
 
     // VPIN series
     let bk = match bucket_btc {
@@ -405,7 +415,9 @@ fn export_session(
     write_csv(
         &format!("{out}/vpin.csv"),
         "time_ms,vpin",
-        &vp.iter().map(|(t, v)| format!("{t},{v:.6}")).collect::<Vec<_>>(),
+        &vp.iter()
+            .map(|(t, v)| format!("{t},{v:.6}"))
+            .collect::<Vec<_>>(),
     )?;
 
     // Kyle's lambda series on 10s bars
@@ -457,8 +469,7 @@ fn export_session(
     write_csv(
         &format!("{out}/calibration.csv"),
         "mean_pred,realized,n",
-        &rep
-            .as_ref()
+        &rep.as_ref()
             .map(|r| {
                 r.calibration
                     .iter()
@@ -525,7 +536,9 @@ fn export_session(
         format!("{out}/summary.json"),
         serde_json::to_string_pretty(&summary)?,
     )?;
-    println!("exported session -> {out} (vpin.csv, kyle.csv, ofi.csv, calibration.csv, summary.json)");
+    println!(
+        "exported session -> {out} (vpin.csv, kyle.csv, ofi.csv, calibration.csv, summary.json)"
+    );
     Ok(())
 }
 
@@ -594,15 +607,16 @@ fn parse_levels(v: &serde_json::Value) -> Vec<(f64, f64)> {
 /// Ctrl-C to stop.
 async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
     let sym = symbol.to_lowercase();
-    let url = format!(
-        "wss://data-stream.binance.vision/stream?streams={sym}@aggTrade/{sym}@depth@100ms"
-    );
+    let url =
+        format!("wss://data-stream.binance.vision/stream?streams={sym}@aggTrade/{sym}@depth@100ms");
     // prime the book with a snapshot first
     let mut book = OrderBook::new();
     let mut synced = false;
     let mut buffer: Vec<serde_json::Value> = Vec::new();
 
-    async fn snapshot(symbol: &str) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>, i64), Box<dyn Error>> {
+    async fn snapshot(
+        symbol: &str,
+    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>, i64), Box<dyn Error>> {
         let url = format!(
             "https://data-api.binance.vision/api/v3/depth?symbol={}&limit=1000",
             symbol.to_uppercase()
@@ -622,7 +636,11 @@ async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
                 })
                 .unwrap_or_default()
         };
-        Ok((pl(&v["bids"]), pl(&v["asks"]), v["lastUpdateId"].as_i64().unwrap_or(0)))
+        Ok((
+            pl(&v["bids"]),
+            pl(&v["asks"]),
+            v["lastUpdateId"].as_i64().unwrap_or(0),
+        ))
     }
 
     let stream = toxicflow::net::tls_stream("data-stream.binance.vision").await?;
@@ -697,9 +715,9 @@ async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
                         } else {
                             let uu = d["U"].as_i64().unwrap_or(0);
                             let u = d["u"].as_i64().unwrap_or(0);
-                            match book.apply_diff(uu, u, &parse_levels(&d["b"]), &parse_levels(&d["a"])) {
-                                SyncResult::Gap => { synced = false; buffer = vec![d.clone()]; }
-                                _ => {}
+                            if book.apply_diff(uu, u, &parse_levels(&d["b"]), &parse_levels(&d["a"])) == SyncResult::Gap {
+                                synced = false;
+                                buffer = vec![d.clone()];
                             }
                         }
                     }

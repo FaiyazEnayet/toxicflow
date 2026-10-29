@@ -239,8 +239,7 @@ pub async fn record_session(
     // Validate the connection policy before the retry loop: a bad proxy
     // URL will never succeed, so retrying it until the deadline would
     // just burn the whole session. Fail fast with an actionable error.
-    let proxy = crate::net::ProxyConfig::from_env()
-        .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+    let proxy = crate::net::ProxyConfig::from_env().map_err(|e| Box::new(e) as Box<dyn Error>)?;
     eprintln!("record: connecting via {}", proxy.describe());
     let sym = symbol.to_lowercase();
     let url = format!("{WS_HOST}/stream?streams={sym}@aggTrade/{sym}@depth@100ms");
@@ -251,10 +250,9 @@ pub async fn record_session(
     'outer: while Instant::now() < deadline {
         let ws = async {
             let stream = crate::net::tls_stream("data-stream.binance.vision").await?;
-            let (ws, _) =
-                tokio_tungstenite::client_async(&url, stream).await.map_err(|e| {
-                    Box::new(e) as Box<dyn Error>
-                })?;
+            let (ws, _) = tokio_tungstenite::client_async(&url, stream)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error>)?;
             Ok::<_, Box<dyn Error>>(ws)
         }
         .await;

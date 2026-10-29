@@ -192,7 +192,7 @@ pub fn bar_status(quotes: &[Quote], bar_ms: i64) -> Vec<BarStatus> {
     let mut out = Vec::with_capacity(n);
     let mut last_q = quotes[0].time_ms;
     let mut qi = 0usize;
-    for i in 0..n {
+    for (i, &obs) in observed.iter().enumerate() {
         let bar_end = t0 + (i as i64 + 1) * bar_ms;
         while qi < quotes.len() && quotes[qi].time_ms < bar_end {
             last_q = quotes[qi].time_ms;
@@ -200,7 +200,7 @@ pub fn bar_status(quotes: &[Quote], bar_ms: i64) -> Vec<BarStatus> {
         }
         out.push(BarStatus {
             time_ms: t0 + i as i64 * bar_ms,
-            observed: observed[i],
+            observed: obs,
             quote_age_ms: bar_end - last_q,
         });
     }
@@ -330,7 +330,12 @@ mod tests {
 
     fn one_sided(n: usize) -> Vec<Trade> {
         (0..n)
-            .map(|i| Trade { time_ms: i as i64, price: 0.0, qty: 1.0, is_buyer_maker: false })
+            .map(|i| Trade {
+                time_ms: i as i64,
+                price: 0.0,
+                qty: 1.0,
+                is_buyer_maker: false,
+            })
             .collect()
     }
 
@@ -351,7 +356,10 @@ mod tests {
         let clean = vpin(&volume_buckets(&balanced(1000), 50), 50);
         let vt = toxic.last().unwrap().1;
         let vc = clean.last().unwrap().1;
-        assert!((vt - 1.0).abs() < 1e-9, "one-sided flow must give VPIN 1, got {vt}");
+        assert!(
+            (vt - 1.0).abs() < 1e-9,
+            "one-sided flow must give VPIN 1, got {vt}"
+        );
         assert!(vc < 0.3, "balanced flow must give low VPIN, got {vc}");
         assert!(vt > vc);
     }
@@ -374,7 +382,12 @@ mod tests {
     fn bucket_boundary_split() {
         // 3 trades of qty 1, 2 buckets of V=1.5: first bucket gets 1.5
         let t: Vec<Trade> = (0..3)
-            .map(|i| Trade { time_ms: i, price: 0.0, qty: 1.0, is_buyer_maker: false })
+            .map(|i| Trade {
+                time_ms: i,
+                price: 0.0,
+                qty: 1.0,
+                is_buyer_maker: false,
+            })
             .collect();
         let b = volume_buckets(&t, 2);
         assert_eq!(b.len(), 2);
@@ -388,7 +401,12 @@ mod tests {
         let bars: Vec<FlowBar> = (0..60)
             .map(|i| {
                 let x = (i as f64 - 30.0) / 10.0;
-                FlowBar { time_ms: i, signed_vol: x, dmid: 2.0 * x, gap_before: false }
+                FlowBar {
+                    time_ms: i,
+                    signed_vol: x,
+                    dmid: 2.0 * x,
+                    gap_before: false,
+                }
             })
             .collect();
         let lam = kyle_lambda(&bars, 60);
@@ -400,7 +418,12 @@ mod tests {
     #[test]
     fn kyle_lambda_none_on_flat_flow() {
         let bars: Vec<FlowBar> = (0..60)
-            .map(|i| FlowBar { time_ms: i, signed_vol: 1.0, dmid: i as f64 * 0.01, gap_before: false })
+            .map(|i| FlowBar {
+                time_ms: i,
+                signed_vol: 1.0,
+                dmid: i as f64 * 0.01,
+                gap_before: false,
+            })
             .collect();
         assert!(kyle_lambda(&bars, 60).last().unwrap().is_none());
     }
@@ -466,7 +489,13 @@ mod tests {
     }
 
     fn q(t: i64, bp: f64, bq: f64, ap: f64, aq: f64) -> Quote {
-        Quote { time_ms: t, bid_px: bp, bid_sz: bq, ask_px: ap, ask_sz: aq }
+        Quote {
+            time_ms: t,
+            bid_px: bp,
+            bid_sz: bq,
+            ask_px: ap,
+            ask_sz: aq,
+        }
     }
 
     #[test]
@@ -507,13 +536,26 @@ mod tests {
         let bars = ofi_bars(&qs, &e, 10_000);
         assert_eq!(bars.len(), 4);
         for b in &bars[1..3] {
-            assert!((b.2 - 100.0).abs() < 1e-9, "empty bar mid must come from the 0s quote, got {}", b.2);
-            assert!((b.3 - 0.1).abs() < 1e-9, "empty bar spread must come from the 0s quote");
-            assert!((b.4 - 0.2).abs() < 1e-9, "empty bar imbalance must come from the 0s quote");
+            assert!(
+                (b.2 - 100.0).abs() < 1e-9,
+                "empty bar mid must come from the 0s quote, got {}",
+                b.2
+            );
+            assert!(
+                (b.3 - 0.1).abs() < 1e-9,
+                "empty bar spread must come from the 0s quote"
+            );
+            assert!(
+                (b.4 - 0.2).abs() < 1e-9,
+                "empty bar imbalance must come from the 0s quote"
+            );
             assert!(b.1.abs() < 1e-9, "empty bar OFI must be zero");
         }
         assert!((bars[3].2 - 110.0).abs() < 1e-9);
-        assert!((bars[3].1 - e[1]).abs() < 1e-9, "the 30s event belongs to the 30s bar only");
+        assert!(
+            (bars[3].1 - e[1]).abs() < 1e-9,
+            "the 30s event belongs to the 30s bar only"
+        );
         assert!(bars[0].1.abs() < 1e-9);
     }
 
@@ -547,7 +589,11 @@ mod tests {
         let bars = ofi_bars(&qs, &e, 10_000);
         assert_eq!(bars.len(), 5);
         for b in &bars[2..4] {
-            assert!((b.2 - 101.0).abs() < 1e-9, "gap bar mid must come from the 10s quote, got {}", b.2);
+            assert!(
+                (b.2 - 101.0).abs() < 1e-9,
+                "gap bar mid must come from the 10s quote, got {}",
+                b.2
+            );
             assert!(b.1.abs() < 1e-9);
         }
         assert!((bars[4].2 - 105.0).abs() < 1e-9);

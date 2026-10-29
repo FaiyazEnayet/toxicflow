@@ -1,7 +1,7 @@
 //! End-to-end pipeline on fully synthetic market data.
 
 use toxicflow::metrics::{
-    kyle_lambda, ofi_bars, ofi_events, vpin, volume_buckets, FlowBar, Quote, Trade,
+    kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, Quote, Trade,
 };
 use toxicflow::orderbook::{OrderBook, SyncResult};
 use toxicflow::{predict, strategy};
@@ -51,8 +51,14 @@ fn synth_session(n_secs: usize) -> (Vec<Quote>, Vec<Trade>) {
 fn book_sync_end_to_end() {
     let mut b = OrderBook::new();
     b.from_snapshot(&[(100.0, 5.0)], &[(100.1, 4.0)], 100);
-    assert_eq!(b.apply_diff(101, 102, &[(100.0, 6.0)], &[]), SyncResult::Applied);
-    assert_eq!(b.apply_diff(103, 105, &[], &[(100.1, 0.0)]), SyncResult::Applied);
+    assert_eq!(
+        b.apply_diff(101, 102, &[(100.0, 6.0)], &[]),
+        SyncResult::Applied
+    );
+    assert_eq!(
+        b.apply_diff(103, 105, &[], &[(100.1, 0.0)]),
+        SyncResult::Applied
+    );
     assert_eq!(b.best_ask(), None); // removed
     assert_eq!(b.apply_diff(200, 201, &[], &[]), SyncResult::Gap);
 }
