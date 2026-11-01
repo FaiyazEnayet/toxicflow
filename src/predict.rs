@@ -10,10 +10,35 @@
 //! overlaps the training set. Time series are never shuffled. We report
 //! accuracy against a majority-class baseline, the Brier score, and a
 //! calibration table (predicted-probability deciles vs realized frequency).
+//!
+//! Persistence (N4): `walk_forward_detailed` also returns every fold's
+//! fitted coefficients and the per-row out-of-sample probabilities, and
+//! `write_prediction_ledger` serializes them as `fold_models.json` plus
+//! a `predictions.csv` ledger. An independent loader
+//! (`load_fold_models` / `load_predictions` /
+//! `verify_prediction_ledger`) reconstructs each row's probability
+//! from the stored weights and feature values and re-derives the
+//! headline scores, so an evaluation stays auditable after the process
+//! that produced it exits. Coefficients from runs before this
+//! serialization existed were held in memory only; the serialized file
+//! labels them UNRECOVERABLE and no historical checkpoint recreation
+//! is claimed.
 
 use crate::metrics::{ofi_bars, ofi_events, Quote, Trade};
 
 pub const N_FEATURES: usize = 5;
+
+/// Model feature names, in `Bar::features` order.
+pub const FEATURE_NAMES: [&str; N_FEATURES] =
+    ["ofi", "ofi_z", "imbalance", "spread_z", "signed_vol"];
+
+/// Fit hyperparameters used by the walk-forward evaluation.
+pub const FIT_L2: f64 = 1.0;
+pub const FIT_ITERS: usize = 2000;
+pub const FIT_LR: f64 = 0.5;
+
+/// Schema tag written into every `fold_models.json`.
+pub const FOLD_MODELS_SCHEMA: &str = "toxicflow.fold-models/v1";
 
 /// Feature-frame version, frozen at build_dataset's semantics.
 /// v1 (implicit, pre-N1) computed rolling variance from sliding sums of
@@ -30,6 +55,9 @@ pub const LEGACY_FEATURE_VERSION: &str = "v1";
 
 #[derive(Debug, Clone)]
 pub struct Bar {
+    /// Start time of the OFI bar this row was built from (N4: the
+    /// prediction ledger is timestamped, so rows carry their bar time).
+    pub time_ms: i64,
     pub ofi: f64,
     pub ofi_z: f64,
     pub imbalance: f64,
@@ -139,6 +167,7 @@ pub fn build_dataset(quotes: &[Quote], trades: &[Trade], bar_ms: i64, horizon: u
         // exactly 0 and flag the row instead of dividing by a residue.
         let spread_degenerate = sp_s[i] == 0.0;
         out.push(Bar {
+            time_ms: bars[i].0,
             ofi: ofi[i],
             ofi_z: (ofi[i] - ofi_m[i]) / (ofi_s[i] + 1e-12),
             imbalance: imbs[i],
@@ -157,6 +186,97 @@ pub fn build_dataset(quotes: &[Quote], trades: &[Trade], bar_ms: i64, horizon: u
 
 fn sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + (-z.clamp(-30.0, 30.0)).exp())
+}
+
+/// Minimal SHA-256 (FIPS 180-4), present so input hashes for the
+/// prediction ledger need no extra dependency. Pinned by the
+/// known-answer fixtures in the test module (`n4_sha256_known_answers`).
+fn sha256_hex(data: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let bitlen = (data.len() as u64).wrapping_mul(8);
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bitlen.to_be_bytes());
+    for chunk in msg.as_chunks::<64>().0 {
+        let mut w = [0u32; 64];
+        for (i, c) in chunk.as_chunks::<4>().0.iter().take(16).enumerate() {
+            w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+    h.iter().map(|x| format!("{x:08x}")).collect()
+}
+
+/// Content hash over dataset rows in order. Canonical encoding per
+/// row: bar time (i64 LE), the 5 feature values as f64 bit patterns
+/// (LE), the target byte, and the degenerate-spread flag byte. Any
+/// change to a row's time, features, or label changes the hash.
+fn hash_bars(bars: &[Bar]) -> String {
+    let mut buf = Vec::with_capacity(bars.len() * 50);
+    for b in bars {
+        buf.extend_from_slice(&b.time_ms.to_le_bytes());
+        for v in b.features() {
+            buf.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+        buf.push(b.target);
+        buf.push(u8::from(b.spread_degenerate));
+    }
+    sha256_hex(&buf)
 }
 
 /// Full-batch gradient descent for L2 logistic regression.
@@ -242,8 +362,120 @@ pub struct EvalReport {
     pub calibration: Vec<(f64, f64, usize)>,
 }
 
+/// One fold's persisted model record (N4): everything an independent
+/// loader needs to reconstruct that fold's out-of-sample predictions
+/// and to audit its train/test geometry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FoldModel {
+    /// Sequential fold index over the folds that were actually fit.
+    pub fold: usize,
+    /// Training rows are the dataset range [train_start, train_end).
+    pub train_start: usize,
+    /// Training cutoff: number of leading dataset rows trained on.
+    pub train_end: usize,
+    /// Bar timestamp of the last training row.
+    pub cutoff_time_ms: i64,
+    /// Purge gap in bars between the training cutoff and the test
+    /// block: test_start == train_end + purge_bars by construction.
+    pub purge_bars: usize,
+    /// Evaluated rows are the dataset range [test_start, test_end).
+    pub test_start: usize,
+    pub test_end: usize,
+    pub n_train: usize,
+    pub n_test: usize,
+    /// Majority-class rate over this fold's training labels.
+    pub train_majority_rate: f64,
+    pub train_majority_label: u8,
+    /// Raw-space intercept (the fold standardization is folded into
+    /// the raw-space weights; see the file-level preprocessing note).
+    pub intercept: f64,
+    /// Raw-space weights in FEATURE_NAMES order.
+    pub weights: [f64; N_FEATURES],
+    /// SHA-256 over this fold's training rows (see `hash_bars`).
+    pub train_input_sha256: String,
+}
+
+/// One row of the out-of-sample probability ledger.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredictionRow {
+    pub fold: usize,
+    /// Index into the evaluated dataset slice.
+    pub row: usize,
+    /// Start time of the bar the row was built from.
+    pub time_ms: i64,
+    pub features: [f64; N_FEATURES],
+    pub target: u8,
+    pub proba: f64,
+}
+
+/// The headline scores as saved inside `fold_models.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SavedReport {
+    pub accuracy: f64,
+    pub accuracy_std: f64,
+    pub baseline: f64,
+    pub brier: f64,
+    /// (mean predicted prob, realized rate, n) per decile
+    pub calibration: Vec<(f64, f64, usize)>,
+}
+
+/// Serialized form of `fold_models.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FoldModelsFile {
+    pub schema: String,
+    pub created_unix_ms: i64,
+    pub feature_version: String,
+    pub feature_names: Vec<String>,
+    /// How the saved weights consume a raw feature row.
+    pub preprocessing: String,
+    pub bar_ms: i64,
+    pub horizon_bars: usize,
+    pub n_splits: usize,
+    pub fit_l2: f64,
+    pub fit_iters: usize,
+    pub fit_lr: f64,
+    pub n_bars: usize,
+    /// Exact out-of-sample denominator: total evaluated rows.
+    pub n_oos: usize,
+    /// SHA-256 over every dataset row fed to the evaluation.
+    pub dataset_sha256: String,
+    /// Coefficients of runs from before this serialization existed
+    /// were held in memory only and cannot be recreated.
+    pub past_in_memory_coefficients: String,
+    pub report: SavedReport,
+    pub folds: Vec<FoldModel>,
+}
+
+impl FoldModelsFile {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("fold models serialize")
+    }
+}
+
+/// A walk-forward evaluation with its full persistence detail (N4).
+pub struct WalkForwardDetail {
+    pub report: EvalReport,
+    pub n_bars: usize,
+    pub dataset_sha256: String,
+    pub folds: Vec<FoldModel>,
+    pub predictions: Vec<PredictionRow>,
+}
+
 /// Purged walk-forward evaluation.
 pub fn walk_forward(bars: &[Bar], n_splits: usize, horizon: usize) -> Option<EvalReport> {
+    walk_forward_detailed(bars, n_splits, horizon).map(|d| d.report)
+}
+
+/// Purged walk-forward evaluation that also returns the per-fold
+/// model records and the per-row out-of-sample probability ledger
+/// (N4). The headline report is computed from exactly the returned
+/// predictions, in the same order the in-memory evaluation always
+/// used, so its numbers are unchanged by the persistence detail.
+pub fn walk_forward_detailed(
+    bars: &[Bar],
+    n_splits: usize,
+    horizon: usize,
+) -> Option<WalkForwardDetail> {
     let n = bars.len();
     if n < 60 {
         return None;
@@ -252,10 +484,8 @@ pub fn walk_forward(bars: &[Bar], n_splits: usize, horizon: usize) -> Option<Eva
     if fold < 10 {
         return None;
     }
-    let mut accs = Vec::new();
-    let mut briers = Vec::new();
-    let mut probs_all = Vec::new();
-    let mut y_all = Vec::new();
+    let mut folds: Vec<FoldModel> = Vec::new();
+    let mut predictions: Vec<PredictionRow> = Vec::new();
     for k in 1..=n_splits {
         let a = k * fold;
         let b = ((k + 1) * fold).min(n);
@@ -265,45 +495,387 @@ pub fn walk_forward(bars: &[Bar], n_splits: usize, horizon: usize) -> Option<Eva
         }
         let xs: Vec<[f64; N_FEATURES]> = bars[..train_end].iter().map(|x| x.features()).collect();
         let ys: Vec<u8> = bars[..train_end].iter().map(|x| x.target).collect();
-        let w = fit_logistic(&xs, &ys, 1.0, 2000, 0.5);
-        for bar in &bars[a..b] {
+        let w = fit_logistic(&xs, &ys, FIT_L2, FIT_ITERS, FIT_LR);
+        let pos = ys.iter().map(|&y| usize::from(y)).sum::<usize>();
+        let neg = ys.len() - pos;
+        let (majority_label, majority_n) = if pos >= neg { (1, pos) } else { (0, neg) };
+        let fold_idx = folds.len();
+        folds.push(FoldModel {
+            fold: fold_idx,
+            train_start: 0,
+            train_end,
+            cutoff_time_ms: bars[train_end - 1].time_ms,
+            purge_bars: horizon,
+            test_start: a,
+            test_end: b,
+            n_train: train_end,
+            n_test: b - a,
+            train_majority_rate: majority_n as f64 / ys.len() as f64,
+            train_majority_label: majority_label,
+            intercept: w[N_FEATURES],
+            weights: [w[0], w[1], w[2], w[3], w[4]],
+            train_input_sha256: hash_bars(&bars[..train_end]),
+        });
+        for (off, bar) in bars[a..b].iter().enumerate() {
             let p = predict_proba(&bar.features(), &w);
-            let pred = u8::from(p > 0.5);
-            accs.push(f64::from(pred == bar.target));
-            briers.push((p - bar.target as f64).powi(2));
-            probs_all.push(p);
-            y_all.push(bar.target);
+            predictions.push(PredictionRow {
+                fold: fold_idx,
+                row: a + off,
+                time_ms: bar.time_ms,
+                features: bar.features(),
+                target: bar.target,
+                proba: p,
+            });
         }
     }
-    if accs.is_empty() {
+    if predictions.is_empty() {
         return None;
     }
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let accs: Vec<f64> = predictions
+        .iter()
+        .map(|r| f64::from(u8::from(r.proba > 0.5) == r.target))
+        .collect();
+    let briers: Vec<f64> = predictions
+        .iter()
+        .map(|r| (r.proba - r.target as f64).powi(2))
+        .collect();
     let acc = mean(&accs);
     let std = (accs.iter().map(|x| (x - acc).powi(2)).sum::<f64>() / accs.len() as f64).sqrt();
-    let pos_rate = y_all.iter().map(|&y| y as f64).sum::<f64>() / y_all.len() as f64;
+    let pos_rate =
+        predictions.iter().map(|r| f64::from(r.target)).sum::<f64>() / predictions.len() as f64;
     let baseline = pos_rate.max(1.0 - pos_rate);
 
-    let mut order: Vec<usize> = (0..probs_all.len()).collect();
-    order.sort_by(|&i, &j| probs_all[i].partial_cmp(&probs_all[j]).unwrap());
+    let mut order: Vec<usize> = (0..predictions.len()).collect();
+    order.sort_by(|&i, &j| {
+        predictions[i]
+            .proba
+            .partial_cmp(&predictions[j].proba)
+            .unwrap()
+    });
     let mut calibration = Vec::new();
     for chunk in order.chunks(order.len() / 10) {
         if chunk.is_empty() {
             continue;
         }
-        let mp = chunk.iter().map(|&i| probs_all[i]).sum::<f64>() / chunk.len() as f64;
-        let rl = chunk.iter().map(|&i| y_all[i] as f64).sum::<f64>() / chunk.len() as f64;
+        let mp = chunk.iter().map(|&i| predictions[i].proba).sum::<f64>() / chunk.len() as f64;
+        let rl = chunk
+            .iter()
+            .map(|&i| f64::from(predictions[i].target))
+            .sum::<f64>()
+            / chunk.len() as f64;
         calibration.push((mp, rl, chunk.len()));
     }
-    Some(EvalReport {
-        feature_version: FEATURE_VERSION,
+    Some(WalkForwardDetail {
+        report: EvalReport {
+            feature_version: FEATURE_VERSION,
+            n_bars: n,
+            n_folds: n_splits,
+            accuracy: acc,
+            accuracy_std: std,
+            baseline,
+            brier: mean(&briers),
+            calibration,
+        },
         n_bars: n,
-        n_folds: n_splits,
-        accuracy: acc,
-        accuracy_std: std,
-        baseline,
-        brier: mean(&briers),
-        calibration,
+        dataset_sha256: hash_bars(bars),
+        folds,
+        predictions,
+    })
+}
+
+/// Assemble the serializable `fold_models.json` content for a
+/// detailed evaluation. `bar_ms` and `created_unix_ms` are supplied
+/// by the caller (the evaluation itself is time-free and
+/// deterministic).
+pub fn build_fold_models_file(
+    detail: &WalkForwardDetail,
+    bar_ms: i64,
+    created_unix_ms: i64,
+) -> FoldModelsFile {
+    let horizon_bars = detail.folds.first().map(|f| f.purge_bars).unwrap_or(0);
+    FoldModelsFile {
+        schema: FOLD_MODELS_SCHEMA.to_string(),
+        created_unix_ms,
+        feature_version: FEATURE_VERSION.to_string(),
+        feature_names: FEATURE_NAMES.iter().map(|s| s.to_string()).collect(),
+        preprocessing: "Features are the raw per-bar values in feature_names order. \
+            fit_logistic standardizes each feature with the training fold's mean and \
+            population sd (sd floor 1e-12) during gradient descent, then folds that \
+            standardization back into the saved raw-space weights, so a saved model \
+            scores a raw feature row directly: proba = sigmoid(intercept + \
+            sum_j weights[j] * x[j]), with the sigmoid argument clamped to [-30, 30]."
+            .to_string(),
+        bar_ms,
+        horizon_bars,
+        n_splits: detail.report.n_folds,
+        fit_l2: FIT_L2,
+        fit_iters: FIT_ITERS,
+        fit_lr: FIT_LR,
+        n_bars: detail.n_bars,
+        n_oos: detail.predictions.len(),
+        dataset_sha256: detail.dataset_sha256.clone(),
+        past_in_memory_coefficients: "UNRECOVERABLE".to_string(),
+        report: SavedReport {
+            accuracy: detail.report.accuracy,
+            accuracy_std: detail.report.accuracy_std,
+            baseline: detail.report.baseline,
+            brier: detail.report.brier,
+            calibration: detail.report.calibration.clone(),
+        },
+        folds: detail.folds.clone(),
+    }
+}
+
+/// The ledger CSV text. Floats use Rust's Display formatting, which
+/// round-trips f64 exactly, so a parsed row is bit-identical to the
+/// row that was written (pinned by `n4_predictions_csv_float_roundtrip`).
+pub fn predictions_csv(rows: &[PredictionRow]) -> String {
+    let mut s =
+        String::from("fold,row,time_ms,ofi,ofi_z,imbalance,spread_z,signed_vol,target,proba\n");
+    for r in rows {
+        s.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{}\n",
+            r.fold,
+            r.row,
+            r.time_ms,
+            r.features[0],
+            r.features[1],
+            r.features[2],
+            r.features[3],
+            r.features[4],
+            r.target,
+            r.proba
+        ));
+    }
+    s
+}
+
+/// Write `fold_models.json` and `predictions.csv` for a detailed
+/// evaluation into `dir` (created if missing). Returns both paths.
+pub fn write_prediction_ledger(
+    dir: &std::path::Path,
+    detail: &WalkForwardDetail,
+    bar_ms: i64,
+    created_unix_ms: i64,
+) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    std::fs::create_dir_all(dir)?;
+    let models = build_fold_models_file(detail, bar_ms, created_unix_ms);
+    let json_path = dir.join("fold_models.json");
+    let csv_path = dir.join("predictions.csv");
+    std::fs::write(&json_path, models.to_json())?;
+    std::fs::write(&csv_path, predictions_csv(&detail.predictions))?;
+    Ok((json_path, csv_path))
+}
+
+/// Independent loader: parse a `fold_models.json` document. This and
+/// `load_predictions` read only the serialized files, never the
+/// producing process's memory.
+pub fn load_fold_models(json: &str) -> Result<FoldModelsFile, String> {
+    serde_json::from_str(json).map_err(|e| format!("fold_models.json does not parse: {e}"))
+}
+
+/// Independent loader: parse a `predictions.csv` ledger.
+pub fn load_predictions(csv: &str) -> Result<Vec<PredictionRow>, String> {
+    let mut lines = csv.lines();
+    let header = lines.next().ok_or("predictions.csv is empty")?;
+    if header != "fold,row,time_ms,ofi,ofi_z,imbalance,spread_z,signed_vol,target,proba" {
+        return Err(format!("predictions.csv header mismatch: {header}"));
+    }
+    let mut rows = Vec::new();
+    for (ln, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split(',').collect();
+        if f.len() != 10 {
+            return Err(format!(
+                "predictions.csv line {}: expected 10 fields, got {}",
+                ln + 2,
+                f.len()
+            ));
+        }
+        let parse = |i: usize| -> Result<f64, String> {
+            f[i].parse::<f64>()
+                .map_err(|e| format!("predictions.csv line {}: field {}: {e}", ln + 2, i))
+        };
+        rows.push(PredictionRow {
+            fold: f[0]
+                .parse()
+                .map_err(|e| format!("predictions.csv line {}: fold: {e}", ln + 2))?,
+            row: f[1]
+                .parse()
+                .map_err(|e| format!("predictions.csv line {}: row: {e}", ln + 2))?,
+            time_ms: f[2]
+                .parse()
+                .map_err(|e| format!("predictions.csv line {}: time_ms: {e}", ln + 2))?,
+            features: [parse(3)?, parse(4)?, parse(5)?, parse(6)?, parse(7)?],
+            target: f[8]
+                .parse()
+                .map_err(|e| format!("predictions.csv line {}: target: {e}", ln + 2))?,
+            proba: parse(9)?,
+        });
+    }
+    Ok(rows)
+}
+
+/// Outcome of a successful ledger verification.
+#[derive(Debug)]
+pub struct LedgerVerification {
+    pub n_rows: usize,
+    /// Largest |reconstructed - saved| probability over all rows.
+    pub max_proba_err: f64,
+    /// Accuracy recomputed from the reconstructed probabilities.
+    pub accuracy: f64,
+    /// Brier score recomputed from the reconstructed probabilities.
+    pub brier: f64,
+}
+
+/// Verify a loaded ledger against its fold models, using only the
+/// two serialized artifacts: every row's probability is recomputed
+/// from the fold's stored weights and the row's stored features, the
+/// row accounting must reproduce the saved out-of-sample denominator
+/// exactly, each fold's test block must start exactly `purge_bars`
+/// after its training cutoff (so no evaluated row was trained on),
+/// and the recomputed accuracy and Brier score must match the saved
+/// report. All tolerances are 1e-8.
+pub fn verify_prediction_ledger(
+    models: &FoldModelsFile,
+    rows: &[PredictionRow],
+) -> Result<LedgerVerification, String> {
+    if models.schema != FOLD_MODELS_SCHEMA {
+        return Err(format!("unknown fold models schema: {}", models.schema));
+    }
+    if models.folds.is_empty() {
+        return Err("fold models contain no fold records".to_string());
+    }
+    if models.feature_names.len() != N_FEATURES {
+        return Err(format!(
+            "feature_names has {} entries, expected {N_FEATURES}",
+            models.feature_names.len()
+        ));
+    }
+    for f in &models.folds {
+        if f.test_start < f.train_end {
+            return Err(format!(
+                "fold {}: test block starts at {} inside the training range ending {}",
+                f.fold, f.test_start, f.train_end
+            ));
+        }
+        if f.test_start != f.train_end + f.purge_bars {
+            return Err(format!(
+                "fold {}: test block starts at {}, expected cutoff {} + purge {}",
+                f.fold, f.test_start, f.train_end, f.purge_bars
+            ));
+        }
+        if f.test_end - f.test_start != f.n_test {
+            return Err(format!(
+                "fold {}: test range holds {} rows but n_test says {}",
+                f.fold,
+                f.test_end - f.test_start,
+                f.n_test
+            ));
+        }
+        if f.train_end - f.train_start != f.n_train {
+            return Err(format!(
+                "fold {}: train range holds {} rows but n_train says {}",
+                f.fold,
+                f.train_end - f.train_start,
+                f.n_train
+            ));
+        }
+    }
+    let summed: usize = models.folds.iter().map(|f| f.n_test).sum();
+    if summed != models.n_oos {
+        return Err(format!(
+            "fold test counts sum to {summed}, saved OOS denominator is {}",
+            models.n_oos
+        ));
+    }
+    if rows.len() != models.n_oos {
+        return Err(format!(
+            "ledger holds {} rows, saved OOS denominator is {}",
+            rows.len(),
+            models.n_oos
+        ));
+    }
+    let mut per_fold = vec![0usize; models.folds.len()];
+    let mut max_err = 0.0f64;
+    let mut acc_sum = 0.0f64;
+    let mut brier_sum = 0.0f64;
+    for r in rows {
+        let f = models
+            .folds
+            .get(r.fold)
+            .ok_or_else(|| format!("ledger row {} references unknown fold {}", r.row, r.fold))?;
+        if f.fold != r.fold {
+            return Err(format!(
+                "fold record at position {} is labeled fold {}",
+                r.fold, f.fold
+            ));
+        }
+        if r.row < f.test_start || r.row >= f.test_end {
+            return Err(format!(
+                "ledger row {} lies outside fold {} test range [{}, {})",
+                r.row, r.fold, f.test_start, f.test_end
+            ));
+        }
+        if !r.proba.is_finite() || !(0.0..=1.0).contains(&r.proba) {
+            return Err(format!(
+                "ledger row {}: saved proba {} not in [0, 1]",
+                r.row, r.proba
+            ));
+        }
+        let w = [
+            f.weights[0],
+            f.weights[1],
+            f.weights[2],
+            f.weights[3],
+            f.weights[4],
+            f.intercept,
+        ];
+        let p = predict_proba(&r.features, &w);
+        let err = (p - r.proba).abs();
+        if !err.is_finite() {
+            return Err(format!("ledger row {}: reconstruction not finite", r.row));
+        }
+        max_err = max_err.max(err);
+        per_fold[r.fold] += 1;
+        acc_sum += f64::from(u8::from(p > 0.5) == r.target);
+        brier_sum += (p - r.target as f64).powi(2);
+    }
+    for (i, f) in models.folds.iter().enumerate() {
+        if per_fold[i] != f.n_test {
+            return Err(format!(
+                "fold {}: ledger holds {} rows, fold record says {}",
+                f.fold, per_fold[i], f.n_test
+            ));
+        }
+    }
+    if max_err > 1e-8 {
+        return Err(format!(
+            "max proba reconstruction error {max_err:e} exceeds 1e-8"
+        ));
+    }
+    let accuracy = acc_sum / rows.len() as f64;
+    let brier = brier_sum / rows.len() as f64;
+    if (accuracy - models.report.accuracy).abs() > 1e-8 {
+        return Err(format!(
+            "recomputed accuracy {accuracy} differs from saved {} by more than 1e-8",
+            models.report.accuracy
+        ));
+    }
+    if (brier - models.report.brier).abs() > 1e-8 {
+        return Err(format!(
+            "recomputed brier {brier} differs from saved {} by more than 1e-8",
+            models.report.brier
+        ));
+    }
+    Ok(LedgerVerification {
+        n_rows: rows.len(),
+        max_proba_err: max_err,
+        accuracy,
+        brier,
     })
 }
 
@@ -735,5 +1307,190 @@ mod tests {
         let (quotes, trades) = gap_fixture(600_000);
         let ds = build_dataset(&quotes, &trades, 10_000, 3);
         assert_eq!(ds.len(), 113, "control dataset row count");
+    }
+
+    // ======================= N4 fixtures =======================
+    // Stage 3 N4: per-fold logistic weights and the exact OOS
+    // prediction ledger must survive the process that produced them,
+    // so an independent loader can reconstruct every score.
+
+    #[test]
+    fn n4_sha256_known_answers() {
+        // NIST / FIPS 180-4 known-answer vectors for the in-tree
+        // SHA-256 used for input hashes.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        assert_eq!(
+            sha256_hex(&vec![b'a'; 1_000_000]),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    #[test]
+    fn n4_dataset_rows_carry_bar_timestamps() {
+        // The ledger is timestamped, so every dataset row must carry
+        // the start time of the OFI bar it was built from: on the
+        // 10 s grid and strictly increasing in row order.
+        let (q, t) = synth_quotes(600, true);
+        let ds = build_dataset(&q, &t, 10_000, 2);
+        assert!(ds.len() > 40, "only {} rows", ds.len());
+        for (i, row) in ds.iter().enumerate() {
+            assert_eq!(row.time_ms % 10_000, 0, "row {i} off the bar grid");
+            if i > 0 {
+                assert!(
+                    row.time_ms > ds[i - 1].time_ms,
+                    "row {i} timestamp not increasing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn n4_fold_ledger_roundtrip_reconstructs() {
+        // 2400 one-second quotes on 10 s bars, horizon 2: enough rows
+        // that all four walk-forward folds clear the 30-row training
+        // minimum, so the standard evaluation yields four fold records.
+        let (q, t) = synth_quotes(2400, true);
+        let bars = build_dataset(&q, &t, 10_000, 2);
+        let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        assert_eq!(detail.folds.len(), 4, "expected four fold records");
+        assert_eq!(detail.report.n_folds, 4);
+
+        let models = build_fold_models_file(&detail, 10_000, 1_700_000_000_000);
+        assert_eq!(models.n_oos, detail.predictions.len());
+        assert_eq!(
+            models.folds.iter().map(|f| f.n_test).sum::<usize>(),
+            models.n_oos,
+            "fold test counts must sum to the saved OOS denominator"
+        );
+        for f in &models.folds {
+            assert_eq!(f.test_end - f.test_start, f.n_test);
+            assert_eq!(
+                f.test_start,
+                f.train_end + f.purge_bars,
+                "fold {} test block must start exactly purge bars after the cutoff",
+                f.fold
+            );
+            assert!(
+                f.train_end > f.train_start,
+                "fold {} empty train range",
+                f.fold
+            );
+        }
+
+        // Serialize, then reconstruct with the independent loader only.
+        let json = models.to_json();
+        let csv = predictions_csv(&detail.predictions);
+        let loaded_models = load_fold_models(&json).expect("load fold models");
+        let loaded_rows = load_predictions(&csv).expect("load predictions");
+        assert_eq!(loaded_rows.len(), models.n_oos);
+        let check =
+            verify_prediction_ledger(&loaded_models, &loaded_rows).expect("ledger verification");
+        eprintln!(
+            "n4 fixture: {} rows, max proba reconstruction err {:e}",
+            check.n_rows, check.max_proba_err
+        );
+        assert!(
+            check.max_proba_err <= 1e-8,
+            "reconstruction err {} exceeds 1e-8",
+            check.max_proba_err
+        );
+        assert!((check.accuracy - detail.report.accuracy).abs() <= 1e-8);
+        assert!((check.brier - detail.report.brier).abs() <= 1e-8);
+        // The detailed path must not change the evaluation itself:
+        // same headline numbers as the in-memory walk_forward.
+        let rep = walk_forward(&bars, 4, 2).expect("plain eval");
+        assert_eq!(rep.accuracy, detail.report.accuracy);
+        assert_eq!(rep.brier, detail.report.brier);
+    }
+
+    #[test]
+    fn n4_ledger_detects_tampering() {
+        let (q, t) = synth_quotes(2400, true);
+        let bars = build_dataset(&q, &t, 10_000, 2);
+        let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        let models = build_fold_models_file(&detail, 10_000, 1_700_000_000_000);
+        let rows = load_predictions(&predictions_csv(&detail.predictions)).unwrap();
+
+        // A shifted weight must break reconstruction beyond 1e-8.
+        let mut bad = models.clone();
+        bad.folds[0].weights[0] += 0.01;
+        assert!(
+            verify_prediction_ledger(&bad, &rows).is_err(),
+            "tampered weight went undetected"
+        );
+
+        // A dropped ledger row must break the exact denominator.
+        let short = &rows[..rows.len() - 1];
+        assert!(
+            verify_prediction_ledger(&models, short).is_err(),
+            "dropped row went undetected"
+        );
+
+        // A schema the loader does not know must be refused, never
+        // silently reinterpreted.
+        let mut wrong_schema = models.clone();
+        wrong_schema.schema = "toxicflow.fold-models/v999".to_string();
+        assert!(verify_prediction_ledger(&wrong_schema, &rows).is_err());
+    }
+
+    #[test]
+    fn n4_past_coefficients_marked_unrecoverable() {
+        let (q, t) = synth_quotes(2400, true);
+        let bars = build_dataset(&q, &t, 10_000, 2);
+        let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        let models = build_fold_models_file(&detail, 10_000, 1_700_000_000_000);
+        assert_eq!(models.past_in_memory_coefficients, "UNRECOVERABLE");
+        assert!(models.to_json().contains("UNRECOVERABLE"));
+    }
+
+    #[test]
+    fn n4_predictions_csv_float_roundtrip() {
+        // The CSV is an exact ledger: every float written must parse
+        // back to the identical bit pattern.
+        let rows = vec![
+            PredictionRow {
+                fold: 0,
+                row: 7,
+                time_ms: 1_700_000_000_000,
+                features: [0.1, -3.89, 1e-7, 123456.789, -0.0],
+                target: 1,
+                proba: 0.809,
+            },
+            PredictionRow {
+                fold: 3,
+                row: 8,
+                time_ms: 1_700_000_010_000,
+                features: [-14.07, 9.70, 0.0, 2.5e-12, 42.0],
+                target: 0,
+                proba: 1.0 / 3.0,
+            },
+        ];
+        let back = load_predictions(&predictions_csv(&rows)).expect("csv roundtrip");
+        assert_eq!(back.len(), rows.len());
+        for (a, b) in rows.iter().zip(back.iter()) {
+            assert_eq!(a.fold, b.fold);
+            assert_eq!(a.row, b.row);
+            assert_eq!(a.time_ms, b.time_ms);
+            assert_eq!(a.target, b.target);
+            for j in 0..N_FEATURES {
+                assert_eq!(
+                    a.features[j].to_bits(),
+                    b.features[j].to_bits(),
+                    "feature {j} changed in the CSV roundtrip"
+                );
+            }
+            assert_eq!(a.proba.to_bits(), b.proba.to_bits());
+        }
     }
 }
