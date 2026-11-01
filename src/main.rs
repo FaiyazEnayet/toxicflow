@@ -174,6 +174,45 @@ mod tests {
     }
 
     #[test]
+    fn n4_export_writes_prediction_ledger() {
+        // Stage 3 N4: the export must persist the fold models and the
+        // OOS probability ledger under experiments/<run>/, and the
+        // independent loader must reconstruct them.
+        let (quotes, trades) = synth_session();
+        let tmp = std::env::temp_dir().join(format!("toxicflow_export_n4_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &trades).unwrap();
+        storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &quotes).unwrap();
+        let out = tmp.join("out");
+        export_session(tmp.to_str().unwrap(), out.to_str().unwrap(), 50, 20, None)
+            .expect("export failed");
+
+        let exp_root = out.join("experiments");
+        let runs: Vec<_> = std::fs::read_dir(&exp_root)
+            .expect("experiments dir missing")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(runs.len(), 1, "expected exactly one experiment run dir");
+        let run_dir = runs[0].path();
+        let models = toxicflow::predict::load_fold_models(
+            &std::fs::read_to_string(run_dir.join("fold_models.json")).unwrap(),
+        )
+        .expect("load fold models");
+        let rows = toxicflow::predict::load_predictions(
+            &std::fs::read_to_string(run_dir.join("predictions.csv")).unwrap(),
+        )
+        .expect("load predictions");
+        assert!(!models.folds.is_empty(), "no fold records persisted");
+        assert_eq!(models.past_in_memory_coefficients, "UNRECOVERABLE");
+        let check = toxicflow::predict::verify_prediction_ledger(&models, &rows)
+            .expect("ledger verification");
+        assert_eq!(check.n_rows, models.n_oos);
+        assert!(check.max_proba_err <= 1e-8);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
     fn n2_flow_bars_flag_gap_bars() {
         // Quotes/trades on 1 s bars 0..=4, a 5-bar hole, then 10..=14.
         let mut quotes = Vec::new();
@@ -465,7 +504,29 @@ fn export_session(
 
     // prediction calibration
     let ds = predict::build_dataset(&quotes, &trades, 10_000, 3);
-    let rep = predict::walk_forward(&ds, 4, 3);
+    let detail = predict::walk_forward_detailed(&ds, 4, 3);
+    let rep = detail.as_ref().map(|d| &d.report);
+
+    // N4: persist the per-fold weights and the exact OOS probability
+    // ledger under experiments/<run>/ next to the other exports, so
+    // the evaluation can be reconstructed from disk alone.
+    if let Some(detail) = &detail {
+        let run = std::path::Path::new(dir)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "session".to_string());
+        let created_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        predict::write_prediction_ledger(
+            &std::path::Path::new(out).join("experiments").join(run),
+            detail,
+            10_000,
+            created_unix_ms,
+        )?;
+    }
     write_csv(
         &format!("{out}/calibration.csv"),
         "mean_pred,realized,n",
