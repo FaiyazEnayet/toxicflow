@@ -4,11 +4,10 @@
 //!   wss://data-stream.binance.vision/stream?streams=<s>@aggTrade/<s>@depth@100ms
 //! Snapshots come from https://data-api.binance.vision/api/v3/depth.
 //!
-//! The local book follows the documented sync procedure: buffer diffs while
-//! a snapshot is fetched in the background, discard stale diffs, verify the
-//! [U, u] continuity, then apply. A sequence gap triggers a full resync,
-//! and a dropped connection triggers reconnect with backoff (which always
-//! resyncs the book).
+//! Book synchronization lives in `booksync`: one shared state machine
+//! with transactional snapshot merges. This module owns the network
+//! loop and the recorded trades/quotes; it never applies a depth event
+//! that failed validation, and a failed merge emits no quotes.
 
 use std::error::Error;
 use std::time::{Duration, Instant, SystemTime};
@@ -18,8 +17,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::booksync::{
+    parse_level_pair, BookSync, DepthEvent, DepthOutcome, MergeOutcome, SnapshotData,
+};
 use crate::metrics::{Quote, Trade};
-use crate::orderbook::{OrderBook, SyncResult};
+use crate::orderbook::OrderBook;
 use crate::storage;
 
 const WS_HOST: &str = "wss://data-stream.binance.vision";
@@ -44,22 +46,35 @@ struct Snapshot {
     asks: Vec<(String, String)>,
 }
 
-fn parse_pair(v: &(String, String)) -> (f64, f64) {
-    (v.0.parse().unwrap_or(0.0), v.1.parse().unwrap_or(0.0))
+impl Snapshot {
+    /// Convert the raw REST payload into a validated snapshot. A
+    /// malformed level is an error here, not a zero.
+    fn validated(&self) -> Result<SnapshotData, String> {
+        if self.last_update_id < 0 {
+            return Err(format!("lastUpdateId {} is negative", self.last_update_id));
+        }
+        let conv = |lv: &[(String, String)]| -> Result<Vec<(f64, f64)>, String> {
+            lv.iter().map(parse_pair).collect()
+        };
+        Ok(SnapshotData {
+            last_update_id: self.last_update_id,
+            bids: conv(&self.bids)?,
+            asks: conv(&self.asks)?,
+        })
+    }
 }
 
-fn parse_levels(v: &serde_json::Value) -> Vec<(f64, f64)> {
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .map(|x| {
-                    let p = x[0].as_str().unwrap_or("0").to_string();
-                    let q = x[1].as_str().unwrap_or("0").to_string();
-                    parse_pair(&(p, q))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// Strict pair parsing: any malformed or non-finite value is an
+/// error. (The previous implementation silently substituted 0.0.)
+fn parse_pair(v: &(String, String)) -> Result<(f64, f64), String> {
+    parse_level_pair(&v.0, &v.1)
+}
+
+/// Strict level-array parsing: any malformed level fails the whole
+/// array instead of being recorded as a zero level.
+#[cfg(test)]
+fn parse_levels(v: &serde_json::Value) -> Result<Vec<(f64, f64)>, String> {
+    crate::booksync::parse_levels_json(v)
 }
 
 async fn fetch_snapshot(symbol: &str) -> Result<Snapshot, String> {
@@ -76,24 +91,30 @@ async fn fetch_snapshot(symbol: &str) -> Result<Snapshot, String> {
     Ok(snap)
 }
 
-struct Session {
-    book: OrderBook,
-    synced: bool,
+/// One recording session: the shared sync machine plus the recorded
+/// trades and quotes. Quotes enter `quotes` only when the state
+/// machine commits the event (or the snapshot merge) that produced
+/// them, so a failed merge emits nothing.
+pub struct Session {
+    sync: BookSync,
     syncing: bool,
-    buffer: Vec<serde_json::Value>,
     pending: Option<oneshot::Receiver<Result<Snapshot, String>>>,
     trades: Vec<Trade>,
     quotes: Vec<Quote>,
     resyncs: u32,
 }
 
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Session {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            book: OrderBook::new(),
-            synced: false,
+            sync: BookSync::new(),
             syncing: false,
-            buffer: Vec::new(),
             pending: None,
             trades: Vec::new(),
             quotes: Vec::new(),
@@ -101,8 +122,24 @@ impl Session {
         }
     }
 
+    pub fn is_synced(&self) -> bool {
+        self.sync.is_synced()
+    }
+
+    pub fn book(&self) -> &OrderBook {
+        self.sync.book()
+    }
+
+    pub fn buffered_len(&self) -> usize {
+        self.sync.buffered_len()
+    }
+
+    pub fn quotes(&self) -> &[Quote] {
+        &self.quotes
+    }
+
     fn record_touch(&mut self, event_ms: i64) {
-        if let Some((bp, bq, ap, aq)) = self.book.touch() {
+        if let Some((bp, bq, ap, aq)) = self.sync.book().touch() {
             self.quotes.push(Quote {
                 time_ms: event_ms,
                 bid_px: bp,
@@ -111,6 +148,13 @@ impl Session {
                 ask_sz: aq,
             });
         }
+    }
+
+    /// A fresh connection always resyncs the book.
+    fn reset_sync(&mut self) {
+        self.sync = BookSync::new();
+        self.syncing = false;
+        self.pending = None;
     }
 
     /// Start a background snapshot fetch; the read loop keeps buffering.
@@ -128,45 +172,38 @@ impl Session {
         self.pending = Some(rx);
     }
 
-    /// Merge a fetched snapshot with the buffered diffs. Returns true when
-    /// the book is in sync afterwards.
-    ///
-    /// Follows the exchange procedure: events fully covered by the snapshot
-    /// (u <= lastUpdateId) are dropped, and the first remaining event must
-    /// satisfy U <= lastUpdateId + 1; otherwise the snapshot is too old and
-    /// we refetch.
+    /// Merge a fetched snapshot with the buffered diffs. Transactional:
+    /// returns true only when the candidate book and its quotes were
+    /// committed together; on failure the book, the quotes, and the
+    /// buffered events are exactly as before the attempt.
     fn merge_snapshot(&mut self, snap: &Snapshot) -> bool {
-        let first_live_u = self.buffer.iter().find_map(|e| {
-            let u = e["u"].as_i64().unwrap_or(0);
-            if u > snap.last_update_id {
-                e["U"].as_i64()
-            } else {
-                None
-            }
-        });
-        if let Some(fu) = first_live_u {
-            if snap.last_update_id + 1 < fu {
-                return false; // snapshot too old to continue the stream: refetch
+        match snap.validated() {
+            Ok(data) => self.merge_snapshot_data(&data),
+            Err(e) => {
+                eprintln!("record: rejecting invalid snapshot: {e}");
+                false
             }
         }
-        let bids: Vec<(f64, f64)> = snap.bids.iter().map(parse_pair).collect();
-        let asks: Vec<(f64, f64)> = snap.asks.iter().map(parse_pair).collect();
-        self.book.from_snapshot(&bids, &asks, snap.last_update_id);
-        let buffered = std::mem::take(&mut self.buffer);
-        for e in buffered {
-            let u = e["u"].as_i64().unwrap_or(0);
-            if u <= snap.last_update_id {
-                continue; // stale
+    }
+
+    /// Transactional merge of an already-validated snapshot.
+    pub fn merge_snapshot_data(&mut self, snap: &SnapshotData) -> bool {
+        let mut pending_quotes = Vec::new();
+        match self.sync.merge_snapshot(snap, &mut pending_quotes) {
+            MergeOutcome::Synced { .. } => {
+                for (event_ms, (bp, bq, ap, aq)) in pending_quotes {
+                    self.quotes.push(Quote {
+                        time_ms: event_ms,
+                        bid_px: bp,
+                        bid_sz: bq,
+                        ask_px: ap,
+                        ask_sz: aq,
+                    });
+                }
+                true
             }
-            let uu = e["U"].as_i64().unwrap_or(0);
-            let b = parse_levels(&e["b"]);
-            let a = parse_levels(&e["a"]);
-            if self.book.apply_diff(uu, u, &b, &a) == SyncResult::Gap {
-                return false;
-            }
-            self.record_touch(e["E"].as_i64().unwrap_or(0));
+            MergeOutcome::Refetch => false,
         }
-        true
     }
 
     /// Poll for a finished snapshot fetch and merge it.
@@ -186,33 +223,31 @@ impl Session {
             self.pending = None;
             self.syncing = false;
             if ok {
-                self.synced = true;
                 self.resyncs += 1;
             }
             // on failure the next loop iteration kicks a fresh fetch
         }
     }
 
-    fn on_depth(&mut self, data: &serde_json::Value, symbol: &str) {
+    pub fn on_depth(&mut self, data: &serde_json::Value, symbol: &str) {
         self.poll_sync();
-        if !self.synced {
-            self.buffer.push(data.clone());
+        let ev = match DepthEvent::from_json(data) {
+            Ok(ev) => ev,
+            Err(e) => {
+                // fail closed: an invalid message is dropped with a
+                // diagnostic, never applied as zeros
+                eprintln!("record: dropping invalid depthUpdate: {e}");
+                return;
+            }
+        };
+        if !self.sync.is_synced() {
+            self.sync.on_depth(ev);
             self.kick_sync(symbol);
             return;
         }
-        let u_first = data["U"].as_i64().unwrap_or(0);
-        let u_last = data["u"].as_i64().unwrap_or(0);
-        let b = parse_levels(&data["b"]);
-        let a = parse_levels(&data["a"]);
-        match self.book.apply_diff(u_first, u_last, &b, &a) {
-            SyncResult::Applied => {
-                self.record_touch(data["E"].as_i64().unwrap_or(0));
-            }
-            SyncResult::Stale => {}
-            SyncResult::Gap => {
-                self.synced = false;
-                self.buffer = vec![data.clone()];
-            }
+        let event_ms = ev.event_ms;
+        if let DepthOutcome::Applied = self.sync.on_depth(ev) {
+            self.record_touch(event_ms);
         }
     }
 
@@ -267,10 +302,7 @@ pub async fn record_session(
         backoff = Duration::from_secs(1);
         let (mut write, mut read) = ws.split();
         // a fresh connection always resyncs the book
-        session.synced = false;
-        session.syncing = false;
-        session.pending = None;
-        session.buffer.clear();
+        session.reset_sync();
 
         loop {
             if Instant::now() >= deadline {
@@ -363,19 +395,28 @@ mod tests {
         }
     }
 
+    /// Buffer an event without triggering a snapshot fetch (the unit
+    /// tests drive merges explicitly).
+    fn buffer(s: &mut Session, e: &serde_json::Value) {
+        let ev = DepthEvent::from_json(e).expect("test event is valid");
+        s.sync.on_depth(ev);
+    }
+
     #[test]
     fn merge_applies_buffered_diffs_after_snapshot() {
         let mut s = Session::new();
-        s.buffer.push(depth_event(101, 102, &[(100.0, 6.0)], &[]));
-        s.buffer
-            .push(depth_event(103, 103, &[(99.9, 0.0)], &[(100.2, 9.0)]));
+        buffer(&mut s, &depth_event(101, 102, &[(100.0, 6.0)], &[]));
+        buffer(
+            &mut s,
+            &depth_event(103, 103, &[(99.9, 0.0)], &[(100.2, 9.0)]),
+        );
         assert!(s.merge_snapshot(&snapshot(100)));
-        assert!(s.buffer.is_empty());
-        assert_eq!(s.book.best_bid(), Some((100.0, 6.0)));
+        assert_eq!(s.buffered_len(), 0);
+        assert_eq!(s.book().best_bid(), Some((100.0, 6.0)));
         // 99.9 removed, only 100.0 remains on the bid side
-        assert_eq!(s.book.bid_levels(), vec![(100.0, 6.0)]);
-        assert_eq!(s.book.ask_levels(), vec![(100.1, 4.0), (100.2, 9.0)]);
-        assert_eq!(s.book.last_id, 103);
+        assert_eq!(s.book().bid_levels(), vec![(100.0, 6.0)]);
+        assert_eq!(s.book().ask_levels(), vec![(100.1, 4.0), (100.2, 9.0)]);
+        assert_eq!(s.book().last_id, 103);
         // each applied event recorded a quote
         assert_eq!(s.quotes.len(), 2);
     }
@@ -384,69 +425,82 @@ mod tests {
     fn merge_skips_buffered_events_older_than_snapshot() {
         let mut s = Session::new();
         // fully stale: u <= snapshot id
-        s.buffer.push(depth_event(95, 98, &[(100.0, 99.0)], &[]));
+        buffer(&mut s, &depth_event(95, 98, &[(100.0, 99.0)], &[]));
         // overlapping the snapshot edge
-        s.buffer.push(depth_event(99, 101, &[(100.0, 7.0)], &[]));
+        buffer(&mut s, &depth_event(99, 101, &[(100.0, 7.0)], &[]));
         assert!(s.merge_snapshot(&snapshot(100)));
-        assert_eq!(s.book.best_bid(), Some((100.0, 7.0)));
-        assert_eq!(s.book.last_id, 101);
+        assert_eq!(s.book().best_bid(), Some((100.0, 7.0)));
+        assert_eq!(s.book().last_id, 101);
     }
 
     #[test]
     fn merge_refetches_when_snapshot_predates_buffer() {
         let mut s = Session::new();
-        s.buffer.push(depth_event(201, 202, &[(100.0, 6.0)], &[]));
+        buffer(&mut s, &depth_event(201, 202, &[(100.0, 6.0)], &[]));
         // snapshot is older than the first buffered event: cannot merge
         assert!(!s.merge_snapshot(&snapshot(100)));
         // book untouched, buffer retained for the next attempt
-        assert_eq!(s.book.last_id, -1);
-        assert_eq!(s.buffer.len(), 1);
+        assert_eq!(s.book().last_id, -1);
+        assert_eq!(s.buffered_len(), 1);
     }
 
     #[test]
     fn merge_refetches_on_gap_inside_buffer() {
         let mut s = Session::new();
-        s.buffer.push(depth_event(101, 102, &[(100.0, 6.0)], &[]));
+        buffer(&mut s, &depth_event(101, 102, &[(100.0, 6.0)], &[]));
         // update 103 never arrived
-        s.buffer.push(depth_event(104, 104, &[(100.0, 8.0)], &[]));
+        buffer(&mut s, &depth_event(104, 104, &[(100.0, 8.0)], &[]));
         assert!(!s.merge_snapshot(&snapshot(100)));
+        // transactional: the first event was NOT half-applied and no
+        // quote was emitted for the failed attempt
+        assert_eq!(s.book().last_id, -1);
+        assert!(s.book().is_empty());
+        assert!(s.quotes.is_empty());
+        assert_eq!(s.buffered_len(), 2);
     }
 
     #[test]
     fn merge_with_empty_buffer_syncs_to_snapshot() {
         let mut s = Session::new();
         assert!(s.merge_snapshot(&snapshot(100)));
-        assert_eq!(s.book.best_bid(), Some((100.0, 5.0)));
-        assert_eq!(s.book.last_id, 100);
+        assert_eq!(s.book().best_bid(), Some((100.0, 5.0)));
+        assert_eq!(s.book().last_id, 100);
         assert!(s.quotes.is_empty());
     }
 
     #[test]
     fn on_depth_gap_keeps_triggering_event_for_resync() {
-        let mut s = Session::new();
-        // drive the session to synced state first
-        s.buffer.push(depth_event(101, 101, &[], &[]));
-        assert!(s.merge_snapshot(&snapshot(100)));
-        s.synced = true;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut s = Session::new();
+            buffer(&mut s, &depth_event(101, 101, &[], &[]));
+            assert!(s.merge_snapshot(&snapshot(100)));
 
-        // a gap: the triggering event must be retained as the new buffer head
-        let gap = depth_event(110, 111, &[(100.0, 6.0)], &[]);
-        s.on_depth(&gap, "BTCUSDT");
-        assert!(!s.synced);
-        assert_eq!(s.buffer.len(), 1);
-        assert_eq!(s.buffer[0]["U"].as_i64(), Some(110));
+            // a gap: the triggering event must be retained as the new
+            // buffer head (kick_sync spawns a fetch; it cannot complete
+            // without network and is dropped with the session)
+            let gap = depth_event(110, 111, &[(100.0, 6.0)], &[]);
+            s.on_depth(&gap, "BTCUSDT");
+            assert!(!s.is_synced());
+            assert_eq!(s.buffered_len(), 1);
 
-        // a snapshot that cannot continue the stream forces another refetch:
-        // first live event has U=110, so lastUpdateId must be >= 109
-        let mut too_old = snapshot(100);
-        too_old.last_update_id = 108;
-        assert!(!s.merge_snapshot(&too_old));
-        // lastUpdateId = 109 satisfies U <= lastUpdateId + 1: merges cleanly
-        let mut snap2 = snapshot(100);
-        snap2.last_update_id = 109;
-        assert!(s.merge_snapshot(&snap2));
-        assert_eq!(s.book.best_bid(), Some((100.0, 6.0)));
-        assert_eq!(s.book.last_id, 111);
+            // a snapshot that cannot continue the stream forces another
+            // refetch: first live event has U=110, so lastUpdateId must
+            // be >= 109
+            let mut too_old = snapshot(100);
+            too_old.last_update_id = 108;
+            assert!(!s.merge_snapshot(&too_old));
+            // lastUpdateId = 109 satisfies U <= lastUpdateId + 1: merges
+            // cleanly
+            let mut snap2 = snapshot(100);
+            snap2.last_update_id = 109;
+            assert!(s.merge_snapshot(&snap2));
+            assert_eq!(s.book().best_bid(), Some((100.0, 6.0)));
+            assert_eq!(s.book().last_id, 111);
+        });
     }
 
     #[test]
@@ -454,27 +508,47 @@ mod tests {
         // The snapshot may be newer than some buffered events; those are
         // simply skipped as stale and the stream continues.
         let mut s = Session::new();
-        s.buffer.push(depth_event(101, 102, &[(100.0, 6.0)], &[]));
-        s.buffer.push(depth_event(103, 104, &[(100.0, 8.0)], &[]));
+        buffer(&mut s, &depth_event(101, 102, &[(100.0, 6.0)], &[]));
+        buffer(&mut s, &depth_event(103, 104, &[(100.0, 8.0)], &[]));
         let mut snap = snapshot(100);
         snap.last_update_id = 103;
         assert!(s.merge_snapshot(&snap));
-        assert_eq!(s.book.best_bid(), Some((100.0, 8.0)));
-        assert_eq!(s.book.last_id, 104);
+        assert_eq!(s.book().best_bid(), Some((100.0, 8.0)));
+        assert_eq!(s.book().last_id, 104);
     }
 
     #[test]
     fn on_depth_stale_event_leaves_book_alone() {
-        let mut s = Session::new();
-        s.buffer.push(depth_event(101, 101, &[], &[]));
-        assert!(s.merge_snapshot(&snapshot(100)));
-        s.synced = true;
-        let before = s.book.bid_levels();
-        let n_quotes = s.quotes.len();
-        s.on_depth(&depth_event(90, 95, &[(100.0, 1.0)], &[]), "BTCUSDT");
-        assert!(s.synced);
-        assert_eq!(s.book.bid_levels(), before);
-        assert_eq!(s.quotes.len(), n_quotes); // stale event records nothing
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut s = Session::new();
+            buffer(&mut s, &depth_event(101, 101, &[], &[]));
+            assert!(s.merge_snapshot(&snapshot(100)));
+            let before = s.book().bid_levels();
+            let n_quotes = s.quotes.len();
+            s.on_depth(&depth_event(90, 95, &[(100.0, 1.0)], &[]), "BTCUSDT");
+            assert!(s.is_synced());
+            assert_eq!(s.book().bid_levels(), before);
+            assert_eq!(s.quotes.len(), n_quotes); // stale event records nothing
+        });
+    }
+
+    #[test]
+    fn strict_parsing_rejects_malformed_values() {
+        assert!(parse_pair(&("abc".to_string(), "1.0".to_string())).is_err());
+        assert!(parse_pair(&("100.0".to_string(), "-1.0".to_string())).is_err());
+        assert!(parse_pair(&("0".to_string(), "1.0".to_string())).is_err());
+        assert_eq!(
+            parse_pair(&("100.0".to_string(), "0".to_string())),
+            Ok((100.0, 0.0))
+        );
+        let bad = serde_json::json!([["100.0", "1.0"], ["oops", "2.0"]]);
+        assert!(parse_levels(&bad).is_err());
+        let not_pairs = serde_json::json!([["100.0"]]);
+        assert!(parse_levels(&not_pairs).is_err());
     }
 
     /// Serializes tests that mutate the proxy env vars (process-global).

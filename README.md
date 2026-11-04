@@ -79,7 +79,7 @@ The recorded session contains no demonstrated predictive edge over the baseline.
 
 ## Code and data
 
-`src/orderbook.rs` handles book synchronization. `metrics.rs` contains the estimators. `predict.rs` handles walk-forward evaluation. `strategy.rs` is the toy simulation. Dashboard inputs are exported session files, not an invented dataset.
+`src/orderbook.rs` is the local book. `booksync.rs` runs the shared transactional sync state machine behind the recorder and the live dashboard. `metrics.rs` contains the estimators. `predict.rs` handles walk-forward evaluation. `strategy.rs` is the toy simulation. Dashboard inputs are exported session files, not an invented dataset.
 
 
 ## Limitations

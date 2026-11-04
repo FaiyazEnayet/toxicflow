@@ -30,7 +30,7 @@ pub enum SyncResult {
     Gap,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct OrderBook {
     bids: BTreeMap<i64, f64>,
     asks: BTreeMap<i64, f64>,
