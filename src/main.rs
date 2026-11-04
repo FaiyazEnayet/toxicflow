@@ -7,7 +7,6 @@ use tokio_tungstenite::tungstenite::Message;
 use toxicflow::metrics::{
     kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, Quote, Trade,
 };
-use toxicflow::orderbook::{OrderBook, SyncResult};
 use toxicflow::{predict, recorder, storage, strategy};
 
 #[derive(Parser)]
@@ -648,71 +647,59 @@ fn flow_bars(trades: &[Trade], quotes: &[Quote], bar_ms: i64) -> Vec<FlowBar> {
     }
     out
 }
-
-fn parse_levels(v: &serde_json::Value) -> Vec<(f64, f64)> {
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .map(|x| {
-                    (
-                        x[0].as_str().unwrap_or("0").parse().unwrap_or(0.0),
-                        x[1].as_str().unwrap_or("0").parse().unwrap_or(0.0),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Live terminal dashboard: rolling VPIN, touch imbalance, midprice.
 /// Ctrl-C to stop.
 async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
+    use toxicflow::booksync::{BookSync, DepthEvent, SnapshotData};
+
     let sym = symbol.to_lowercase();
     let url =
         format!("wss://data-stream.binance.vision/stream?streams={sym}@aggTrade/{sym}@depth@100ms");
-    // prime the book with a snapshot first
-    let mut book = OrderBook::new();
-    let mut synced = false;
-    let mut buffer: Vec<serde_json::Value> = Vec::new();
 
-    async fn snapshot(
-        symbol: &str,
-    ) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>, i64), Box<dyn Error>> {
+    async fn snapshot(symbol: &str) -> Result<SnapshotData, Box<dyn Error>> {
         let url = format!(
             "https://data-api.binance.vision/api/v3/depth?symbol={}&limit=1000",
             symbol.to_uppercase()
         );
         let v: serde_json::Value = reqwest::get(&url).await?.json().await?;
-        let pl = |x: &serde_json::Value| -> Vec<(f64, f64)> {
-            x.as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|y| {
-                            (
-                                y[0].as_str().unwrap_or("0").parse().unwrap_or(0.0),
-                                y[1].as_str().unwrap_or("0").parse().unwrap_or(0.0),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        Ok((
-            pl(&v["bids"]),
-            pl(&v["asks"]),
-            v["lastUpdateId"].as_i64().unwrap_or(0),
-        ))
+        Ok(SnapshotData::from_json(&v)?)
     }
 
     let stream = toxicflow::net::tls_stream("data-stream.binance.vision").await?;
     let (ws, _) = tokio_tungstenite::client_async(&url, stream).await?;
     let (_, mut read) = ws.split();
+    // The same sync state machine the recorder uses: events buffer
+    // while unsynced, the snapshot merge is transactional, and a gap
+    // drops the machine back to syncing with the event retained.
+    let mut sync = BookSync::new();
+    let mut fetch: Option<tokio::task::JoinHandle<Result<SnapshotData, String>>> = None;
     let mut trades: Vec<Trade> = Vec::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
     println!("live {symbol}: rolling VPIN (50 buckets / 20 window) + touch imbalance");
     loop {
+        // Settle a finished snapshot fetch, and start one whenever the
+        // machine is syncing with buffered events and no fetch is in
+        // flight. A snapshot that turns out too old for the buffered
+        // stream is therefore retried with a fresher one instead of
+        // stalling unsynced.
+        if let Some(h) = &fetch {
+            if h.is_finished() {
+                let h = fetch.take().unwrap();
+                if let Ok(Ok(snap)) = h.await {
+                    let mut quotes = Vec::new();
+                    sync.merge_snapshot(&snap, &mut quotes);
+                }
+            }
+        }
+        if !sync.is_synced() && sync.buffered_len() > 0 && fetch.is_none() {
+            let sym_owned = symbol.to_string();
+            fetch = Some(tokio::spawn(async move {
+                snapshot(&sym_owned).await.map_err(|e| e.to_string())
+            }));
+        }
         tokio::select! {
             _ = tick.tick() => {
+                let book = sync.book();
                 let bk = volume_buckets(&trades, 50);
                 let vp = vpin(&bk, 20);
                 let v = vp.last().map(|(_, x)| *x).unwrap_or(f64::NAN);
@@ -749,36 +736,12 @@ async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
                         is_buyer_maker: d["m"].as_bool().unwrap_or(false),
                     }),
                     Some("depthUpdate") => {
-                        if !synced {
-                            buffer.push(d.clone());
-                            if buffer.len() == 1 {
-                                // first event: fetch snapshot and merge
-                                match snapshot(symbol).await {
-                                    Ok((b, a, id)) => {
-                                        let first_u = buffer.first().and_then(|e| e["U"].as_i64());
-                                        if first_u.map(|fu| id >= fu).unwrap_or(true) {
-                                            book.from_snapshot(&b, &a, id);
-                                            let mut ok = true;
-                                            for e in buffer.drain(..) {
-                                                let u = e["u"].as_i64().unwrap_or(0);
-                                                if u <= id { continue; }
-                                                let uu = e["U"].as_i64().unwrap_or(0);
-                                                if book.apply_diff(uu, u, &parse_levels(&e["b"]), &parse_levels(&e["a"])) == SyncResult::Gap {
-                                                    ok = false; break;
-                                                }
-                                            }
-                                            synced = ok;
-                                        }
-                                    }
-                                    Err(_) => { buffer.clear(); }
-                                }
+                        match DepthEvent::from_json(d) {
+                            Ok(ev) => {
+                                sync.on_depth(ev);
                             }
-                        } else {
-                            let uu = d["U"].as_i64().unwrap_or(0);
-                            let u = d["u"].as_i64().unwrap_or(0);
-                            if book.apply_diff(uu, u, &parse_levels(&d["b"]), &parse_levels(&d["a"])) == SyncResult::Gap {
-                                synced = false;
-                                buffer = vec![d.clone()];
+                            Err(e) => {
+                                eprintln!("live: dropping invalid depthUpdate: {e}");
                             }
                         }
                     }

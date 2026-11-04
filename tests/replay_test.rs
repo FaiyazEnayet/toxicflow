@@ -486,3 +486,383 @@ fn out_of_order_arrival_is_classified_not_corrupting() {
     }
     assert_books_match(&book, &truth);
 }
+
+// =====================================================================
+// E2: transactional book sync / fail-closed recorder.
+//
+// The record path (recorder::Session) and the live dashboard path now
+// share one sync state machine (booksync::BookSync). These tests drive
+// captured-event fixtures through both and pin the transactional
+// contract: nothing is committed or emitted until validation passes, an
+// invalid message is rejected instead of being read as zeros, and a
+// snapshot or diff sequence that would cross the book never syncs.
+// =====================================================================
+
+use toxicflow::booksync::{
+    BookSync, DepthEvent, DepthOutcome, MergeOutcome, SnapshotData, MAX_BUFFERED_EVENTS,
+};
+use toxicflow::metrics::Quote;
+use toxicflow::recorder::Session;
+
+fn s(v: &str) -> String {
+    v.to_string()
+}
+
+fn depth_json(
+    u_first: i64,
+    u_last: i64,
+    bids: &[(&str, &str)],
+    asks: &[(&str, &str)],
+) -> serde_json::Value {
+    let pairs = |lv: &[(&str, &str)]| {
+        lv.iter()
+            .map(|(p, q)| vec![p.to_string(), q.to_string()])
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "e": "depthUpdate",
+        "E": 1_700_000_000_000i64 + u_first,
+        "U": u_first,
+        "u": u_last,
+        "b": pairs(bids),
+        "a": pairs(asks),
+    })
+}
+
+fn ev(u_first: i64, u_last: i64, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> DepthEvent {
+    DepthEvent {
+        event_ms: 1_700_000_000_000 + u_first,
+        u_first,
+        u_last,
+        bids: bids.to_vec(),
+        asks: asks.to_vec(),
+    }
+}
+
+fn snap_ok() -> SnapshotData {
+    SnapshotData::from_pairs(
+        100,
+        &[(s("100.0"), s("5.0")), (s("99.9"), s("3.0"))],
+        &[(s("100.1"), s("4.0")), (s("100.2"), s("2.0"))],
+    )
+    .expect("fixture snapshot is valid")
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn stage3_toxicflow_2_invalid_messages_never_parse_as_zero() {
+    // non-numeric price in a depth event
+    let bad = depth_json(101, 101, &[("not-a-price", "1.0")], &[]);
+    assert!(DepthEvent::from_json(&bad).is_err());
+    // non-positive price
+    let bad = depth_json(101, 101, &[("0", "1.0")], &[]);
+    assert!(DepthEvent::from_json(&bad).is_err());
+    let bad = depth_json(101, 101, &[("-5.0", "1.0")], &[]);
+    assert!(DepthEvent::from_json(&bad).is_err());
+    // negative quantity (a zero quantity is a legitimate level removal)
+    let bad = depth_json(101, 101, &[("100.0", "-1.0")], &[]);
+    assert!(DepthEvent::from_json(&bad).is_err());
+    // non-finite quantity spelled as a float string
+    let bad = depth_json(101, 101, &[("100.0", "NaN")], &[]);
+    assert!(DepthEvent::from_json(&bad).is_err());
+    // update ids out of range: u < U, and negative ids
+    let bad = depth_json(105, 104, &[], &[]);
+    assert!(DepthEvent::from_json(&bad).is_err());
+    let bad = depth_json(-1, 104, &[], &[]);
+    assert!(DepthEvent::from_json(&bad).is_err());
+    // ids missing entirely (the old code defaulted them to 0)
+    let mut missing = depth_json(101, 101, &[], &[]);
+    missing.as_object_mut().unwrap().remove("U");
+    assert!(DepthEvent::from_json(&missing).is_err());
+    // a well-formed event still parses, and a zero-qty removal is kept
+    let ok = DepthEvent::from_json(&depth_json(101, 101, &[("100.0", "0")], &[])).unwrap();
+    assert_eq!(ok.bids, vec![(100.0, 0.0)]);
+
+    // snapshots validate the same way
+    assert!(SnapshotData::from_pairs(-1, &[], &[]).is_err());
+    assert!(SnapshotData::from_pairs(100, &[(s("abc"), s("1.0"))], &[]).is_err());
+    assert!(SnapshotData::from_pairs(100, &[(s("100.0"), s("-2.0"))], &[]).is_err());
+    assert!(snap_ok().last_update_id == 100);
+}
+
+#[test]
+fn stage3_toxicflow_2_gap_mid_merge_leaves_book_and_quotes_unchanged() {
+    let rt = runtime();
+    rt.block_on(async {
+        let mut sess = Session::new();
+        // buffer two events, then a third whose predecessor never arrived
+        sess.on_depth(&depth_json(101, 102, &[("100.0", "6.0")], &[]), "BTCUSDT");
+        sess.on_depth(&depth_json(103, 103, &[("99.9", "0")], &[]), "BTCUSDT");
+        sess.on_depth(&depth_json(105, 105, &[("100.0", "8.0")], &[]), "BTCUSDT");
+        assert_eq!(sess.buffered_len(), 3);
+
+        // the merge must fail as a whole: no half-applied book, and not
+        // one quote emitted for the failed attempt
+        assert!(!sess.merge_snapshot_data(&snap_ok()));
+        assert!(!sess.is_synced());
+        assert_eq!(sess.book().last_id, -1);
+        assert!(sess.book().is_empty());
+        assert_eq!(sess.quotes().len(), 0);
+        // buffered events survive for the next attempt
+        assert_eq!(sess.buffered_len(), 3);
+    });
+}
+
+#[test]
+fn stage3_toxicflow_2_successful_merge_commits_book_and_quotes_together() {
+    let rt = runtime();
+    rt.block_on(async {
+        let mut sess = Session::new();
+        sess.on_depth(&depth_json(101, 102, &[("100.0", "6.0")], &[]), "BTCUSDT");
+        sess.on_depth(
+            &depth_json(103, 103, &[("99.9", "0")], &[("100.2", "9.0")]),
+            "BTCUSDT",
+        );
+        assert!(sess.merge_snapshot_data(&snap_ok()));
+        assert!(sess.is_synced());
+        assert_eq!(sess.book().best_bid(), Some((100.0, 6.0)));
+        assert_eq!(sess.book().last_id, 103);
+        // exactly one quote per committed event, none for the snapshot
+        assert_eq!(sess.quotes().len(), 2);
+        assert_eq!(sess.quotes()[1].bid_px, 100.0);
+        assert_eq!(sess.quotes()[1].ask_px, 100.1);
+    });
+}
+
+#[test]
+fn stage3_toxicflow_2_out_of_order_duplicate_and_conflicting_ids() {
+    let mut sync = BookSync::new();
+    // while syncing, events buffer in arrival order
+    assert_eq!(
+        sync.on_depth(ev(101, 102, &[(100.0, 6.0)], &[])),
+        DepthOutcome::Buffered
+    );
+    assert_eq!(
+        sync.merge_snapshot(&snap_ok(), &mut Vec::new()),
+        MergeOutcome::Synced { applied: 1 }
+    );
+    assert!(sync.is_synced());
+
+    // duplicate redelivery of the just-applied event: idempotent
+    let before = sync.book().bid_levels();
+    assert_eq!(
+        sync.on_depth(ev(101, 102, &[(100.0, 6.0)], &[])),
+        DepthOutcome::Applied
+    );
+    assert_eq!(sync.book().bid_levels(), before);
+
+    // an older event arriving late is classified Stale, state untouched
+    assert_eq!(
+        sync.on_depth(ev(90, 95, &[(100.0, 1.0)], &[])),
+        DepthOutcome::Stale
+    );
+    assert_eq!(sync.book().bid_levels(), before);
+
+    // conflicting ids: the exact id range of the last applied event
+    // redelivered with different content cannot be reconciled with the
+    // committed book, so it is treated as a gap: resync, with the
+    // event kept as buffer head and an explicit diagnostic recorded
+    let out = sync.on_depth(ev(101, 102, &[(100.0, 42.0)], &[]));
+    assert!(matches!(out, DepthOutcome::GapResync { .. }), "got {out:?}");
+    assert!(!sync.is_synced());
+    assert_eq!(sync.buffered_len(), 1);
+    let (n_gaps, diag) = sync.gap_diagnostics();
+    assert!(n_gaps >= 1);
+    assert!(diag.is_some());
+
+    // a genuinely out-of-order arrival (successor before predecessor) is
+    // also a gap, never a silent apply
+    let mut sync2 = BookSync::new();
+    sync2.on_depth(ev(101, 101, &[], &[]));
+    assert_eq!(
+        sync2.merge_snapshot(&snap_ok(), &mut Vec::new()),
+        MergeOutcome::Synced { applied: 1 }
+    );
+    let out = sync2.on_depth(ev(103, 103, &[(100.0, 7.0)], &[]));
+    assert!(matches!(out, DepthOutcome::GapResync { .. }), "got {out:?}");
+    assert!(!sync2.is_synced());
+}
+
+#[test]
+fn stage3_toxicflow_2_crossed_or_invalid_snapshot_never_syncs() {
+    // crossed snapshot: best bid above best ask
+    let crossed =
+        SnapshotData::from_pairs(100, &[(s("100.2"), s("5.0"))], &[(s("100.1"), s("4.0"))])
+            .unwrap();
+    let mut sync = BookSync::new();
+    sync.on_depth(ev(101, 101, &[(100.0, 6.0)], &[]));
+    assert_eq!(
+        sync.merge_snapshot(&crossed, &mut Vec::new()),
+        MergeOutcome::Refetch
+    );
+    assert!(!sync.is_synced());
+    assert!(sync.book().is_empty());
+
+    // a valid snapshot whose buffered diffs cross the book mid-merge is
+    // likewise refused as a whole
+    let mut sync = BookSync::new();
+    sync.on_depth(ev(101, 101, &[(100.3, 1.0)], &[]));
+    assert_eq!(
+        sync.merge_snapshot(&snap_ok(), &mut Vec::new()),
+        MergeOutcome::Refetch
+    );
+    assert!(!sync.is_synced());
+    assert!(sync.book().is_empty());
+
+    // a diff that would cross an already-synced book forces a resync
+    // instead of committing a crossed state
+    let mut sync = BookSync::new();
+    sync.on_depth(ev(101, 101, &[], &[]));
+    assert_eq!(
+        sync.merge_snapshot(&snap_ok(), &mut Vec::new()),
+        MergeOutcome::Synced { applied: 1 }
+    );
+    let out = sync.on_depth(ev(102, 102, &[(100.2, 1.0)], &[]));
+    assert!(matches!(out, DepthOutcome::GapResync { .. }), "got {out:?}");
+    assert!(!sync.is_synced());
+    assert!(!sync.book().is_crossed());
+}
+
+#[test]
+fn stage3_toxicflow_2_stale_snapshot_is_refetched_not_stalled() {
+    // the live path's old failure mode: a snapshot older than the first
+    // buffered event must be a visible Refetch (so the caller fetches a
+    // fresher one), never a silent dead end
+    let mut sync = BookSync::new();
+    sync.on_depth(ev(201, 202, &[(100.0, 6.0)], &[]));
+    assert_eq!(
+        sync.merge_snapshot(&snap_ok(), &mut Vec::new()),
+        MergeOutcome::Refetch
+    );
+    assert!(!sync.is_synced());
+    // the buffered event is retained, and a snapshot that continues the
+    // stream (lastUpdateId = 200) merges cleanly
+    let fresh = SnapshotData::from_pairs(200, &[(s("100.0"), s("5.0"))], &[(s("100.1"), s("4.0"))])
+        .unwrap();
+    assert_eq!(
+        sync.merge_snapshot(&fresh, &mut Vec::new()),
+        MergeOutcome::Synced { applied: 1 }
+    );
+    assert!(sync.is_synced());
+    assert_eq!(sync.book().best_bid(), Some((100.0, 6.0)));
+}
+
+#[test]
+fn stage3_toxicflow_2_buffer_is_bounded_with_diagnostics() {
+    let mut sync = BookSync::new();
+    for i in 0..(MAX_BUFFERED_EVENTS as i64 + 50) {
+        let id = 1000 + i;
+        sync.on_depth(ev(id, id, &[(100.0, 1.0)], &[]));
+    }
+    assert!(sync.buffered_len() <= MAX_BUFFERED_EVENTS);
+    let (_, diag) = sync.gap_diagnostics();
+    assert!(diag.is_some(), "overflow must leave an explicit diagnostic");
+}
+
+#[test]
+fn stage3_toxicflow_2_oracle_matches_every_committed_state() {
+    // Independent oracle: the ReferenceBook from the replay suite above,
+    // fed the clean stream; the sync engine, driven through snapshot
+    // merge and live diffs, must match it after every committed step.
+    let s = generate_stream(21, 400);
+    let mut sync = BookSync::new();
+    let mut truth = synced_truth(&s);
+
+    let snap = SnapshotData {
+        last_update_id: 0,
+        bids: s.init_bids.clone(),
+        asks: s.init_asks.clone(),
+    };
+    // buffer the first ten events, then merge the snapshot under them
+    for e in &s.events[..10] {
+        sync.on_depth(ev(e.u_first, e.u_last, &e.bids, &e.asks));
+    }
+    let out = sync.merge_snapshot(&snap, &mut Vec::new());
+    assert!(matches!(out, MergeOutcome::Synced { .. }), "got {out:?}");
+    for e in &s.events[..10] {
+        truth.apply(e.u_first, e.u_last, &e.bids, &e.asks);
+    }
+    assert_books_match(sync.book(), &truth);
+
+    for e in &s.events[10..] {
+        truth.apply(e.u_first, e.u_last, &e.bids, &e.asks);
+        assert_eq!(
+            sync.on_depth(ev(e.u_first, e.u_last, &e.bids, &e.asks)),
+            DepthOutcome::Applied
+        );
+        assert_books_match(sync.book(), &truth);
+    }
+}
+
+#[test]
+fn stage3_toxicflow_2_live_and_record_paths_agree() {
+    // The same captured events through both paths: Session (record) and
+    // a bare BookSync driven the way live_dashboard drives it. Committed
+    // books must agree after every step, and the record path's quotes
+    // must number exactly the events the live path committed, ending at
+    // the live book's touch.
+    let rt = runtime();
+    rt.block_on(async {
+        let s = generate_stream(22, 300);
+        let mut sess = Session::new();
+        let mut live = BookSync::new();
+        let mut committed_events = 0usize;
+
+        let snap = SnapshotData {
+            last_update_id: 0,
+            bids: s.init_bids.clone(),
+            asks: s.init_asks.clone(),
+        };
+        let to_json = |e: &Event| {
+            let pairs = |lv: &[(f64, f64)]| {
+                lv.iter()
+                    .map(|(p, q)| vec![p.to_string(), q.to_string()])
+                    .collect::<Vec<_>>()
+            };
+            serde_json::json!({
+                "e": "depthUpdate",
+                "E": 1_700_000_000_000i64 + e.u_first,
+                "U": e.u_first,
+                "u": e.u_last,
+                "b": pairs(&e.bids),
+                "a": pairs(&e.asks),
+            })
+        };
+
+        for e in &s.events[..10] {
+            sess.on_depth(&to_json(e), "BTCUSDT");
+            live.on_depth(ev(e.u_first, e.u_last, &e.bids, &e.asks));
+        }
+        assert!(sess.merge_snapshot_data(&snap));
+        match live.merge_snapshot(&snap, &mut Vec::new()) {
+            MergeOutcome::Synced { applied } => committed_events += applied,
+            other => panic!("live merge failed: {other:?}"),
+        }
+        assert_eq!(sess.book().bid_levels(), live.book().bid_levels());
+        assert_eq!(sess.book().ask_levels(), live.book().ask_levels());
+
+        for e in &s.events[10..] {
+            sess.on_depth(&to_json(e), "BTCUSDT");
+            let out = live.on_depth(ev(e.u_first, e.u_last, &e.bids, &e.asks));
+            assert_eq!(out, DepthOutcome::Applied);
+            committed_events += 1;
+            assert_eq!(sess.book().bid_levels(), live.book().bid_levels());
+            assert_eq!(sess.book().ask_levels(), live.book().ask_levels());
+            assert_eq!(sess.book().last_id, live.book().last_id);
+        }
+
+        assert_eq!(sess.quotes().len(), committed_events);
+        let (bp, bq, ap, aq) = live.book().touch().unwrap();
+        let last: &Quote = sess.quotes().last().unwrap();
+        assert_eq!(
+            (last.bid_px, last.bid_sz, last.ask_px, last.ask_sz),
+            (bp, bq, ap, aq)
+        );
+    });
+}
