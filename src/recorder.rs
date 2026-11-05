@@ -22,7 +22,7 @@ use crate::booksync::{
 };
 use crate::metrics::{Quote, Trade};
 use crate::orderbook::OrderBook;
-use crate::storage;
+use crate::storage::{self, JournalCore, JournalRecord, JournalSink, StorageError};
 
 const WS_HOST: &str = "wss://data-stream.binance.vision";
 const REST_HOST: &str = "https://data-api.binance.vision";
@@ -95,6 +95,11 @@ async fn fetch_snapshot(symbol: &str) -> Result<Snapshot, String> {
 /// trades and quotes. Quotes enter `quotes` only when the state
 /// machine commits the event (or the snapshot merge) that produced
 /// them, so a failed merge emits nothing.
+/// Journal batching used by live recording sessions: batches of
+/// 512 records, at most 16 completed batches waiting on the sink.
+const JOURNAL_BATCH_SIZE: usize = 512;
+const JOURNAL_MAX_PENDING: usize = 16;
+
 pub struct Session {
     sync: BookSync,
     syncing: bool,
@@ -102,6 +107,7 @@ pub struct Session {
     trades: Vec<Trade>,
     quotes: Vec<Quote>,
     resyncs: u32,
+    journal: JournalCore,
 }
 
 impl Default for Session {
@@ -119,7 +125,40 @@ impl Session {
             trades: Vec::new(),
             quotes: Vec::new(),
             resyncs: 0,
+            journal: JournalCore::new("unstarted", JOURNAL_BATCH_SIZE, JOURNAL_MAX_PENDING),
         }
+    }
+
+    /// Start the session journal under a session id. Only events the
+    /// sync machine commits are journaled: a snapshot record for each
+    /// successful merge (the recovery boundary), a depth record for
+    /// each applied update, and a trade record for each recorded
+    /// trade. A failed merge journals nothing.
+    pub fn begin_journal(&mut self, session_id: &str, symbol: &str) {
+        self.journal = JournalCore::new(session_id, JOURNAL_BATCH_SIZE, JOURNAL_MAX_PENDING);
+        self.journal.append(JournalRecord::SessionStart {
+            symbol: symbol.to_string(),
+        });
+    }
+
+    /// Flush completed journal batches to the sink.
+    pub fn pump_journal(&mut self, sink: &mut dyn JournalSink) -> Result<usize, StorageError> {
+        storage::pump_journal(&mut self.journal, sink)
+    }
+
+    /// Write the session-end record and flush the journal tail.
+    pub fn finish_journal(&mut self, sink: &mut dyn JournalSink) -> Result<(), StorageError> {
+        let records = self.journal.stored_records();
+        self.journal.append(JournalRecord::SessionEnd { records });
+        storage::pump_journal(&mut self.journal, sink)?;
+        let core = std::mem::replace(
+            &mut self.journal,
+            JournalCore::new("unstarted", JOURNAL_BATCH_SIZE, JOURNAL_MAX_PENDING),
+        );
+        if let Some(batch) = core.finish() {
+            sink.write_batch(&batch)?;
+        }
+        Ok(())
     }
 
     pub fn is_synced(&self) -> bool {
@@ -191,6 +230,11 @@ impl Session {
         let mut pending_quotes = Vec::new();
         match self.sync.merge_snapshot(snap, &mut pending_quotes) {
             MergeOutcome::Synced { .. } => {
+                self.journal.append(JournalRecord::Snapshot {
+                    last_update_id: snap.last_update_id,
+                    bids: snap.bids.clone(),
+                    asks: snap.asks.clone(),
+                });
                 for (event_ms, (bp, bq, ap, aq)) in pending_quotes {
                     self.quotes.push(Quote {
                         time_ms: event_ms,
@@ -246,7 +290,15 @@ impl Session {
             return;
         }
         let event_ms = ev.event_ms;
+        let depth_record = JournalRecord::Depth {
+            time_ms: ev.event_ms,
+            u_first: ev.u_first,
+            u_last: ev.u_last,
+            bids: ev.bids.clone(),
+            asks: ev.asks.clone(),
+        };
         if let DepthOutcome::Applied = self.sync.on_depth(ev) {
+            self.journal.append(depth_record);
             self.record_touch(event_ms);
         }
     }
@@ -259,13 +311,20 @@ impl Session {
             is_buyer_maker: data["m"].as_bool().unwrap_or(false),
         };
         if t.qty > 0.0 {
+            self.journal.append(JournalRecord::Trade {
+                time_ms: t.time_ms,
+                price: t.price,
+                qty: t.qty,
+                is_buyer_maker: t.is_buyer_maker,
+            });
             self.trades.push(t);
         }
     }
 }
 
 /// Record `minutes` minutes of market data into `out_dir`.
-/// Writes trades.parquet, quotes.parquet, meta.json.
+/// Writes trades.parquet, quotes.parquet, meta.json, and a journal/
+/// directory holding the raw event journal in segment files.
 pub async fn record_session(
     symbol: &str,
     minutes: f64,
@@ -281,6 +340,23 @@ pub async fn record_session(
     let deadline = Instant::now() + Duration::from_secs_f64(minutes * 60.0);
     let mut session = Session::new();
     let mut backoff = Duration::from_secs(1);
+
+    // The journal lives next to the session files and is flushed in
+    // batches while recording runs, so a crash keeps every completed
+    // batch. Journal write failures are reported but never abort the
+    // recording itself.
+    std::fs::create_dir_all(out_dir)?;
+    let mut journal_sink =
+        storage::JournalFileSink::create(std::path::Path::new(&format!("{out_dir}/journal")))?;
+    let session_id = format!(
+        "{}-{}",
+        sym,
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    session.begin_journal(&session_id, symbol);
 
     'outer: while Instant::now() < deadline {
         let ws = async {
@@ -333,7 +409,17 @@ pub async fn record_session(
                 Message::Close(_) => break,
                 _ => {}
             }
+            if let Err(e) = session.pump_journal(&mut journal_sink) {
+                eprintln!("record: journal write failed: {e}");
+            }
         }
+        if let Err(e) = session.pump_journal(&mut journal_sink) {
+            eprintln!("record: journal write failed: {e}");
+        }
+    }
+
+    if let Err(e) = session.finish_journal(&mut journal_sink) {
+        eprintln!("record: journal finish failed: {e}");
     }
 
     std::fs::create_dir_all(out_dir)?;
@@ -549,6 +635,39 @@ mod tests {
         assert!(parse_levels(&bad).is_err());
         let not_pairs = serde_json::json!([["100.0"]]);
         assert!(parse_levels(&not_pairs).is_err());
+    }
+
+    #[test]
+    fn stage3_toxicflow_3_journal_records_committed_events_only() {
+        // A failed merge journals nothing but the session start.
+        let mut failed = Session::new();
+        failed.begin_journal("sess-failed", "BTCUSDT");
+        buffer(&mut failed, &depth_event(201, 202, &[(100.0, 6.0)], &[]));
+        assert!(!failed.merge_snapshot(&snapshot(100)));
+        let core = std::mem::replace(&mut failed.journal, JournalCore::new("x", 8, 2));
+        let batch = core.finish().expect("session start is journaled");
+        let kinds: Vec<&str> = batch.entries.iter().map(|e| e.record.kind_str()).collect();
+        assert_eq!(kinds, vec!["session_start"]);
+
+        // A committed session journals start, snapshot, depth, trade
+        // in order; a zero-quantity trade is not recorded anywhere.
+        let mut s = Session::new();
+        s.begin_journal("sess-ok", "BTCUSDT");
+        buffer(&mut s, &depth_event(101, 101, &[], &[]));
+        assert!(s.merge_snapshot(&snapshot(100)));
+        s.on_depth(&depth_event(102, 102, &[(100.0, 7.0)], &[]), "BTCUSDT");
+        s.on_trade(
+            &serde_json::json!({"T": 1_700_000_000_000i64, "p": "100.0", "q": "0.5", "m": false}),
+        );
+        s.on_trade(
+            &serde_json::json!({"T": 1_700_000_000_001i64, "p": "100.0", "q": "0", "m": false}),
+        );
+        let core = std::mem::replace(&mut s.journal, JournalCore::new("x", 8, 2));
+        let batch = core.finish().expect("journal has records");
+        let kinds: Vec<&str> = batch.entries.iter().map(|e| e.record.kind_str()).collect();
+        assert_eq!(kinds, vec!["session_start", "snapshot", "depth", "trade"]);
+        let seqs: Vec<u64> = batch.entries.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![0, 1, 2, 3]);
     }
 
     /// Serializes tests that mutate the proxy env vars (process-global).
