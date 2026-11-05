@@ -1,0 +1,139 @@
+{
+  "schema": "toxicflow.session-pilot/v1",
+  "bar_ms": 10000,
+  "horizon_bars": 3,
+  "n_splits": 4,
+  "effective_sample_unit": "independent recording session",
+  "required_sessions": 10,
+  "n_sessions": 5,
+  "session_requirement_met": false,
+  "sessions": [
+    {
+      "session": "session_325h",
+      "first_bar_ms": 1791671970000,
+      "last_bar_ms": 1791683630000,
+      "n_bars": 1044,
+      "n_oos": 832,
+      "n_folds": 4,
+      "accuracy": 0.7908653846153846,
+      "balanced_accuracy": 0.5357695082981135,
+      "brier": 0.1487464753082082,
+      "train_majority_accuracy": 0.7860576923076923,
+      "test_majority_rate": 0.7860576923076923,
+      "paired_diff": 0.004807692307692308,
+      "accuracy_ci": [
+        0.7319711538461539,
+        0.8497596153846154
+      ],
+      "paired_diff_ci": [
+        -0.008413461538461538,
+        0.02283653846153846
+      ],
+      "dataset_sha256": "cba3048c72dd582e5acc9edd9ba72901c5a35d17101738e86c758eb5093ce856"
+    },
+    {
+      "session": "session-20261030-143624-utc",
+      "first_bar_ms": 1793371020000,
+      "last_bar_ms": 1793372750000,
+      "n_bars": 174,
+      "n_oos": 136,
+      "n_folds": 4,
+      "accuracy": 0.5661764705882353,
+      "balanced_accuracy": 0.503921568627451,
+      "brier": 0.2550664906178762,
+      "train_majority_accuracy": 0.625,
+      "test_majority_rate": 0.625,
+      "paired_diff": -0.058823529411764705,
+      "accuracy_ci": [
+        0.4411764705882353,
+        0.6838235294117647
+      ],
+      "paired_diff_ci": [
+        -0.19117647058823528,
+        0.04411764705882353
+      ],
+      "dataset_sha256": "8aec02d2738a80594d95ae9fdd7857003a08fb38c97ed179c9d3458e0e7f37b9"
+    },
+    {
+      "session": "session-20261101-203631-utc",
+      "first_bar_ms": 1793565590000,
+      "last_bar_ms": 1793567320000,
+      "n_bars": 174,
+      "n_oos": 136,
+      "n_folds": 4,
+      "accuracy": 0.7205882352941176,
+      "balanced_accuracy": 0.7188449848024316,
+      "brier": 0.18134939463494984,
+      "train_majority_accuracy": 0.6911764705882353,
+      "test_majority_rate": 0.6911764705882353,
+      "paired_diff": 0.029411764705882353,
+      "accuracy_ci": [
+        0.5808823529411765,
+        0.8602941176470589
+      ],
+      "paired_diff_ci": [
+        -0.0661764705882353,
+        0.13970588235294118
+      ],
+      "dataset_sha256": "30eff7afd178b578e03d92c0f53e1bf65849a1258002067cc0d223ab8de0f6fd"
+    },
+    {
+      "session": "session-20261102-013620-utc",
+      "first_bar_ms": 1793583430000,
+      "last_bar_ms": 1793585150000,
+      "n_bars": 173,
+      "n_oos": 136,
+      "n_folds": 4,
+      "accuracy": 0.5735294117647058,
+      "balanced_accuracy": 0.5420054200542005,
+      "brier": 0.2526474678642749,
+      "train_majority_accuracy": 0.5294117647058824,
+      "test_majority_rate": 0.6029411764705883,
+      "paired_diff": 0.04411764705882353,
+      "accuracy_ci": [
+        0.4852941176470588,
+        0.6617647058823529
+      ],
+      "paired_diff_ci": [
+        -0.0661764705882353,
+        0.17647058823529413
+      ],
+      "dataset_sha256": "de30d6d63014a1fed5585c7440038ff96e4ba2140ed1ea587b63ecdcbc0f7765"
+    },
+    {
+      "session": "session-20261104-073619-utc",
+      "first_bar_ms": 1793777820000,
+      "last_bar_ms": 1793779550000,
+      "n_bars": 174,
+      "n_oos": 136,
+      "n_folds": 4,
+      "accuracy": 0.5441176470588235,
+      "balanced_accuracy": 0.5633680555555556,
+      "brier": 0.3119142747006333,
+      "train_majority_accuracy": 0.47058823529411764,
+      "test_majority_rate": 0.5294117647058824,
+      "paired_diff": 0.07352941176470588,
+      "accuracy_ci": [
+        0.36764705882352944,
+        0.7279411764705882
+      ],
+      "paired_diff_ci": [
+        -0.0661764705882353,
+        0.2426470588235294
+      ],
+      "dataset_sha256": "39767c4b6512467271dd840f3f0a8f3bc8e1dcdc1262713d397db05eac566a79"
+    }
+  ],
+  "mean_accuracy": 0.6390554298642532,
+  "mean_train_majority_accuracy": 0.6204468325791855,
+  "mean_paired_diff": 0.018608597285067873,
+  "paired_diff_session_ci": [
+    -0.02550904977375565,
+    0.05588235294117647
+  ],
+  "notes": [
+    "Effective sample unit: one independent recording session. Bars inside a session are serially dependent and are never counted as independent samples.",
+    "test_majority_rate is computed from the test outcomes themselves and is a descriptive reference only; the baseline every session is paired against is the training-majority predictor, which never reads a test outcome.",
+    "This pilot covers 5 independent sessions, below the 10-session target. Read the intervals as preliminary: the session count, not the bar count, is the sample size."
+  ]
+}
