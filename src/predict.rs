@@ -23,6 +23,22 @@
 //! serialization existed were held in memory only; the serialized file
 //! labels them UNRECOVERABLE and no historical checkpoint recreation
 //! is claimed.
+//!
+//! Statistics (TF6): the headline baseline is the training-majority
+//! predictor — each fold commits to its own training majority label
+//! and is scored on that fold's test rows — never a rate computed
+//! from the test outcomes themselves. The test-outcome majority rate
+//! is still reported, labeled `test_majority_rate`, as a descriptive
+//! reference only. `accuracy_std` is the population standard
+//! deviation of the per-row 0/1 correctness values (for Bernoulli
+//! outcomes exactly sqrt(acc*(1-acc))); it describes the dispersion
+//! of the rows and is NOT the uncertainty of the accuracy estimate.
+//! Uncertainty is reported as bootstrap intervals: a moving-block
+//! bootstrap over the out-of-sample rows within a session
+//! (`accuracy_ci`), and, for the multi-session pilot
+//! (`evaluate_session` / `summarize_session_pilot`), a bootstrap over
+//! sessions, because the independent recording session — not the
+//! serially dependent bar — is the effective sample unit.
 
 use crate::metrics::{ofi_bars, ofi_events, Quote, Trade};
 
@@ -39,6 +55,30 @@ pub const FIT_LR: f64 = 0.5;
 
 /// Schema tag written into every `fold_models.json`.
 pub const FOLD_MODELS_SCHEMA: &str = "toxicflow.fold-models/v1";
+
+/// Schema tag written into every session pilot report (TF6).
+pub const SESSION_PILOT_SCHEMA: &str = "toxicflow.session-pilot/v1";
+
+/// Independent sessions the session pilot is required to cover
+/// before its intervals are read as generalization evidence (TF6).
+pub const PILOT_REQUIRED_SESSIONS: usize = 10;
+
+/// Bootstrap resamples behind every reported interval (TF6). Fixed,
+/// with a fixed seed, so a report is a deterministic function of the
+/// rows it summarizes.
+pub const BOOTSTRAP_RESAMPLES: usize = 2000;
+
+/// Seed for the within-session block bootstrap (TF6).
+pub const BOOTSTRAP_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Seed for the across-session bootstrap in the pilot summary (TF6).
+pub const PILOT_BOOTSTRAP_SEED: u64 = 0xD1B5_4A32_D192_ED03;
+
+/// Moving-block length, in bars, for within-session bootstrap
+/// intervals (TF6): the rolling feature windows span 30 bars, so
+/// resampled blocks are at least as long as the dependence the
+/// features themselves carry.
+pub const ACCURACY_BLOCK_BARS: usize = 30;
 
 /// Feature-frame version, frozen at build_dataset's semantics.
 /// v1 (implicit, pre-N1) computed rolling variance from sliding sums of
@@ -355,8 +395,30 @@ pub struct EvalReport {
     pub n_bars: usize,
     pub n_folds: usize,
     pub accuracy: f64,
+    /// Population standard deviation of the per-row 0/1 correctness
+    /// values. For Bernoulli outcomes this is exactly
+    /// sqrt(accuracy * (1 - accuracy)): it describes the dispersion
+    /// of the rows and must not be read as the uncertainty of the
+    /// accuracy estimate. Use `accuracy_ci` for uncertainty.
     pub accuracy_std: f64,
+    /// Out-of-sample accuracy of the training-majority predictor:
+    /// each fold predicts its own training majority label for every
+    /// test row. This is the headline baseline (TF6); it is computed
+    /// without ever reading a test outcome.
     pub baseline: f64,
+    /// Majority-class rate computed from the test outcomes
+    /// themselves. Descriptive reference only (TF6): it peeks at the
+    /// answers, so it is never the bar a model has to beat. Before
+    /// TF6 this value was reported as `baseline`.
+    pub test_majority_rate: f64,
+    /// Balanced accuracy: mean of the per-class correct rates at
+    /// the 0.5 threshold. NaN when a class is absent from the
+    /// evaluated rows.
+    pub balanced_accuracy: f64,
+    /// Moving-block bootstrap 95% interval for `accuracy` over the
+    /// out-of-sample rows in time order (TF6): (2.5%, 97.5%)
+    /// percentiles of the resampled means.
+    pub accuracy_ci: (f64, f64),
     pub brier: f64,
     /// (mean predicted prob, realized rate, n) per decile
     pub calibration: Vec<(f64, f64, usize)>,
@@ -413,8 +475,21 @@ pub struct PredictionRow {
 pub struct SavedReport {
     pub accuracy: f64,
     pub accuracy_std: f64,
+    /// Training-majority predictor accuracy (TF6). Files written
+    /// before TF6 stored the test-outcome majority rate here; the
+    /// ledger verifier never checks this field, and TF6 files are
+    /// identified by the presence of `test_majority_rate`.
     pub baseline: f64,
     pub brier: f64,
+    /// Balanced accuracy (TF6). Defaults to 0.0 when loading files
+    /// written before TF6, which did not record it.
+    #[serde(default)]
+    pub balanced_accuracy: f64,
+    /// Test-outcome majority rate, descriptive only (TF6). Defaults
+    /// to 0.0 when loading files written before TF6; in those files
+    /// the same value sits in `baseline`.
+    #[serde(default)]
+    pub test_majority_rate: f64,
     /// (mean predicted prob, realized rate, n) per decile
     pub calibration: Vec<(f64, f64, usize)>,
 }
@@ -459,6 +534,12 @@ pub struct WalkForwardDetail {
     pub dataset_sha256: String,
     pub folds: Vec<FoldModel>,
     pub predictions: Vec<PredictionRow>,
+    /// Per-row correctness of the training-majority predictor (TF6),
+    /// parallel to `predictions`: 1.0 when the row's fold committed
+    /// to a training majority label equal to the row's target. The
+    /// headline `baseline` is the mean of this vector, so the pairing
+    /// between model and baseline is exact, row by row.
+    pub baseline_correct: Vec<f64>,
 }
 
 /// Purged walk-forward evaluation.
@@ -536,15 +617,28 @@ pub fn walk_forward_detailed(
         .iter()
         .map(|r| f64::from(u8::from(r.proba > 0.5) == r.target))
         .collect();
-    let briers: Vec<f64> = predictions
-        .iter()
-        .map(|r| (r.proba - r.target as f64).powi(2))
-        .collect();
     let acc = mean(&accs);
     let std = (accs.iter().map(|x| (x - acc).powi(2)).sum::<f64>() / accs.len() as f64).sqrt();
     let pos_rate =
         predictions.iter().map(|r| f64::from(r.target)).sum::<f64>() / predictions.len() as f64;
-    let baseline = pos_rate.max(1.0 - pos_rate);
+    // TF6: the headline baseline is a predictor, not a prevalence.
+    // Each row is scored against the majority label its own fold
+    // committed to from training data alone. The old headline value
+    // (majority rate over the test outcomes) is kept only as the
+    // descriptive `test_majority_rate`.
+    let baseline_correct: Vec<f64> = predictions
+        .iter()
+        .map(|r| f64::from(folds[r.fold].train_majority_label == r.target))
+        .collect();
+    let baseline = mean(&baseline_correct);
+    let test_majority_rate = pos_rate.max(1.0 - pos_rate);
+    let balanced_accuracy = balanced_accuracy(&predictions);
+    let accuracy_ci = block_bootstrap_mean_ci(
+        &accs,
+        ACCURACY_BLOCK_BARS,
+        BOOTSTRAP_RESAMPLES,
+        BOOTSTRAP_SEED,
+    );
 
     let mut order: Vec<usize> = (0..predictions.len()).collect();
     order.sort_by(|&i, &j| {
@@ -574,13 +668,17 @@ pub fn walk_forward_detailed(
             accuracy: acc,
             accuracy_std: std,
             baseline,
-            brier: mean(&briers),
+            test_majority_rate,
+            balanced_accuracy,
+            accuracy_ci,
+            brier: brier_score(&predictions),
             calibration,
         },
         n_bars: n,
         dataset_sha256: hash_bars(bars),
         folds,
         predictions,
+        baseline_correct,
     })
 }
 
@@ -621,6 +719,8 @@ pub fn build_fold_models_file(
             accuracy_std: detail.report.accuracy_std,
             baseline: detail.report.baseline,
             brier: detail.report.brier,
+            balanced_accuracy: detail.report.balanced_accuracy,
+            test_majority_rate: detail.report.test_majority_rate,
             calibration: detail.report.calibration.clone(),
         },
         folds: detail.folds.clone(),
@@ -877,6 +977,278 @@ pub fn verify_prediction_ledger(
         accuracy,
         brier,
     })
+}
+
+// ---- TF6: defensible statistics and the multi-session pilot ------
+
+/// Balanced accuracy of the 0.5-threshold predictions in `rows`:
+/// the mean of the per-class correct rates. Returns NaN when either
+/// class is absent, because a per-class rate does not exist then;
+/// callers must surface that instead of a fabricated number.
+pub fn balanced_accuracy(rows: &[PredictionRow]) -> f64 {
+    let (mut tp, mut fn_, mut tn, mut fp) = (0usize, 0usize, 0usize, 0usize);
+    for r in rows {
+        match (r.target, r.proba > 0.5) {
+            (1, true) => tp += 1,
+            (1, false) => fn_ += 1,
+            (0, false) => tn += 1,
+            (0, true) => fp += 1,
+            _ => unreachable!(),
+        }
+    }
+    let (pos, neg) = (tp + fn_, tn + fp);
+    if pos == 0 || neg == 0 {
+        return f64::NAN;
+    }
+    0.5 * (tp as f64 / pos as f64 + tn as f64 / neg as f64)
+}
+
+/// Brier score of the probabilities in `rows`: mean squared error
+/// against the 0/1 targets.
+pub fn brier_score(rows: &[PredictionRow]) -> f64 {
+    if rows.is_empty() {
+        return f64::NAN;
+    }
+    rows.iter()
+        .map(|r| (r.proba - f64::from(r.target)).powi(2))
+        .sum::<f64>()
+        / rows.len() as f64
+}
+
+/// SplitMix64: a tiny deterministic PRNG for bootstrap resampling,
+/// present so intervals need no extra dependency and a report is a
+/// pure function of its rows and the published seed.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn next_below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+}
+
+/// Moving-block bootstrap interval for the mean of `values`:
+/// resamples circular blocks of `block_len` consecutive values
+/// (wrapping at the end) until the resample holds `values.len()`
+/// entries, and returns the (2.5%, 97.5%) percentiles of the
+/// resampled means over `resamples` draws. Blocks preserve the
+/// short-range serial dependence that an IID resample would
+/// pretend away; with `block_len == 1` this reduces to the ordinary
+/// bootstrap of the mean. Deterministic in `seed`.
+pub fn block_bootstrap_mean_ci(
+    values: &[f64],
+    block_len: usize,
+    resamples: usize,
+    seed: u64,
+) -> (f64, f64) {
+    let n = values.len();
+    if n == 0 || resamples == 0 {
+        return (f64::NAN, f64::NAN);
+    }
+    let block = block_len.max(1).min(n);
+    let blocks_per = n.div_ceil(block);
+    let mut rng = SplitMix64(seed);
+    let mut means = Vec::with_capacity(resamples);
+    for _ in 0..resamples {
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        for _ in 0..blocks_per {
+            let start = rng.next_below(n);
+            for j in 0..block {
+                if count == n {
+                    break;
+                }
+                sum += values[(start + j) % n];
+                count += 1;
+            }
+        }
+        means.push(sum / n as f64);
+    }
+    means.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let lo = means[((0.025 * resamples as f64) as usize).min(resamples - 1)];
+    let hi = means[((0.975 * resamples as f64) as usize).min(resamples - 1)];
+    (lo, hi)
+}
+
+/// One independent session's paired walk-forward result (TF6). The
+/// model and the training-majority baseline are scored on exactly
+/// the same out-of-sample rows of this session, so `paired_diff` is
+/// a per-session paired comparison, not two unrelated averages.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionEval {
+    /// Caller-supplied session identifier (recording name).
+    pub session: String,
+    /// Bar start time of the first evaluated dataset row's session.
+    pub first_bar_ms: i64,
+    pub last_bar_ms: i64,
+    pub n_bars: usize,
+    /// Exact out-of-sample denominator for this session.
+    pub n_oos: usize,
+    pub n_folds: usize,
+    pub accuracy: f64,
+    pub balanced_accuracy: f64,
+    pub brier: f64,
+    /// Training-majority predictor accuracy on the same rows.
+    pub train_majority_accuracy: f64,
+    /// Test-outcome majority rate: descriptive reference only.
+    pub test_majority_rate: f64,
+    /// accuracy - train_majority_accuracy, paired on the same rows.
+    pub paired_diff: f64,
+    /// Block bootstrap interval for this session's accuracy.
+    pub accuracy_ci: (f64, f64),
+    /// Block bootstrap interval for this session's paired diff.
+    pub paired_diff_ci: (f64, f64),
+    /// SHA-256 over the session's dataset rows (see `hash_bars`).
+    pub dataset_sha256: String,
+}
+
+/// Evaluate one session's bars with the same purged walk-forward
+/// protocol as the single-session report and summarize it as a
+/// paired session result (TF6). Returns None under the same
+/// conditions as `walk_forward_detailed`.
+pub fn evaluate_session(
+    session: &str,
+    bars: &[Bar],
+    n_splits: usize,
+    horizon: usize,
+) -> Option<SessionEval> {
+    let detail = walk_forward_detailed(bars, n_splits, horizon)?;
+    let rows = &detail.predictions;
+    let diffs: Vec<f64> = rows
+        .iter()
+        .zip(detail.baseline_correct.iter())
+        .map(|(r, b)| f64::from(u8::from(r.proba > 0.5) == r.target) - b)
+        .collect();
+    let paired_diff = diffs.iter().sum::<f64>() / diffs.len() as f64;
+    Some(SessionEval {
+        session: session.to_string(),
+        first_bar_ms: bars.first().map(|b| b.time_ms).unwrap_or(0),
+        last_bar_ms: bars.last().map(|b| b.time_ms).unwrap_or(0),
+        n_bars: detail.n_bars,
+        n_oos: rows.len(),
+        n_folds: detail.folds.len(),
+        accuracy: detail.report.accuracy,
+        balanced_accuracy: detail.report.balanced_accuracy,
+        brier: detail.report.brier,
+        train_majority_accuracy: detail.report.baseline,
+        test_majority_rate: detail.report.test_majority_rate,
+        paired_diff,
+        accuracy_ci: detail.report.accuracy_ci,
+        paired_diff_ci: block_bootstrap_mean_ci(
+            &diffs,
+            ACCURACY_BLOCK_BARS,
+            BOOTSTRAP_RESAMPLES,
+            BOOTSTRAP_SEED,
+        ),
+        dataset_sha256: detail.dataset_sha256.clone(),
+    })
+}
+
+/// The multi-session pilot report (TF6). Aggregation is over
+/// sessions: session means are unweighted, and the headline
+/// interval resamples sessions, because one independent recording
+/// session — not one bar — is the effective sample unit. Bar counts
+/// are reported per session for accounting and are never pooled
+/// into a significance claim.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionPilot {
+    pub schema: String,
+    pub bar_ms: i64,
+    pub horizon_bars: usize,
+    pub n_splits: usize,
+    /// The unit one independent observation is counted in.
+    pub effective_sample_unit: String,
+    /// Sessions the pilot is required to cover (contract target).
+    pub required_sessions: usize,
+    pub n_sessions: usize,
+    /// True only when `n_sessions >= required_sessions`.
+    pub session_requirement_met: bool,
+    pub sessions: Vec<SessionEval>,
+    /// Unweighted mean of the per-session accuracies.
+    pub mean_accuracy: f64,
+    /// Unweighted mean of the per-session training-majority
+    /// accuracies, over the same sessions.
+    pub mean_train_majority_accuracy: f64,
+    /// Unweighted mean of the per-session paired differences.
+    pub mean_paired_diff: f64,
+    /// Bootstrap interval for `mean_paired_diff`, resampling whole
+    /// sessions with replacement.
+    pub paired_diff_session_ci: (f64, f64),
+    /// Plain-language limits of this report, written into the
+    /// artifact so they travel with the numbers.
+    pub notes: Vec<String>,
+}
+
+impl SessionPilot {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("session pilot serializes")
+    }
+}
+
+/// Aggregate per-session results into the pilot report (TF6). The
+/// session bootstrap resamples the observed sessions' paired
+/// differences with replacement; with few sessions the interval is
+/// coarse by construction and the report says so.
+pub fn summarize_session_pilot(
+    sessions: Vec<SessionEval>,
+    bar_ms: i64,
+    horizon_bars: usize,
+    n_splits: usize,
+) -> SessionPilot {
+    let n_sessions = sessions.len();
+    let mean_of = |f: &dyn Fn(&SessionEval) -> f64| -> f64 {
+        if n_sessions == 0 {
+            f64::NAN
+        } else {
+            sessions.iter().map(f).sum::<f64>() / n_sessions as f64
+        }
+    };
+    let diffs: Vec<f64> = sessions.iter().map(|s| s.paired_diff).collect();
+    let paired_diff_session_ci = if n_sessions == 0 {
+        (f64::NAN, f64::NAN)
+    } else {
+        block_bootstrap_mean_ci(&diffs, 1, BOOTSTRAP_RESAMPLES, PILOT_BOOTSTRAP_SEED)
+    };
+    let session_requirement_met = n_sessions >= PILOT_REQUIRED_SESSIONS;
+    let mut notes = vec![
+        "Effective sample unit: one independent recording session. Bars inside a \
+         session are serially dependent and are never counted as independent samples."
+            .to_string(),
+        "test_majority_rate is computed from the test outcomes themselves and is a \
+         descriptive reference only; the baseline every session is paired against is \
+         the training-majority predictor, which never reads a test outcome."
+            .to_string(),
+    ];
+    if !session_requirement_met {
+        notes.push(format!(
+            "This pilot covers {n_sessions} independent sessions, below the \
+             {PILOT_REQUIRED_SESSIONS}-session target. Read the intervals as \
+             preliminary: the session count, not the bar count, is the sample size."
+        ));
+    }
+    SessionPilot {
+        schema: SESSION_PILOT_SCHEMA.to_string(),
+        bar_ms,
+        horizon_bars,
+        n_splits,
+        effective_sample_unit: "independent recording session".to_string(),
+        required_sessions: PILOT_REQUIRED_SESSIONS,
+        n_sessions,
+        session_requirement_met,
+        mean_accuracy: mean_of(&|s: &SessionEval| s.accuracy),
+        mean_train_majority_accuracy: mean_of(&|s: &SessionEval| s.train_majority_accuracy),
+        mean_paired_diff: mean_of(&|s: &SessionEval| s.paired_diff),
+        paired_diff_session_ci,
+        sessions,
+        notes,
+    }
 }
 
 #[cfg(test)]
@@ -1492,5 +1864,203 @@ mod tests {
             }
             assert_eq!(a.proba.to_bits(), b.proba.to_bits());
         }
+    }
+
+    // ---- TF6: defensible walk-forward statistics -------------------
+    //
+    // Known-answer fixtures for the repaired statistics. Every
+    // expected value below is computed by hand in the comments, never
+    // derived from the code under test.
+
+    fn tf6_row(target: u8, proba: f64) -> PredictionRow {
+        PredictionRow {
+            fold: 0,
+            row: 0,
+            time_ms: 0,
+            features: [0.0; N_FEATURES],
+            target,
+            proba,
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_6_row_statistics_known_answers() {
+        // targets:  1    1    0    0    1    0
+        // probas:   0.9  0.4  0.3  0.8  0.6  0.45
+        // preds:    1    0    0    1    1    0
+        // correct:  1    0    1    0    1    1   -> accuracy 4/6
+        // positives: preds 1,0,1 -> TPR 2/3; negatives: preds 0,1,0
+        // -> TNR 2/3; balanced accuracy 2/3.
+        // Brier: (0.01 + 0.36 + 0.09 + 0.64 + 0.16 + 0.2025) / 6
+        //      = 1.4625 / 6 = 0.24375.
+        let rows = vec![
+            tf6_row(1, 0.9),
+            tf6_row(1, 0.4),
+            tf6_row(0, 0.3),
+            tf6_row(0, 0.8),
+            tf6_row(1, 0.6),
+            tf6_row(0, 0.45),
+        ];
+        let ba = balanced_accuracy(&rows);
+        assert!((ba - 2.0 / 3.0).abs() < 1e-12, "balanced accuracy {ba}");
+        let br = brier_score(&rows);
+        assert!((br - 0.24375).abs() < 1e-12, "brier {br}");
+        // A single-class row set has no defined balanced accuracy:
+        // it must come back NaN, never a fabricated 0 or 1.
+        let one_class = vec![tf6_row(1, 0.9), tf6_row(1, 0.8)];
+        assert!(balanced_accuracy(&one_class).is_nan());
+    }
+
+    /// Bars whose training prefixes are majority-1 while the
+    /// out-of-sample rows are majority-0: the fixture that separates
+    /// a training-majority baseline from a test-outcome prevalence.
+    ///
+    /// Bars 0..100: target 0 iff i % 10 == 9 (90 ones, 10 zeros).
+    /// Bars 100..200: target 1 iff i % 10 == 0 (10 ones, 90 zeros).
+    /// With 4 splits and horizon 2 the OOS rows are 40..200: 64 ones
+    /// in 160 rows. Every fold's training prefix stays majority-1
+    /// (fold train ends 38/78/118/158 hold 35/71/92/96 ones), so the
+    /// training-majority predictor labels every OOS row 1 and scores
+    /// exactly 64/160 = 0.4, while the test-outcome majority rate is
+    /// 96/160 = 0.6.
+    fn tf6_skewed_bars() -> Vec<Bar> {
+        (0..200)
+            .map(|i| {
+                let target = if i < 100 {
+                    u8::from(i % 10 != 9)
+                } else {
+                    u8::from(i % 10 == 0)
+                };
+                Bar {
+                    time_ms: i as i64 * 10_000,
+                    ofi: (i % 7) as f64 - 3.0,
+                    ofi_z: 0.0,
+                    imbalance: 0.0,
+                    spread_z: 0.0,
+                    spread_degenerate: false,
+                    signed_vol: 0.0,
+                    target,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stage3_toxicflow_6_baseline_uses_training_majority_not_test_outcomes() {
+        let bars = tf6_skewed_bars();
+        let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        let rep = &detail.report;
+        // The headline baseline is the training-majority predictor
+        // scored out of sample: exactly 0.4 on this fixture.
+        assert!(
+            (rep.baseline - 0.4).abs() < 1e-12,
+            "baseline {} (expected the training-majority accuracy 0.4)",
+            rep.baseline
+        );
+        // The test-outcome majority rate survives only as a labeled
+        // descriptive reference: exactly 0.6 here.
+        assert!(
+            (rep.test_majority_rate - 0.6).abs() < 1e-12,
+            "test_majority_rate {}",
+            rep.test_majority_rate
+        );
+        // The baseline must be reproducible from the saved fold
+        // records and ledger rows alone: each row scored against its
+        // own fold's training majority label.
+        let mut correct = 0usize;
+        for (i, r) in detail.predictions.iter().enumerate() {
+            let label = detail.folds[r.fold].train_majority_label;
+            correct += usize::from(label == r.target);
+            assert_eq!(detail.baseline_correct[i], f64::from(label == r.target));
+        }
+        let recomputed = correct as f64 / detail.predictions.len() as f64;
+        assert!((recomputed - rep.baseline).abs() < 1e-12);
+        // accuracy_std is the population SD of the 0/1 correctness
+        // values, which for Bernoulli outcomes is sqrt(acc*(1-acc))
+        // exactly. It is dispersion of the rows, not an interval.
+        let expect_std = (rep.accuracy * (1.0 - rep.accuracy)).sqrt();
+        assert!(
+            (rep.accuracy_std - expect_std).abs() < 1e-12,
+            "accuracy_std {} vs bernoulli sd {expect_std}",
+            rep.accuracy_std
+        );
+        // The uncertainty interval is a separate object: ordered,
+        // inside [0, 1], and not the +- accuracy_std pseudo-interval.
+        let (lo, hi) = rep.accuracy_ci;
+        assert!(lo <= rep.accuracy && rep.accuracy <= hi, "ci ({lo}, {hi})");
+        assert!(0.0 <= lo && hi <= 1.0);
+    }
+
+    #[test]
+    fn stage3_toxicflow_6_block_bootstrap_known_answers() {
+        // A constant series has no resampling uncertainty: the
+        // interval collapses onto the constant, for any block length.
+        let flat = vec![0.5; 50];
+        let (lo, hi) = block_bootstrap_mean_ci(&flat, 10, 500, 42);
+        assert_eq!((lo, hi), (0.5, 0.5));
+        // Deterministic: same seed, same interval, bit for bit.
+        let alt: Vec<f64> = (0..100).map(|i| f64::from(i % 2)).collect();
+        let a = block_bootstrap_mean_ci(&alt, 1, 2000, 7);
+        let b = block_bootstrap_mean_ci(&alt, 1, 2000, 7);
+        assert_eq!(a, b);
+        // 100 fair coin flips: the block bootstrap of the mean must
+        // bracket 0.5 well inside the trivial (0, 1) range.
+        assert!(a.0 > 0.3 && a.0 < 0.5 && a.1 > 0.5 && a.1 < 0.7, "ci {a:?}");
+        // A different seed may move the endpoints but never out of
+        // the convex hull of the data.
+        let c = block_bootstrap_mean_ci(&alt, 5, 2000, 99);
+        assert!(0.0 <= c.0 && c.0 <= c.1 && c.1 <= 1.0);
+    }
+
+    #[test]
+    fn stage3_toxicflow_6_session_pilot_pairs_and_counts_sessions() {
+        // The pilot machinery runs on the skewed fixture: the session
+        // result must carry the same training-majority pairing.
+        let bars = tf6_skewed_bars();
+        let s = evaluate_session("fixture-skew", &bars, 4, 2).expect("session eval");
+        assert!((s.train_majority_accuracy - 0.4).abs() < 1e-12);
+        assert!((s.test_majority_rate - 0.6).abs() < 1e-12);
+        assert!((s.paired_diff - (s.accuracy - 0.4)).abs() < 1e-12);
+        assert_eq!(s.n_oos, 160);
+
+        // Aggregation counts sessions, not bars: two hand-built
+        // session results with diffs +0.02 and -0.04 give a mean
+        // paired diff of exactly -0.01, and the requirement flag
+        // stays off below 10 sessions.
+        let mk = |name: &str, acc: f64, diff: f64| SessionEval {
+            session: name.to_string(),
+            first_bar_ms: 0,
+            last_bar_ms: 0,
+            n_bars: 100,
+            n_oos: 80,
+            n_folds: 4,
+            accuracy: acc,
+            balanced_accuracy: acc,
+            brier: 0.25,
+            train_majority_accuracy: acc - diff,
+            test_majority_rate: 0.6,
+            paired_diff: diff,
+            accuracy_ci: (acc - 0.05, acc + 0.05),
+            paired_diff_ci: (diff - 0.05, diff + 0.05),
+            dataset_sha256: String::new(),
+        };
+        let pilot = summarize_session_pilot(
+            vec![mk("a", 0.55, 0.02), mk("b", 0.50, -0.04)],
+            10_000,
+            2,
+            4,
+        );
+        assert_eq!(pilot.n_sessions, 2);
+        assert_eq!(pilot.required_sessions, PILOT_REQUIRED_SESSIONS);
+        assert!(!pilot.session_requirement_met);
+        assert!((pilot.mean_paired_diff - (-0.01)).abs() < 1e-12);
+        assert!((pilot.mean_accuracy - 0.525).abs() < 1e-12);
+        assert!(pilot.effective_sample_unit.contains("session"));
+        // Session bootstrap endpoints stay inside the observed range
+        // of session diffs.
+        let (lo, hi) = pilot.paired_diff_session_ci;
+        assert!(-0.04 <= lo && lo <= hi && hi <= 0.02, "ci ({lo}, {hi})");
+        // The pilot report serializes with its schema tag.
+        assert!(pilot.to_json().contains(SESSION_PILOT_SCHEMA));
     }
 }
