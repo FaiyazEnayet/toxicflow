@@ -43,41 +43,56 @@ impl fmt::Display for ConfigError {
 impl Error for ConfigError {}
 
 impl ProxyConfig {
-    /// Parse a proxy URL of the form `http(s)://[user:pass@]host:port`.
-    /// `None` or blank means direct. Credentials never appear in errors.
+    /// Parse a proxy URL of the form `http://[user:pass@]host:port`.
+    /// `None` or blank means direct. Credentials never appear in errors:
+    /// no error message interpolates the supplied URL or any part of it.
+    ///
+    /// Scheme table:
+    /// - `http://`: supported. Plaintext TCP CONNECT tunnel; TLS is
+    ///   established to the destination after CONNECT.
+    /// - `https://`: rejected. TLS to the proxy is not supported; use
+    ///   `http://` for the proxy URL.
+    /// - anything else: rejected as an unsupported scheme.
     pub fn parse(url: Option<&str>) -> Result<Self, ConfigError> {
         let url = match url {
             None => return Ok(ProxyConfig::Direct),
             Some(u) if u.trim().is_empty() => return Ok(ProxyConfig::Direct),
             Some(u) => u.trim(),
         };
-        let without_scheme = url
-            .strip_prefix("http://")
-            .or_else(|| url.strip_prefix("https://"))
-            .ok_or_else(|| {
-                ConfigError(format!(
-                    "proxy URL must start with http:// or https:// (got {url:?}); \
-                     either unset https_proxy for a direct connection or fix the URL"
-                ))
-            })?;
+        if url.starts_with("https://") {
+            return Err(ConfigError(
+                "https:// proxy URLs are not supported: TLS to the proxy is not \
+                 implemented and the CONNECT tunnel is plaintext TCP. Use \
+                 http://host:port for the proxy (TLS is established to the \
+                 destination after CONNECT) or unset https_proxy for a direct \
+                 connection"
+                    .to_string(),
+            ));
+        }
+        let without_scheme = url.strip_prefix("http://").ok_or_else(|| {
+            ConfigError(
+                "proxy URL scheme is not supported; only http:// proxy URLs are \
+                 supported. Either set the proxy URL to http://host:port or unset \
+                 https_proxy for a direct connection"
+                    .to_string(),
+            )
+        })?;
         let (auth, hostport) = match without_scheme.split_once('@') {
             Some((a, h)) if !a.is_empty() => (Some(a.to_string()), h),
             _ => (None, without_scheme),
         };
         let (host, port) = hostport.split_once(':').ok_or_else(|| {
-            ConfigError(format!(
-                "proxy URL has no port; expected http://[user:pass@]host:port (got {without_scheme:?})"
-            ))
+            ConfigError("proxy URL has no port; expected http://[user:pass@]host:port".to_string())
         })?;
         if host.is_empty() {
-            return Err(ConfigError(format!(
-                "proxy URL has no host; expected http://[user:pass@]host:port (got {without_scheme:?})"
-            )));
+            return Err(ConfigError(
+                "proxy URL has no host; expected http://[user:pass@]host:port".to_string(),
+            ));
         }
         let port: u16 = port.parse().map_err(|_| {
-            ConfigError(format!(
-                "proxy port is not a number (got {port:?}); expected http://[user:pass@]host:port"
-            ))
+            ConfigError(
+                "proxy port is not a number; expected http://[user:pass@]host:port".to_string(),
+            )
         })?;
         Ok(ProxyConfig::Http {
             host: host.to_string(),
