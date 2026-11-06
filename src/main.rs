@@ -95,214 +95,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use toxicflow::metrics::{Quote, Trade};
-
-    /// 15 minutes of synthetic quotes/trades: enough for all export series.
-    fn synth_session() -> (Vec<Quote>, Vec<Trade>) {
-        let mut quotes = Vec::new();
-        let mut trades = Vec::new();
-        let mut mid = 100.0;
-        let mut s: u64 = 99;
-        let mut rnd = || {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            (s as f64) / (u64::MAX as f64) - 0.5
-        };
-        for i in 0..900 {
-            let t = i as i64 * 1000;
-            quotes.push(Quote {
-                time_ms: t,
-                bid_px: mid - 0.05,
-                bid_sz: 5.0 + rnd().abs(),
-                ask_px: mid + 0.05,
-                ask_sz: 5.0 + rnd().abs(),
-            });
-            for k in 0..4 {
-                trades.push(Trade {
-                    time_ms: t + k * 200,
-                    price: mid,
-                    qty: 0.05,
-                    is_buyer_maker: rnd() > 0.0,
-                });
-            }
-            mid += rnd() * 0.02;
-        }
-        (quotes, trades)
-    }
-
-    #[test]
-    fn export_writes_all_files() {
-        let (quotes, trades) = synth_session();
-        let tmp =
-            std::env::temp_dir().join(format!("toxicflow_export_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &trades).unwrap();
-        storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &quotes).unwrap();
-        let out = tmp.join("out");
-        export_session(tmp.to_str().unwrap(), out.to_str().unwrap(), 50, 20, None)
-            .expect("export failed");
-
-        let vpin = std::fs::read_to_string(out.join("vpin.csv")).unwrap();
-        assert!(vpin.starts_with("time_ms,vpin\n"));
-        assert!(vpin.lines().count() > 2, "vpin.csv has no data rows");
-
-        let kyle = std::fs::read_to_string(out.join("kyle.csv")).unwrap();
-        assert!(kyle.starts_with("time_ms,lambda\n"));
-
-        let ofi = std::fs::read_to_string(out.join("ofi.csv")).unwrap();
-        assert!(ofi.starts_with("time_ms,ofi,mid,spread,imbalance,signed_vol,fwd_ret_bps\n"));
-        assert!(ofi.lines().count() > 40, "ofi.csv too short");
-
-        let cal = std::fs::read_to_string(out.join("calibration.csv")).unwrap();
-        assert!(cal.starts_with("mean_pred,realized,n\n"));
-
-        let summary: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(out.join("summary.json")).unwrap())
-                .unwrap();
-        assert_eq!(summary["n_trades"], trades.len() as u64);
-        assert_eq!(summary["n_quotes"], quotes.len() as u64);
-        assert!(summary["vpin"]["mean"].as_f64().unwrap() > 0.0);
-        assert!(summary["predict"]["accuracy"].as_f64().is_some());
-        assert!(summary["mm"]["pnl_open"].as_f64().is_some());
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-
-    #[test]
-    fn n4_export_writes_prediction_ledger() {
-        // Stage 3 N4: the export must persist the fold models and the
-        // OOS probability ledger under experiments/<run>/, and the
-        // independent loader must reconstruct them.
-        let (quotes, trades) = synth_session();
-        let tmp = std::env::temp_dir().join(format!("toxicflow_export_n4_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &trades).unwrap();
-        storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &quotes).unwrap();
-        let out = tmp.join("out");
-        export_session(tmp.to_str().unwrap(), out.to_str().unwrap(), 50, 20, None)
-            .expect("export failed");
-
-        let exp_root = out.join("experiments");
-        let runs: Vec<_> = std::fs::read_dir(&exp_root)
-            .expect("experiments dir missing")
-            .filter_map(|e| e.ok())
-            .collect();
-        assert_eq!(runs.len(), 1, "expected exactly one experiment run dir");
-        let run_dir = runs[0].path();
-        let models = toxicflow::predict::load_fold_models(
-            &std::fs::read_to_string(run_dir.join("fold_models.json")).unwrap(),
-        )
-        .expect("load fold models");
-        let rows = toxicflow::predict::load_predictions(
-            &std::fs::read_to_string(run_dir.join("predictions.csv")).unwrap(),
-        )
-        .expect("load predictions");
-        assert!(!models.folds.is_empty(), "no fold records persisted");
-        assert_eq!(models.past_in_memory_coefficients, "UNRECOVERABLE");
-        let check = toxicflow::predict::verify_prediction_ledger(&models, &rows)
-            .expect("ledger verification");
-        assert_eq!(check.n_rows, models.n_oos);
-        assert!(check.max_proba_err <= 1e-8);
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-
-    #[test]
-    fn n2_flow_bars_flag_gap_bars() {
-        // Quotes/trades on 1 s bars 0..=4, a 5-bar hole, then 10..=14.
-        let mut quotes = Vec::new();
-        let mut trades = Vec::new();
-        for i in (0..=4).chain(10..=14) {
-            let t = i as i64 * 1000;
-            quotes.push(Quote {
-                time_ms: t,
-                bid_px: 100.0,
-                bid_sz: 5.0,
-                ask_px: 100.1,
-                ask_sz: 5.0,
-            });
-            trades.push(Trade {
-                time_ms: t + 10,
-                price: 100.05,
-                qty: 0.1,
-                is_buyer_maker: false,
-            });
-        }
-        let bars = flow_bars(&trades, &quotes, 1000);
-        let flags: Vec<bool> = bars.iter().map(|b| b.gap_before).collect();
-        // Emitted grid bars are 1..=14. Carried bars 5..=9 and the
-        // first post-gap bar 10 are flagged; the rest are not.
-        assert_eq!(bars.len(), 14);
-        assert_eq!(
-            flags,
-            vec![
-                false, false, false, false, // 1..=4
-                true, true, true, true, true, // 5..=9 carried
-                true, // 10 first post-gap
-                false, false, false, false, // 11..=14
-            ]
-        );
-    }
-
-    #[test]
-    fn export_rejects_empty_session() {
-        let tmp =
-            std::env::temp_dir().join(format!("toxicflow_export_empty_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &[]).unwrap();
-        storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &[]).unwrap();
-        let r = export_session(
-            tmp.to_str().unwrap(),
-            tmp.join("out").to_str().unwrap(),
-            50,
-            20,
-            None,
-        );
-        assert!(r.is_err(), "empty session should fail");
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-
-    #[test]
-    fn read_trades_rejects_wrong_schema_without_panicking() {
-        use arrow::array::{Float64Array, Int64Array};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use std::sync::Arc;
-
-        // Parquet file missing the "price" column: must be an Err, not a panic.
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("time", DataType::Int64, false),
-            Field::new("qty", DataType::Float64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![1i64, 2])),
-                Arc::new(Float64Array::from(vec![0.5f64, 0.5])),
-            ],
-        )
-        .unwrap();
-        let tmp = std::env::temp_dir().join(format!("toxicflow_bad_schema_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let path = tmp.join("trades.parquet");
-        let file = std::fs::File::create(&path).unwrap();
-        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
-        w.write(&batch).unwrap();
-        w.close().unwrap();
-
-        let r = storage::read_trades(path.to_str().unwrap());
-        assert!(r.is_err(), "wrong-schema parquet should be an Err");
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-}
-
 fn percentile(mut xs: Vec<f64>, p: f64) -> f64 {
     if xs.is_empty() {
         return f64::NAN;
@@ -751,4 +543,212 @@ async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toxicflow::metrics::{Quote, Trade};
+
+    /// 15 minutes of synthetic quotes/trades: enough for all export series.
+    fn synth_session() -> (Vec<Quote>, Vec<Trade>) {
+        let mut quotes = Vec::new();
+        let mut trades = Vec::new();
+        let mut mid = 100.0;
+        let mut s: u64 = 99;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s as f64) / (u64::MAX as f64) - 0.5
+        };
+        for i in 0..900 {
+            let t = i as i64 * 1000;
+            quotes.push(Quote {
+                time_ms: t,
+                bid_px: mid - 0.05,
+                bid_sz: 5.0 + rnd().abs(),
+                ask_px: mid + 0.05,
+                ask_sz: 5.0 + rnd().abs(),
+            });
+            for k in 0..4 {
+                trades.push(Trade {
+                    time_ms: t + k * 200,
+                    price: mid,
+                    qty: 0.05,
+                    is_buyer_maker: rnd() > 0.0,
+                });
+            }
+            mid += rnd() * 0.02;
+        }
+        (quotes, trades)
+    }
+
+    #[test]
+    fn export_writes_all_files() {
+        let (quotes, trades) = synth_session();
+        let tmp =
+            std::env::temp_dir().join(format!("toxicflow_export_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &trades).unwrap();
+        storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &quotes).unwrap();
+        let out = tmp.join("out");
+        export_session(tmp.to_str().unwrap(), out.to_str().unwrap(), 50, 20, None)
+            .expect("export failed");
+
+        let vpin = std::fs::read_to_string(out.join("vpin.csv")).unwrap();
+        assert!(vpin.starts_with("time_ms,vpin\n"));
+        assert!(vpin.lines().count() > 2, "vpin.csv has no data rows");
+
+        let kyle = std::fs::read_to_string(out.join("kyle.csv")).unwrap();
+        assert!(kyle.starts_with("time_ms,lambda\n"));
+
+        let ofi = std::fs::read_to_string(out.join("ofi.csv")).unwrap();
+        assert!(ofi.starts_with("time_ms,ofi,mid,spread,imbalance,signed_vol,fwd_ret_bps\n"));
+        assert!(ofi.lines().count() > 40, "ofi.csv too short");
+
+        let cal = std::fs::read_to_string(out.join("calibration.csv")).unwrap();
+        assert!(cal.starts_with("mean_pred,realized,n\n"));
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("summary.json")).unwrap())
+                .unwrap();
+        assert_eq!(summary["n_trades"], trades.len() as u64);
+        assert_eq!(summary["n_quotes"], quotes.len() as u64);
+        assert!(summary["vpin"]["mean"].as_f64().unwrap() > 0.0);
+        assert!(summary["predict"]["accuracy"].as_f64().is_some());
+        assert!(summary["mm"]["pnl_open"].as_f64().is_some());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn n4_export_writes_prediction_ledger() {
+        // Stage 3 N4: the export must persist the fold models and the
+        // OOS probability ledger under experiments/<run>/, and the
+        // independent loader must reconstruct them.
+        let (quotes, trades) = synth_session();
+        let tmp = std::env::temp_dir().join(format!("toxicflow_export_n4_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &trades).unwrap();
+        storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &quotes).unwrap();
+        let out = tmp.join("out");
+        export_session(tmp.to_str().unwrap(), out.to_str().unwrap(), 50, 20, None)
+            .expect("export failed");
+
+        let exp_root = out.join("experiments");
+        let runs: Vec<_> = std::fs::read_dir(&exp_root)
+            .expect("experiments dir missing")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(runs.len(), 1, "expected exactly one experiment run dir");
+        let run_dir = runs[0].path();
+        let models = toxicflow::predict::load_fold_models(
+            &std::fs::read_to_string(run_dir.join("fold_models.json")).unwrap(),
+        )
+        .expect("load fold models");
+        let rows = toxicflow::predict::load_predictions(
+            &std::fs::read_to_string(run_dir.join("predictions.csv")).unwrap(),
+        )
+        .expect("load predictions");
+        assert!(!models.folds.is_empty(), "no fold records persisted");
+        assert_eq!(models.past_in_memory_coefficients, "UNRECOVERABLE");
+        let check = toxicflow::predict::verify_prediction_ledger(&models, &rows)
+            .expect("ledger verification");
+        assert_eq!(check.n_rows, models.n_oos);
+        assert!(check.max_proba_err <= 1e-8);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn n2_flow_bars_flag_gap_bars() {
+        // Quotes/trades on 1 s bars 0..=4, a 5-bar hole, then 10..=14.
+        let mut quotes = Vec::new();
+        let mut trades = Vec::new();
+        for i in (0..=4).chain(10..=14) {
+            let t = i as i64 * 1000;
+            quotes.push(Quote {
+                time_ms: t,
+                bid_px: 100.0,
+                bid_sz: 5.0,
+                ask_px: 100.1,
+                ask_sz: 5.0,
+            });
+            trades.push(Trade {
+                time_ms: t + 10,
+                price: 100.05,
+                qty: 0.1,
+                is_buyer_maker: false,
+            });
+        }
+        let bars = flow_bars(&trades, &quotes, 1000);
+        let flags: Vec<bool> = bars.iter().map(|b| b.gap_before).collect();
+        // Emitted grid bars are 1..=14. Carried bars 5..=9 and the
+        // first post-gap bar 10 are flagged; the rest are not.
+        assert_eq!(bars.len(), 14);
+        assert_eq!(
+            flags,
+            vec![
+                false, false, false, false, // 1..=4
+                true, true, true, true, true, // 5..=9 carried
+                true, // 10 first post-gap
+                false, false, false, false, // 11..=14
+            ]
+        );
+    }
+
+    #[test]
+    fn export_rejects_empty_session() {
+        let tmp =
+            std::env::temp_dir().join(format!("toxicflow_export_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        storage::write_trades(tmp.join("trades.parquet").to_str().unwrap(), &[]).unwrap();
+        storage::write_quotes(tmp.join("quotes.parquet").to_str().unwrap(), &[]).unwrap();
+        let r = export_session(
+            tmp.to_str().unwrap(),
+            tmp.join("out").to_str().unwrap(),
+            50,
+            20,
+            None,
+        );
+        assert!(r.is_err(), "empty session should fail");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn read_trades_rejects_wrong_schema_without_panicking() {
+        use arrow::array::{Float64Array, Int64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+
+        // Parquet file missing the "price" column: must be an Err, not a panic.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("qty", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1i64, 2])),
+                Arc::new(Float64Array::from(vec![0.5f64, 0.5])),
+            ],
+        )
+        .unwrap();
+        let tmp = std::env::temp_dir().join(format!("toxicflow_bad_schema_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("trades.parquet");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let r = storage::read_trades(path.to_str().unwrap());
+        assert!(r.is_err(), "wrong-schema parquet should be an Err");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 }
