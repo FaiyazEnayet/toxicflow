@@ -1434,10 +1434,10 @@ mod tests {
         let xs: Vec<f64> = (0..n).map(|i| 1e6 + (i % 30) as f64).collect();
         let (_, sd) = rolling_mean_sd(&xs, 30);
         let mut worst = 0.0f64;
-        for i in 4..n {
+        for (i, &sd_i) in sd.iter().enumerate().skip(4) {
             let k = (i + 1).min(30) as f64;
             let var_true = (k * k - 1.0) / 12.0;
-            let var_got = sd[i] * sd[i];
+            let var_got = sd_i * sd_i;
             let rel = (var_got - var_true).abs() / var_true;
             worst = worst.max(rel);
             assert!(
@@ -1449,10 +1449,10 @@ mod tests {
         // 1e-10 bar (this is the before/after record for the fixture).
         let (_, sd_old) = legacy_rolling_mean_sd(&xs, 30);
         let mut worst_old = 0.0f64;
-        for i in 4..n {
+        for (i, &sd_old_i) in sd_old.iter().enumerate().skip(4) {
             let k = (i + 1).min(30) as f64;
             let var_true = (k * k - 1.0) / 12.0;
-            let rel = (sd_old[i] * sd_old[i] - var_true).abs() / var_true;
+            let rel = (sd_old_i * sd_old_i - var_true).abs() / var_true;
             worst_old = worst_old.max(rel);
         }
         eprintln!("n1 fixture: rolling variance rel err new={worst:e} legacy={worst_old:e}");
