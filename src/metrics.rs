@@ -64,7 +64,7 @@ impl Quote {
 }
 
 /// One equal-volume bucket of trade flow.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bucket {
     pub time_ms: i64,
     pub buy_vol: f64,
@@ -145,6 +145,125 @@ pub fn vpin(buckets: &[Bucket], window: usize) -> Vec<(i64, f64)> {
             (b.time_ms, sum / n)
         })
         .collect()
+}
+
+/// Persistent frozen-volume online VPIN estimator for the live dashboard.
+///
+/// The recorded-session estimator rebuilds equal-volume buckets from the
+/// whole trade list each time. The live dashboard used to do the same over
+/// only the trades since the last two-second display tick and then cleared
+/// the list, so each printed VPIN covered one tick in isolation and no
+/// bucket ever survived a tick boundary. This estimator keeps the bucket
+/// state across ticks instead: the bucket volume is frozen at
+/// construction, a trade straddling a boundary is split exactly as in
+/// `volume_buckets_sized`, and only completed buckets enter the rolling
+/// window. Feeding the same trades in any tick-sized chunks therefore
+/// produces the same bucket sequence and the same VPIN as feeding them
+/// all at once (prefix stability), and a partially filled bucket carries
+/// over the tick boundary (bucket continuity). Callers must feed trades
+/// in nondecreasing time order across calls; each call sorts its own
+/// slice. The estimator holds only completed buckets, so memory grows by
+/// one small record per completed bucket for the life of the session.
+pub struct LiveVpin {
+    bucket_vol: f64,
+    window: usize,
+    buy: f64,
+    sell: f64,
+    filled: f64,
+    end_time: i64,
+    buckets: Vec<Bucket>,
+}
+
+impl LiveVpin {
+    /// `bucket_vol` is the frozen base volume of one bucket; `window`
+    /// is the number of completed buckets in the rolling VPIN mean.
+    /// Panics on a non-positive or non-finite bucket volume: a bucket
+    /// of zero volume can never fill and would stall the estimator.
+    pub fn new(bucket_vol: f64, window: usize) -> Self {
+        assert!(
+            bucket_vol > 0.0 && bucket_vol.is_finite(),
+            "LiveVpin needs a positive finite bucket volume, got {bucket_vol}"
+        );
+        Self {
+            bucket_vol,
+            window: window.max(1),
+            buy: 0.0,
+            sell: 0.0,
+            filled: 0.0,
+            end_time: 0,
+            buckets: Vec::new(),
+        }
+    }
+
+    /// Feed trades in time order. Trades straddling a bucket boundary
+    /// are split proportionally, exactly as `volume_buckets_sized`
+    /// splits them; the trailing partial bucket is kept for the next
+    /// call instead of being dropped.
+    pub fn feed(&mut self, trades: &[Trade]) {
+        let mut sorted: Vec<&Trade> = trades.iter().collect();
+        sorted.sort_by_key(|t| t.time_ms);
+        let v = self.bucket_vol;
+        for t in sorted {
+            let (mut rb, mut rs) = if t.is_buyer_maker {
+                (0.0, t.qty)
+            } else {
+                (t.qty, 0.0)
+            };
+            while rb + rs > 1e-12 {
+                let take = (v - self.filled).min(rb + rs);
+                let frac = take / (rb + rs);
+                self.buy += rb * frac;
+                self.sell += rs * frac;
+                self.filled += take;
+                rb *= 1.0 - frac;
+                rs *= 1.0 - frac;
+                self.end_time = self.end_time.max(t.time_ms);
+                if self.filled >= v - 1e-9 {
+                    self.buckets.push(Bucket {
+                        time_ms: self.end_time,
+                        buy_vol: self.buy,
+                        sell_vol: self.sell,
+                        imbalance: (self.buy - self.sell).abs() / v,
+                    });
+                    self.buy = 0.0;
+                    self.sell = 0.0;
+                    self.filled = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Rolling mean of bucket imbalance over the last `window`
+    /// completed buckets (fewer while the window is still filling).
+    /// NaN until the first bucket completes.
+    pub fn vpin(&self) -> f64 {
+        let n = self.buckets.len().min(self.window);
+        if n == 0 {
+            return f64::NAN;
+        }
+        let start = self.buckets.len() - n;
+        self.buckets[start..]
+            .iter()
+            .map(|b| b.imbalance)
+            .sum::<f64>()
+            / n as f64
+    }
+
+    /// Completed buckets, in order. Once a bucket is completed it is
+    /// never changed by later feeds.
+    pub fn buckets(&self) -> &[Bucket] {
+        &self.buckets
+    }
+
+    /// Number of completed buckets.
+    pub fn completed(&self) -> usize {
+        self.buckets.len()
+    }
+
+    /// Base volume currently in the open, not yet completed bucket.
+    pub fn partial_fill(&self) -> f64 {
+        self.filled
+    }
 }
 
 /// One bar of signed flow and the resulting midprice change.
@@ -599,5 +718,218 @@ mod tests {
         assert!((bars[4].2 - 105.0).abs() < 1e-9);
         assert!((bars[4].1 - e[2]).abs() < 1e-9);
         assert!((bars[1].1 - e[1]).abs() < 1e-9);
+    }
+
+    /// H1 fixture helpers: a deterministic trade stream with
+    /// increasing times, mixed sides and straddling quantities.
+    fn h1_trades() -> Vec<Trade> {
+        // Fixed-seed xorshift; no randomness at test time.
+        let mut s: u64 = 0x9E3779B97F4A7C15;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s as f64) / (u64::MAX as f64)
+        };
+        (0..500)
+            .map(|i| Trade {
+                time_ms: i as i64 * 37,
+                price: 100.0,
+                qty: 0.01 + 0.49 * rnd(),
+                is_buyer_maker: rnd() < 0.5,
+            })
+            .collect()
+    }
+
+    fn h1_offline(trades: &[Trade], bucket_vol: f64, window: usize) -> (Vec<Bucket>, f64) {
+        let buckets = volume_buckets_sized(trades, bucket_vol);
+        let v = vpin(&buckets, window)
+            .last()
+            .map(|(_, x)| *x)
+            .unwrap_or(f64::NAN);
+        (buckets, v)
+    }
+
+    fn assert_buckets_close(a: &[Bucket], b: &[Bucket]) {
+        assert_eq!(a.len(), b.len(), "bucket counts differ");
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!((x.buy_vol - y.buy_vol).abs() < 1e-12);
+            assert!((x.sell_vol - y.sell_vol).abs() < 1e-12);
+            assert!((x.imbalance - y.imbalance).abs() < 1e-12);
+            assert_eq!(x.time_ms, y.time_ms);
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_1_live_vpin_known_answer() {
+        // Bucket volume 1.0, window 20. Hand-computed:
+        // buy 0.5 + buy 0.5 -> bucket 1, imbalance 1.0, VPIN 1.0.
+        let mut est = LiveVpin::new(1.0, 20);
+        assert!(est.vpin().is_nan());
+        assert_eq!(est.completed(), 0);
+        est.feed(&[
+            Trade {
+                time_ms: 0,
+                price: 100.0,
+                qty: 0.5,
+                is_buyer_maker: false,
+            },
+            Trade {
+                time_ms: 1,
+                price: 100.0,
+                qty: 0.5,
+                is_buyer_maker: false,
+            },
+        ]);
+        assert_eq!(est.completed(), 1);
+        assert!((est.vpin() - 1.0).abs() < 1e-12);
+        // Sell 0.4, buy 0.4, sell 0.2 -> bucket 2: buy 0.4, sell 0.6,
+        // imbalance 0.2; VPIN (1.0 + 0.2) / 2 = 0.6.
+        est.feed(&[
+            Trade {
+                time_ms: 2,
+                price: 100.0,
+                qty: 0.4,
+                is_buyer_maker: true,
+            },
+            Trade {
+                time_ms: 3,
+                price: 100.0,
+                qty: 0.4,
+                is_buyer_maker: false,
+            },
+            Trade {
+                time_ms: 4,
+                price: 100.0,
+                qty: 0.2,
+                is_buyer_maker: true,
+            },
+        ]);
+        assert_eq!(est.completed(), 2);
+        assert!((est.vpin() - 0.6).abs() < 1e-12);
+        // Buy 1.5 straddles: bucket 3 is buy 1.0 (imbalance 1.0) and
+        // 0.5 buy stays partial; sell 0.5 then closes bucket 4 at
+        // buy 0.5 / sell 0.5, imbalance 0.0.
+        // VPIN (1.0 + 0.2 + 1.0 + 0.0) / 4 = 0.55.
+        assert!((est.partial_fill() - 0.0).abs() < 1e-12);
+        est.feed(&[Trade {
+            time_ms: 5,
+            price: 100.0,
+            qty: 1.5,
+            is_buyer_maker: false,
+        }]);
+        assert_eq!(est.completed(), 3);
+        assert!((est.partial_fill() - 0.5).abs() < 1e-12);
+        est.feed(&[Trade {
+            time_ms: 6,
+            price: 100.0,
+            qty: 0.5,
+            is_buyer_maker: true,
+        }]);
+        assert_eq!(est.completed(), 4);
+        assert!((est.vpin() - 0.55).abs() < 1e-12);
+        let imbs: Vec<f64> = est.buckets().iter().map(|b| b.imbalance).collect();
+        for (got, want) in imbs.iter().zip([1.0, 0.2, 1.0, 0.0]) {
+            assert!((got - want).abs() < 1e-12, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_1_live_vpin_prefix_stability() {
+        // Feeding the same trades in one call, one trade at a time,
+        // or in arbitrary chunks must give the same completed buckets
+        // and the same VPIN as the offline estimator on each prefix,
+        // and already-completed buckets must never change.
+        let trades = h1_trades();
+        let (offline, offline_vpin) = h1_offline(&trades, 1.0, 20);
+
+        let mut whole = LiveVpin::new(1.0, 20);
+        whole.feed(&trades);
+        assert_buckets_close(whole.buckets(), &offline);
+        assert!((whole.vpin() - offline_vpin).abs() < 1e-12);
+
+        let mut one_by_one = LiveVpin::new(1.0, 20);
+        let mut seen: Vec<Bucket> = Vec::new();
+        for (i, t) in trades.iter().enumerate() {
+            one_by_one.feed(std::slice::from_ref(t));
+            // Completed buckets are frozen: the prefix so far matches
+            // the offline buckets for that prefix exactly.
+            let prefix = &trades[..=i];
+            let (off_prefix, off_vpin) = h1_offline(prefix, 1.0, 20);
+            assert_buckets_close(one_by_one.buckets(), &off_prefix);
+            if off_prefix.is_empty() {
+                assert!(one_by_one.vpin().is_nan());
+            } else {
+                assert!((one_by_one.vpin() - off_vpin).abs() < 1e-12);
+            }
+            // Nothing already completed may change when more trades
+            // arrive: the earlier buckets are a prefix of the new ones.
+            assert!(one_by_one.buckets().starts_with(&seen));
+            seen = one_by_one.buckets().to_vec();
+        }
+        assert_buckets_close(one_by_one.buckets(), &offline);
+        assert!((one_by_one.vpin() - offline_vpin).abs() < 1e-12);
+
+        // Arbitrary chunk sizes (7, 13, 200, remainder) agree too.
+        let mut chunked = LiveVpin::new(1.0, 20);
+        let mut at = 0;
+        for size in [7usize, 13, 200] {
+            chunked.feed(&trades[at..at + size]);
+            at += size;
+        }
+        chunked.feed(&trades[at..]);
+        assert_buckets_close(chunked.buckets(), &offline);
+        assert!((chunked.vpin() - offline_vpin).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stage3_toxicflow_1_live_vpin_bucket_continuity_over_ticks() {
+        // Simulate the live dashboard's two-second display ticks: the
+        // trades of each tick are fed together, and a bucket that is
+        // only partly filled at the end of a tick must continue into
+        // the next tick instead of being dropped or restarted.
+        let trades = h1_trades();
+        let (offline, offline_vpin) = h1_offline(&trades, 1.0, 20);
+        let mut est = LiveVpin::new(1.0, 20);
+        let mut saw_partial_carry = false;
+        let mut tick_end = 0i64;
+        // Run one tick past the last trade so the tail after the final
+        // whole two-second boundary is fed as a last partial tick.
+        while tick_end < trades.last().unwrap().time_ms + 2000 {
+            let tick: Vec<Trade> = trades
+                .iter()
+                .filter(|t| t.time_ms > tick_end - 2000 && t.time_ms <= tick_end)
+                .copied()
+                .collect();
+            est.feed(&tick);
+            // A tick that ends mid-bucket leaves a partial fill: that
+            // bucket is open across the tick boundary and the next
+            // tick must keep building on it (proved by the per-tick
+            // offline comparison below).
+            if (1e-12..1.0 - 1e-12).contains(&est.partial_fill()) {
+                saw_partial_carry = true;
+            }
+            // VPIN after each tick matches the offline VPIN on the
+            // trades seen so far (completed buckets only).
+            let seen: Vec<Trade> = trades
+                .iter()
+                .filter(|t| t.time_ms <= tick_end)
+                .copied()
+                .collect();
+            let (off_seen, off_vpin) = h1_offline(&seen, 1.0, 20);
+            assert_buckets_close(est.buckets(), &off_seen);
+            if off_seen.is_empty() {
+                assert!(est.vpin().is_nan());
+            } else {
+                assert!((est.vpin() - off_vpin).abs() < 1e-12);
+            }
+            tick_end += 2000;
+        }
+        assert_buckets_close(est.buckets(), &offline);
+        assert!((est.vpin() - offline_vpin).abs() < 1e-12);
+        assert!(
+            saw_partial_carry,
+            "fixture must exercise a bucket spanning a tick boundary"
+        );
     }
 }

@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use toxicflow::metrics::{
-    kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, Quote, Trade,
+    kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, LiveVpin, Quote, Trade,
 };
 use toxicflow::{predict, recorder, storage, strategy};
 
@@ -466,8 +466,16 @@ async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
     let mut sync = BookSync::new();
     let mut fetch: Option<tokio::task::JoinHandle<Result<SnapshotData, String>>> = None;
     let mut trades: Vec<Trade> = Vec::new();
+    // Persistent frozen-volume VPIN (Stage 3 H1): the estimator keeps
+    // its buckets across display ticks, so the printed VPIN is a
+    // cumulative rolling value comparable to the recorded-session
+    // estimator instead of one tick's trades in isolation. Bucket
+    // volume 1.0 BTC: on the recorded 3.25h session (749.6 BTC over
+    // 11,724 s, about 0.064 BTC/s) a bucket fills in roughly 16 s and
+    // the 20-bucket window spans about 5 minutes.
+    let mut live_vpin = LiveVpin::new(1.0, 20);
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
-    println!("live {symbol}: rolling VPIN (50 buckets / 20 window) + touch imbalance");
+    println!("live {symbol}: persistent VPIN (1 BTC buckets / 20 window) + touch imbalance");
     loop {
         // Settle a finished snapshot fetch, and start one whenever the
         // machine is syncing with buffered events and no fetch is in
@@ -492,9 +500,14 @@ async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
         tokio::select! {
             _ = tick.tick() => {
                 let book = sync.book();
-                let bk = volume_buckets(&trades, 50);
-                let vp = vpin(&bk, 20);
-                let v = vp.last().map(|(_, x)| *x).unwrap_or(f64::NAN);
+                // Feed this tick's trades into the persistent estimator
+                // and drop the buffer: the history now lives in the
+                // estimator's completed buckets, so clearing the buffer
+                // no longer discards it.
+                live_vpin.feed(&trades);
+                let v = live_vpin.vpin();
+                let buckets = live_vpin.completed();
+                let partial = live_vpin.partial_fill();
                 let (imb, mid) = match book.touch() {
                     Some((bp, bq, ap, aq)) => {
                         let t = bq + aq;
@@ -504,8 +517,7 @@ async fn live_dashboard(symbol: &str) -> Result<(), Box<dyn Error>> {
                 };
                 let spread = book.spread().unwrap_or(f64::NAN);
                 println!(
-                    "mid {mid:>12.2}  spread {spread:>6.2}  vpin {v:.3}  imb {imb:+.3}  trades {}",
-                    trades.len()
+                    "mid {mid:>12.2}  spread {spread:>6.2}  vpin {v:.3}  imb {imb:+.3}  buckets {buckets} (+{partial:.2} BTC)"
                 );
                 trades.clear();
             }
