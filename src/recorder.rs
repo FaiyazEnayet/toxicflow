@@ -673,6 +673,11 @@ mod tests {
     /// Serializes tests that mutate the proxy env vars (process-global).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // The lock must be held across the await below: the proxy env vars are
+    // process-global, so another test mutating them mid-session would make
+    // this test flaky. The awaited call is a local session attempt, not a
+    // shared resource, so holding the guard is intentional here.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn record_session_fails_fast_on_bad_proxy_config() {
         // An invalid proxy URL is a configuration error, not a transient
