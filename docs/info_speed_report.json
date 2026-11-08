@@ -158,7 +158,7 @@
       "half_life_s": null,
       "half_life_ci_s": null,
       "fit_r_squared": 0.7508769244835137,
-      "bootstrap_fit_share": 0.0495,
+      "bootstrap_fit_share": 0.039,
       "post_response_bps": [
         0.0,
         0.009687935666803411,
@@ -1000,16 +1000,16 @@
       "fit_tau_raw_s": 18.335948796900603,
       "fit_region": {
         "tau_ci_s": [
-          4.122575843858324,
-          1500.0
+          5.516123335138934,
+          27.36485769470384
         ],
         "jump_ci_bps": [
-          0.06889075951483695,
-          0.18892430799154927
+          0.06360972756184576,
+          0.10852099818708623
         ],
         "r_inf_ci_bps": [
-          -0.6940558170854584,
-          0.12204753817541014
+          0.03613113600315537,
+          0.11958246131898773
         ],
         "bounded": false,
         "n_draw_fits": 2000
@@ -1549,7 +1549,7 @@
         "fit_jump_bps": null,
         "fit_r_inf_bps": null,
         "fit_r_squared": 0.3531884457061154,
-        "fit_verdict": "degenerate resample pool: only 7 distinct block starts are available for a 1799-bar drawn block, below the minimum of 20; bootstrap intervals for this ladder are suppressed rather than reported as narrow intervals from repeated resamples of the same few chunks",
+        "fit_verdict": "degenerate resample pool: only 7 distinct block starts are available for a 1799-bar drawn block, below the minimum of 20; bootstrap intervals for this ladder are suppressed rather than reported as narrow intervals from repeated resamples of the same few chunks; the session is segmented (more than one fully-observed segment), and extended-ladder bootstrap intervals are suppressed on segmented sessions because extended interval coverage is not validated for segmented sessions (in validation, segmented extended resample pools of 20 to 50 distinct starts covered at only 0.21 to 0.50 at 900 s against the 95% nominal level, while single-segment sessions covered at 0.92 to 0.98); the pool-size floor is a degeneracy screen, not a coverage guarantee",
         "profile_flat_tau_range_s": [
           3.195299008184013,
           30.522330223605064
@@ -3146,7 +3146,7 @@
           "status": "unidentified/unstable",
           "criteria": [
             "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
-            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile intervals are bounded (inside the grid interior, ratio of ends below 4)"
           ],
           "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
           "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
@@ -3289,7 +3289,7 @@
       "half_life_s": null,
       "half_life_ci_s": null,
       "fit_r_squared": 0.13637446124401242,
-      "bootstrap_fit_share": 0.002,
+      "bootstrap_fit_share": 0.0,
       "post_response_bps": [
         0.0,
         0.2687402372198148,
@@ -4111,18 +4111,18 @@
       "fit_tau_raw_s": 1.1119230725746918,
       "fit_region": {
         "tau_ci_s": [
-          0.25,
-          1500.0
+          0.62107509485253,
+          1.2402214395925304
         ],
         "jump_ci_bps": [
-          0.6781622415971661,
-          1.3173254226953952
+          0.665192357296029,
+          0.7794352712156148
         ],
         "r_inf_ci_bps": [
-          -5.128018683199444,
-          4.194443404373332
+          0.31100462483331603,
+          0.5026765684888295
         ],
-        "bounded": false,
+        "bounded": true,
         "n_draw_fits": 2000
       },
       "profile_loss_tau_s": [
@@ -6006,7 +6006,7 @@
           "status": "unidentified/unstable",
           "criteria": [
             "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
-            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile intervals are bounded (inside the grid interior, ratio of ends below 4)"
           ],
           "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
           "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
@@ -6144,21 +6144,21 @@
       "fit_failure": "the exponential fit explains only R^2 = 0.374 of the response curve, below the 0.85 bar for reporting it as a fit",
       "r_inf_bps": null,
       "r_inf_ci_bps": [
-        0.0998079120255035,
-        0.4969451097292445
+        0.10532828524783351,
+        0.1490022353587089
       ],
       "tau_s": null,
       "tau_ci_s": [
-        8.537524023571939,
-        271.0862814893927
+        10.241716733044232,
+        18.335948796900603
       ],
       "half_life_s": null,
       "half_life_ci_s": [
-        5.9177607059016895,
-        187.90269170285225
+        7.099017077603223,
+        12.709511211463173
       ],
       "fit_r_squared": 0.3743162742386814,
-      "bootstrap_fit_share": 0.0845,
+      "bootstrap_fit_share": 0.0665,
       "post_response_bps": [
         0.0,
         0.0193007895461661,
@@ -6975,26 +6975,26 @@
       },
       "jump_bps": null,
       "jump_ci_bps": [
-        0.05311866728291846,
-        0.08881052352663615
+        0.05656591559791019,
+        0.07798824365412692
       ],
       "fit_jump_raw_bps": 0.06972834909897668,
       "fit_r_inf_raw_bps": 0.11073706296003573,
       "fit_tau_raw_s": 11.846918937064332,
       "fit_region": {
         "tau_ci_s": [
-          4.122575843858324,
-          1500.0
+          8.537524023571939,
+          16.439132459700406
         ],
         "jump_ci_bps": [
-          0.052951463314509076,
-          0.18770343745516194
+          0.053605466997618395,
+          0.08367677756440946
         ],
         "r_inf_ci_bps": [
-          -0.8057158927959392,
-          0.1584676543260833
+          0.0793447743332288,
+          0.14830682055765773
         ],
-        "bounded": false,
+        "bounded": true,
         "n_draw_fits": 2000
       },
       "profile_loss_tau_s": [
@@ -8861,7 +8861,7 @@
           "status": "unidentified/unstable",
           "criteria": [
             "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
-            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile intervals are bounded (inside the grid interior, ratio of ends below 4)"
           ],
           "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
           "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
@@ -9838,18 +9838,18 @@
       "fit_tau_raw_s": 3.195299008184013,
       "fit_region": {
         "tau_ci_s": [
-          1.153142307552842,
-          1500.0
+          2.0644935666507074,
+          4.122575843858324
         ],
         "jump_ci_bps": [
-          0.20515871229164867,
-          0.43195342487447785
+          0.1987999801121675,
+          0.23116527496553588
         ],
         "r_inf_ci_bps": [
-          -0.47821125642779555,
-          0.8721505260651198
+          0.11300980573770592,
+          0.20688612038290816
         ],
-        "bounded": false,
+        "bounded": true,
         "n_draw_fits": 2000
       },
       "profile_loss_tau_s": [
@@ -11716,7 +11716,7 @@
           "status": "unidentified/unstable",
           "criteria": [
             "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
-            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile intervals are bounded (inside the grid interior, ratio of ends below 4)"
           ],
           "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
           "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
@@ -11851,24 +11851,24 @@
         1498
       ],
       "fit_ok": false,
-      "fit_failure": "the fit passes the point-estimate gates but the joint parameter region from the bootstrap fits is not bounded, so no tau is reported",
+      "fit_failure": "the fit passes the point-estimate gates but tau is not bounded by the bootstrap draw fits (the componentwise tau interval reaches the search-grid edge or spans a fourfold or wider ratio), so no tau is reported",
       "r_inf_bps": null,
       "r_inf_ci_bps": [
-        0.5953132170956547,
-        5.676852035825943
+        0.9143146266752301,
+        2.788061263213372
       ],
       "tau_s": null,
       "tau_ci_s": [
-        50.807986682220104,
-        837.8391142847842
+        58.771211435447725,
+        195.3592873363567
       ],
       "half_life_s": null,
       "half_life_ci_s": [
-        35.21741271870811,
-        580.7458198293399
+        40.737099504573,
+        135.41273921339587
       ],
       "fit_r_squared": 0.9478468382336206,
-      "bootstrap_fit_share": 0.422,
+      "bootstrap_fit_share": 0.17,
       "post_response_bps": [
         0.0,
         0.06500397884712732,
@@ -12685,24 +12685,24 @@
       },
       "jump_bps": null,
       "jump_ci_bps": [
-        0.22734355366030576,
-        0.419478395479714
+        0.1979619189867727,
+        0.3021325262789685
       ],
       "fit_jump_raw_bps": 0.26327633413600693,
       "fit_r_inf_raw_bps": 1.1542168866715914,
       "fit_tau_raw_s": 58.771211435447725,
       "fit_region": {
         "tau_ci_s": [
-          2.5683991601620804,
-          1500.0
+          3.081082592932288,
+          146.00534286747518
         ],
         "jump_ci_bps": [
-          0.2214260141635286,
-          0.5201738930485986
+          0.19262993349895133,
+          0.28012810021477863
         ],
         "r_inf_ci_bps": [
-          -1.7073324556194962,
-          8.490054547750168
+          0.22495723007219948,
+          2.134757269395171
         ],
         "bounded": false,
         "n_draw_fits": 2000
@@ -14588,7 +14588,7 @@
           "status": "unidentified/unstable",
           "criteria": [
             "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
-            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile intervals are bounded (inside the grid interior, ratio of ends below 4)"
           ],
           "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
           "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
@@ -14725,22 +14725,13 @@
       "fit_ok": false,
       "fit_failure": "the exponential fit explains only R^2 = -0.414 of the response curve, below the 0.85 bar for reporting it as a fit",
       "r_inf_bps": null,
-      "r_inf_ci_bps": [
-        1.4842578371351014,
-        6.0611865492338275
-      ],
+      "r_inf_ci_bps": null,
       "tau_s": null,
-      "tau_ci_s": [
-        24.53401923003457,
-        376.1672813907227
-      ],
+      "tau_ci_s": null,
       "half_life_s": null,
-      "half_life_ci_s": [
-        17.005686257101942,
-        260.739290514879
-      ],
+      "half_life_ci_s": null,
       "fit_r_squared": -0.4142518019698631,
-      "bootstrap_fit_share": 0.2525,
+      "bootstrap_fit_share": 0.0,
       "post_response_bps": [
         0.0,
         0.396728561937605,
@@ -15556,27 +15547,24 @@
         "suppression_reason": null
       },
       "jump_bps": null,
-      "jump_ci_bps": [
-        1.185012526984782,
-        1.6147445698954423
-      ],
+      "jump_ci_bps": null,
       "fit_jump_raw_bps": 1.1467776674413201,
       "fit_r_inf_raw_bps": 0.7111857218163253,
       "fit_tau_raw_s": 1.286196723498756,
       "fit_region": {
         "tau_ci_s": [
-          2.5683991601620804,
-          1500.0
+          0.6679753601857809,
+          1.8509259368191013
         ],
         "jump_ci_bps": [
-          1.0650299583707403,
-          2.066577367235614
+          0.98077062225794,
+          1.1340566439076163
         ],
         "r_inf_ci_bps": [
-          -10.473330695245096,
-          4.132627308777748
+          0.4161241669776997,
+          0.8489430865827087
         ],
-        "bounded": false,
+        "bounded": true,
         "n_draw_fits": 2000
       },
       "profile_loss_tau_s": [
@@ -17460,7 +17448,7 @@
           "status": "unidentified/unstable",
           "criteria": [
             "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
-            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile intervals are bounded (inside the grid interior, ratio of ends below 4)"
           ],
           "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
           "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
@@ -17490,9 +17478,12 @@
     "Raw-OFI and OFI-innovation projections are different estimands and are reported side by side: the raw curve is the total association including follow-on flow the originating bar predicts; the innovation curve conditions on the previous 10 bars of OFI. Neither is a causal effect.",
     "Response-share ratios are reported only when the denominator's interval excludes zero; otherwise the share is suppressed in the report with the reason recorded.",
     "Bootstrap intervals are reported only where the ladder's resample pool is non-degenerate: each session and ladder reports its pool of distinct block starts and the distinct blocks actually drawn, and a pool below 20 distinct starts has its intervals suppressed with the reason recorded in its resample_pool block, instead of a narrow interval being published behind a full resample count.",
-    "tau is reported only for sessions whose response the jump-term adjustment curve actually fits (R^2 at or above the published bar, positive long-run response, tau interior to the search grid) and whose joint parameter region from the bootstrap fits is bounded. Sessions that fail keep their empirical curves, the failure reason, the profile loss over tau, and the gate sensitivity table instead of a forced number."
+    "tau is reported only for sessions whose response the jump-term adjustment curve actually fits (R^2 at or above the published bar, positive long-run response, tau interior to the search grid) and whose tau is bounded by the bootstrap draw fits, meaning its componentwise percentile interval over the draw fits sits strictly inside the search grid and spans less than a fourfold ratio (the boundedness check is defined on the tau interval only; the jump and long-run-response intervals in fit_region are their own componentwise percentile intervals, and together they are not a joint confidence region). Sessions that fail keep their empirical curves, the failure reason, the profile loss over tau, and the gate sensitivity table instead of a forced number.",
+    "The within-bootstrap-draw fits are refit with the same covariance weight matrix as the point fit, built once from the draws' covariance and held fixed across the draws, so the parameter intervals and the bootstrap fit share summarize the same estimator that produced the point estimate. The two-component draw fits remain unweighted, like their point fit.",
+    "Extended-ladder intervals are suppressed on segmented sessions (more than one fully-observed segment): validation found segmented extended resample pools of 20 to 50 distinct starts covering at only 0.21 to 0.50 at 900 s against the 95% nominal level, while single-segment sessions covered at 0.92 to 0.98, so the pool floor is treated as a degeneracy screen rather than a coverage guarantee and interval reporting on the extended ladder stays off for segmented session structures until the procedure is coverage-validated for them. The point curve, origin counts and pool diagnostics are still published for segmented sessions.",
+    "Headline bootstrap coverage is at clean-session levels across the validated simulation grid with one named exception: the configuration with a planted tau of 30 s and a jump term, read at h = 0 on 3,600-bar gap sessions, covered at 0.76 against 0.87 on matched clean sessions and a 95% nominal level. That configuration should be read as unreliable rather than repaired; no other validated cell showed the same shortfall."
   ],
-  "schema_note": "v2 keeps every v1 field with its v1 meaning (schema, bar_ms, horizons_s, shock_definition, effective_sample_unit, the per-session response/response_ci/n_origins/fit fields, and the summary block) and adds: post_response_bps / post_response_ci_bps / post_n_origins (the strictly post-bar timing convention), response_simultaneous_band_bps and its post-bar twin, hac_se_bps / hac_ci_bps, profile (prespecified horizons, contrasts, and share ratios under the suppression rule), shock_diagnostics (OFI autocorrelation and pre-shock regressions), innovation (the lag-conditioned OFI-innovation projections), block_sensitivity, effective_blocks_at_max_horizon, n_segments and longest_segment_bars, the jump-term fit fields (jump_bps, fit_jump_raw_bps, fit_r_inf_raw_bps, fit_tau_raw_s, fit_region, profile_loss_* and gate_sensitivity), extended (the long-session ladder to 1800 s), timing_conventions, and bootstrap provenance. Descriptive strings were renamed from incorporation-speed wording to observational OFI-price-response wording; no v1 numeric field changed meaning, and the inclusive point estimates are the v1 estimates. Extension within v2 (robustness variants): each session gains a `variants` block (gap and censoring report with quote-age classes, microprice and trade-price curves, raw-OFI curves, the largest-OFI-burst event study, the volume-clock curve, pre-shock state strata, and frequency/event-time support), and the report gains a top-level `variants` block with the pooled six-session description and the prespecified variant rules. Every pre-existing v2 field and value is unchanged by the extension. Extension within v2 (cross-checks): each session gains a `crosschecks` block (the reduced-form VAR cross-check with its per-horizon comparison against the local-projection curve, and the two-component adjustment fit's parameter regions and stability label), and the report gains a top-level `crosschecks` block with the governing methods and restraints. Every pre-existing field and value is unchanged by this extension either, and no two-component parameter appears in the summary. v3 corrects the segment bootstrap's resampling: segment choice is two-stage and segment-fair (a segment is chosen with weight max(segment length, drawn block length), then a uniform valid start inside it, with a segment shorter than the block drawn whole), so every fully-observed segment is represented in proportion to its length instead of segments shorter than the block being excluded and longer segments being weighted by their valid-start counts. Each session gains a `resample_pool` block (headline ladder), each block-sensitivity entry gains one, and the extended ladder gains one: the drawn block length, the number of distinct block starts in the pool, the number of distinct blocks actually drawn, and the resamples attempted. A ladder whose pool has fewer than 20 distinct starts is degenerate: its bootstrap intervals are suppressed (null), its `n_resamples` reads 0, no fit is promoted from its draws, and the pool block records the reason. Point estimates, HAC intervals, and every non-bootstrap field keep their v2 meanings; bootstrap intervals and fit outcomes are regenerated under the corrected resampling with the same published seed, so their values move where the corrected resample distribution moves them.",
+  "schema_note": "v2 keeps every v1 field with its v1 meaning (schema, bar_ms, horizons_s, shock_definition, effective_sample_unit, the per-session response/response_ci/n_origins/fit fields, and the summary block) and adds: post_response_bps / post_response_ci_bps / post_n_origins (the strictly post-bar timing convention), response_simultaneous_band_bps and its post-bar twin, hac_se_bps / hac_ci_bps, profile (prespecified horizons, contrasts, and share ratios under the suppression rule), shock_diagnostics (OFI autocorrelation and pre-shock regressions), innovation (the lag-conditioned OFI-innovation projections), block_sensitivity, effective_blocks_at_max_horizon, n_segments and longest_segment_bars, the jump-term fit fields (jump_bps, fit_jump_raw_bps, fit_r_inf_raw_bps, fit_tau_raw_s, fit_region, profile_loss_* and gate_sensitivity), extended (the long-session ladder to 1800 s), timing_conventions, and bootstrap provenance. Descriptive strings were renamed from incorporation-speed wording to observational OFI-price-response wording; no v1 numeric field changed meaning, and the inclusive point estimates are the v1 estimates. Extension within v2 (robustness variants): each session gains a `variants` block (gap and censoring report with quote-age classes, microprice and trade-price curves, raw-OFI curves, the largest-OFI-burst event study, the volume-clock curve, pre-shock state strata, and frequency/event-time support), and the report gains a top-level `variants` block with the pooled six-session description and the prespecified variant rules. Every pre-existing v2 field and value is unchanged by the extension. Extension within v2 (cross-checks): each session gains a `crosschecks` block (the reduced-form VAR cross-check with its per-horizon comparison against the local-projection curve, and the two-component adjustment fit's parameter intervals and stability label), and the report gains a top-level `crosschecks` block with the governing methods and restraints. Every pre-existing field and value is unchanged by this extension either, and no two-component parameter appears in the summary. v3 corrects the segment bootstrap's resampling: segment choice is two-stage and segment-fair (a segment is chosen with weight max(segment length, drawn block length), then a uniform valid start inside it, with a segment shorter than the block drawn whole), so every fully-observed segment is represented in proportion to its length instead of segments shorter than the block being excluded and longer segments being weighted by their valid-start counts. Each session gains a `resample_pool` block (headline ladder), each block-sensitivity entry gains one, and the extended ladder gains one: the drawn block length, the number of distinct block starts in the pool, the number of distinct blocks actually drawn, and the resamples attempted. A ladder whose pool has fewer than 20 distinct starts is degenerate: its bootstrap intervals are suppressed (null), its `n_resamples` reads 0, no fit is promoted from its draws, and the pool block records the reason. Point estimates, HAC intervals, and every non-bootstrap field keep their v2 meanings; bootstrap intervals and fit outcomes are regenerated under the corrected resampling with the same published seed, so their values move where the corrected resample distribution moves them. Correction within v3 (fit-contract alignment): no field is added, removed, or renamed, and the schema stays v3. The extended ladder now enforces the same promotion contract as the headline ladder: its tau is reported only when the point fit passes judging and tau is bounded by the extended ladder's within-draw fits. The within-draw fits behind fit_region, the parameter intervals, and the bootstrap fit share are refit with the point fit's covariance weight matrix, built once from the draws and held fixed across them, instead of unweighted; fit_region values and the fit share are regenerated accordingly, and the extended fit verdicts now state the boundedness outcome. Extended-ladder intervals on segmented sessions are suppressed with the reason recorded in the ladder's resample_pool block. The parameter intervals are described throughout as componentwise percentile intervals over the draw fits, not a joint region; the serialized field names (fit_region and the two-component *_region_* fields) are unchanged. Point estimates and response intervals are unchanged.",
   "timing_conventions": [
     "inclusive: baseline is the close of the bar before the shock bar; the 0 s rung is the within-shock-bar move",
     "post_bar: baseline is the shock bar's own close; the 0 s rung is identically zero by construction and is stated, not estimated"
@@ -17677,7 +17668,7 @@
       "No tau_f, tau_s or derived half-life from the two-component model is reported as a result anywhere: those values live only in the per-session crosschecks blocks, labelled unidentified/unstable wherever the bootstrap draws say so, and the report summary carries no two-component field."
     ],
     "var_method": "per-session reduced-form VAR on one-second bars over the simple mid-price return in bps, per-bar OFI per session SD, the quoted spread in bps of the mid, and book imbalance (the spread and imbalance as computed by the bar builder); lag order chosen by BIC over 1..=10 on a common sample, never hand-tuned; cumulative price response to a one-SD OFI shock on the local-projection horizon ladder under two Cholesky orderings (OFI ordered first; returns ordered first); bands from a 200-draw residual bootstrap with the lag held at the chosen order, seeded from the published seed",
-    "two_component_method": "R(h) = J + Af (1 - exp(-h / tau_f)) + As (1 - exp(-h / tau_s)) on the inclusive curve, fitted unweighted on the point curve and inside every headline segment-bootstrap draw (the same draws as the single-component fit; no second bootstrap); joint parameter regions are (2.5%, 97.5%) percentiles over all draw fits, and the stability label follows criteria stated in the per-session block before any outcome",
+    "two_component_method": "R(h) = J + Af (1 - exp(-h / tau_f)) + As (1 - exp(-h / tau_s)) on the inclusive curve, fitted unweighted on the point curve and inside every headline segment-bootstrap draw (the same draws as the single-component fit; no second bootstrap); the parameter intervals are each parameter's own (2.5%, 97.5%) percentiles over all draw fits (componentwise, not a joint region), and the stability label follows criteria stated in the per-session block before any outcome",
     "agreement_criterion": "a horizon agrees (per ordering) when the local-projection estimate lies inside the VAR bootstrap band AND the VAR estimate lies inside the local-projection pointwise bootstrap interval; disagreements are reported per horizon, not smoothed over"
   }
 }

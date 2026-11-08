@@ -77,13 +77,16 @@
 //! R(h) = J + R_inf * (1 - exp(-h / tau)), by profiling tau over a
 //! grid. The headline fit is weighted by the bootstrap covariance
 //! of the response vector (the horizons are correlated estimates,
-//! not independent points); the fit is also re-run unweighted
-//! inside every bootstrap draw, which is what the reported fit
-//! share and parameter region summarize. A tau (and the half-life
+//! not independent points); the fit is also re-run inside every
+//! bootstrap draw with that same weight matrix, held fixed across
+//! the draws, which is what the reported fit share and parameter
+//! intervals summarize. A tau (and the half-life
 //! tau * ln 2) is reported only when the fit is actually good
 //! (R^2 at the published threshold, positive long-run response, tau
-//! interior to the search grid) *and* the joint parameter region
-//! from the within-draw fits is bounded; otherwise the empirical
+//! interior to the search grid) *and* tau is bounded by the
+//! within-draw fits (its componentwise percentile interval sits
+//! strictly inside the search grid and spans less than a fourfold
+//! ratio); otherwise the empirical
 //! curve stands on its own and the report says the fit was not
 //! reported, with the reason, the profile loss over tau, and the
 //! outcome across a table of gate thresholds and interior margins.
@@ -107,8 +110,8 @@
 //!   fitted inside the same segment-respecting bootstrap draws as
 //!   the single-component fit. No tau_f, tau_s, or derived
 //!   half-life from this model is reported as a result anywhere:
-//!   the block carries joint parameter regions and a stability
-//!   label only, and sessions are labelled unidentified/unstable
+//!   the block carries componentwise parameter intervals and a
+//!   stability label only, and sessions are labelled unidentified/unstable
 //!   wherever the draws say so.
 
 use crate::metrics::{bar_status, ofi_bars, ofi_events, Quote, Trade};
@@ -933,8 +936,12 @@ fn fit_exponential_w(
     best
 }
 
-/// Unweighted jump-term fit (the within-bootstrap-draw fit, and
-/// the fall-back when no covariance weight is available).
+/// Unweighted jump-term fit: the fall-back when no covariance
+/// weight is available. The within-bootstrap-draw fits do not
+/// use this by default; they are refit with the run's fixed
+/// covariance weight matrix (see `bootstrap_engine`), and this
+/// form is what they fall back to when that matrix cannot be
+/// formed.
 fn fit_exponential_raw(horizons_s: &[f64], response: &[f64]) -> Option<ExpFit> {
     fit_exponential_w(horizons_s, response, None)
 }
@@ -973,9 +980,10 @@ fn fit_exponential_raw(horizons_s: &[f64], response: &[f64]) -> Option<ExpFit> {
 //   5. the total long-run response J + Af + As is positive.
 // A session is labelled stable only if its point fit passes the
 // same five criteria, at least half of its bootstrap draws are
-// stable, and the bootstrap percentile regions for both taus are
-// bounded (inside the grid interior, ratio of ends below 4, the
-// same boundedness reading as the single-component fit region).
+// stable, and the bootstrap percentile intervals for both taus
+// are bounded (inside the grid interior, ratio of ends below 4,
+// the same boundedness reading as the single-component tau
+// interval).
 // Otherwise the session is labelled unidentified/unstable. The
 // label is the published outcome: no tau_f, tau_s or derived
 // half-life from this model is promoted anywhere.
@@ -1986,7 +1994,12 @@ struct BootOut {
     incl: Vec<Vec<f64>>,
     post: Vec<Vec<f64>>,
     innov: Vec<Vec<f64>>,
-    /// Every draw's own jump-term fit (unweighted), passing or not.
+    /// Every draw's own jump-term fit, passing or not. The fits
+    /// are produced after the run, from the collected draw curves,
+    /// with the run's fixed covariance weight matrix (the same
+    /// construction the headline fit uses); unweighted only when
+    /// that matrix cannot be formed (`fits_weighted` records
+    /// which happened).
     fits_all: Vec<ExpFit>,
     /// The subset of draw fits that passed the published judging.
     fits_pass: Vec<ExpFit>,
@@ -1998,6 +2011,10 @@ struct BootOut {
     /// Resample-pool provenance for this run (pool size, drawn
     /// diversity, degeneracy).
     pool: ResamplePool,
+    /// Whether `fits_all` / `fits_pass` were refit with the fixed
+    /// covariance weight matrix (true) or fell back to unweighted
+    /// fits because the matrix could not be formed from the draws.
+    fits_weighted: bool,
 }
 
 /// Segment-respecting block bootstrap of the whole estimator.
@@ -2005,8 +2022,9 @@ struct BootOut {
 /// are marked so no resample window joins bars across a splice,
 /// and the curve (both timing conventions), the innovation curve,
 /// and the jump-term fit are all recomputed on each resample: the
-/// fit is re-run inside every draw, which is what the reported
-/// fit share and parameter region summarize.
+/// fit is re-run for every draw (refit after the run, with the
+/// run's fixed covariance weight matrix), which is what the
+/// reported fit share and parameter intervals summarize.
 #[allow(clippy::too_many_arguments)]
 fn bootstrap_engine(
     series: &BarSeries,
@@ -2033,6 +2051,7 @@ fn bootstrap_engine(
         fits_pass: Vec::new(),
         two_fits_all: Vec::new(),
         pool: ResamplePool::new(block_pre, pool_distinct_starts(&segments, block_pre)),
+        fits_weighted: false,
     };
     if target == 0 || longest == 0 || resamples == 0 {
         return out;
@@ -2085,12 +2104,6 @@ fn bootstrap_engine(
         if want_post {
             out.post.push(post);
         }
-        if let Some(fit) = fit_exponential_raw(horizons_s, &incl) {
-            if judge_fit(horizons_s, &incl, &fit).is_ok() {
-                out.fits_pass.push(fit);
-            }
-            out.fits_all.push(fit);
-        }
         if want_two {
             if let Some(tfit) = fit_two_component_raw(horizons_s, &incl) {
                 out.two_fits_all.push(tfit);
@@ -2110,6 +2123,32 @@ fn bootstrap_engine(
                     }
                 }
             }
+        }
+    }
+    // Two-pass draw fitting: the weight matrix is built once from
+    // the collected draw curves' covariance (exactly the
+    // construction the headline and extended point fits apply to
+    // the same draws), then every draw is refit with that fixed
+    // matrix, so the draw-fit distribution corresponds to the
+    // headline fitting rule instead of to a different, unweighted
+    // estimator. When the matrix cannot be formed the draws fall
+    // back to unweighted fits and `fits_weighted` records the
+    // fallback. This pass consumes no randomness, so the draw
+    // curves themselves are unchanged under the published seed.
+    let draw_weight = if out.incl.is_empty() {
+        None
+    } else {
+        draws_covariance(&out.incl, horizons_s.len()).and_then(|c| invert_matrix(&c))
+    };
+    out.fits_weighted = draw_weight.is_some();
+    for curve in &out.incl {
+        if let Some(fit) = fit_exponential_w(horizons_s, curve, draw_weight.as_deref())
+            .or_else(|| fit_exponential_raw(horizons_s, curve))
+        {
+            if judge_fit(horizons_s, curve, &fit).is_ok() {
+                out.fits_pass.push(fit);
+            }
+            out.fits_all.push(fit);
         }
     }
     out.pool.distinct_blocks_drawn = distinct_drawn.len();
@@ -2318,11 +2357,16 @@ pub struct InnovationAnalysis {
     pub n_origins: Vec<usize>,
 }
 
-/// Joint parameter region of the jump-term fit, summarized from
-/// the within-draw fits (all of them, not only the passing ones).
-/// A tau is promoted only when this region is bounded: its tau
-/// interval sits strictly inside the search grid and spans less
-/// than a fourfold ratio.
+/// Componentwise percentile intervals for the jump-term fit's
+/// parameters, summarized from the within-draw fits (all of them,
+/// not only the passing ones). Each field is that parameter's own
+/// (2.5%, 97.5%) percentile interval over the draw fits; together
+/// they are not a joint confidence region over the parameter
+/// vector. A tau is promoted only when the tau interval is
+/// bounded: it sits strictly inside the search grid and spans
+/// less than a fourfold ratio. `bounded` tests the tau interval
+/// only; the jump and long-run-response intervals beside it are
+/// descriptive.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FitRegion {
     pub tau_ci_s: (f64, f64),
@@ -2330,6 +2374,23 @@ pub struct FitRegion {
     pub r_inf_ci_bps: (f64, f64),
     pub bounded: bool,
     pub n_draw_fits: usize,
+}
+
+/// The promotion boundedness check on the within-draw fits,
+/// shared by the headline and extended ladders so both enforce
+/// the same promotion contract: at least ten draw fits, and the
+/// componentwise tau percentile interval sits strictly inside
+/// the search grid and spans less than a fourfold ratio.
+fn draw_tau_bounded(fits_all: &[ExpFit]) -> bool {
+    if fits_all.len() < 10 {
+        return false;
+    }
+    let tau_ci = percentile_ci(&fits_all.iter().map(|f| f.tau_s).collect::<Vec<_>>());
+    let grid = tau_grid();
+    tau_ci.0 > grid[1]
+        && tau_ci.1 < grid[grid.len() - 2]
+        && tau_ci.0 > 0.0
+        && tau_ci.1 / tau_ci.0 < 4.0
 }
 
 /// One cell of the gate-sensitivity table: whether the headline
@@ -2358,7 +2419,10 @@ pub struct ExtendedResponse {
     pub block_len_s: f64,
     pub n_resamples: usize,
     /// Set only when the extended fit itself passes the published
-    /// judging; otherwise null and `fit_verdict` says why.
+    /// judging and tau is bounded by the bootstrap draw fits (the
+    /// same promotion contract as the headline fit), and the
+    /// ladder's intervals are not suppressed; otherwise null and
+    /// `fit_verdict` says why.
     pub fit_tau_s: Option<f64>,
     pub fit_jump_bps: Option<f64>,
     pub fit_r_inf_bps: Option<f64>,
@@ -2434,8 +2498,11 @@ pub struct TwoComponentCrosscheck {
     pub point_tau_fast_s: Option<f64>,
     pub point_tau_slow_s: Option<f64>,
     pub point_r_squared: Option<f64>,
-    /// Joint parameter region from the within-draw fits
-    /// ((2.5%, 97.5%) percentiles over all draws, stable or not).
+    /// Componentwise parameter intervals from the within-draw
+    /// fits (each parameter's own (2.5%, 97.5%) percentiles over
+    /// all draws, stable or not; not a joint region over the
+    /// parameter vector). The serialized field names keep their
+    /// `region` wording for schema compatibility.
     pub tau_fast_region_s: Option<(f64, f64)>,
     pub tau_slow_region_s: Option<(f64, f64)>,
     pub a_fast_region_bps: Option<(f64, f64)>,
@@ -2694,7 +2761,7 @@ fn summarize_two_component(
         },
         criteria: vec![
             "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive".to_string(),
-            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)".to_string(),
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile intervals are bounded (inside the grid interior, ratio of ends below 4)".to_string(),
         ],
         amplitude_policy:
             "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block"
@@ -2867,6 +2934,15 @@ pub struct SessionSpeed {
     pub fit_r_inf_raw_bps: Option<f64>,
     pub fit_tau_raw_s: Option<f64>,
     pub fit_region: Option<FitRegion>,
+    /// Whether the within-draw fits behind `fit_region`, the
+    /// bootstrap fit share and the parameter intervals were refit
+    /// with the fixed covariance weight matrix (true), or fell
+    /// back to unweighted fits because that matrix could not be
+    /// formed from the draws (false). Not serialized: when a
+    /// session's draws fall back, the report builder records the
+    /// fallback in the report's notes instead.
+    #[serde(skip)]
+    pub draw_fits_weighted: bool,
     /// Profile loss over tau for the covariance-weighted headline
     /// fit: flat or unbounded regions are published, not hidden
     /// behind the minimizing tau.
@@ -3061,14 +3137,10 @@ fn analyze_series(
     let raw_fit = fit_exponential_w(&horizons_s, &curve, weight.as_deref())
         .or_else(|| fit_exponential_raw(&horizons_s, &curve));
     let (pl_taus, pl_vals, pl_flat) = profile_loss(&horizons_s, &curve, weight.as_deref());
-    // Joint parameter region from the within-draw fits.
+    // Componentwise percentile intervals from the within-draw fits.
     let fit_region = if boot.fits_all.len() >= 10 {
         let tau_ci = percentile_ci(&boot.fits_all.iter().map(|f| f.tau_s).collect::<Vec<_>>());
-        let grid = tau_grid();
-        let bounded = tau_ci.0 > grid[1]
-            && tau_ci.1 < grid[grid.len() - 2]
-            && tau_ci.0 > 0.0
-            && tau_ci.1 / tau_ci.0 < 4.0;
+        let bounded = draw_tau_bounded(&boot.fits_all);
         Some(FitRegion {
             tau_ci_s: tau_ci,
             jump_ci_bps: percentile_ci(
@@ -3108,7 +3180,7 @@ fn analyze_series(
                         (
                         None,
                         Some(
-                            "the fit passes the point-estimate gates but the joint parameter region from the bootstrap fits is not bounded, so no tau is reported"
+                            "the fit passes the point-estimate gates but tau is not bounded by the bootstrap draw fits (the componentwise tau interval reaches the search-grid edge or spans a fourfold or wider ratio), so no tau is reported"
                                 .to_string(),
                         ),
                     )
@@ -3352,6 +3424,7 @@ fn analyze_series(
         fit_r_inf_raw_bps: raw_fit.map(|f| f.r_inf_bps),
         fit_tau_raw_s: raw_fit.map(|f| f.tau_s),
         fit_region,
+        draw_fits_weighted: boot.fits_weighted,
         profile_loss_tau_s: pl_taus,
         profile_loss_values: pl_vals,
         profile_flat_tau_range_s: pl_flat,
@@ -3419,7 +3492,24 @@ fn extended_analysis(series: &BarSeries, cfg: &SpeedConfig) -> Option<ExtendedRe
         false,
     );
     let ext_degenerate = boot.pool.degenerate;
-    let ci = if ext_degenerate {
+    // Segmented sessions: extended-ladder intervals are not
+    // reported at all, whatever the pool size. Validation showed
+    // segmented extended pools of 20 to 50 distinct starts
+    // covering at only 0.21-0.50 at 900 s against the 95% nominal
+    // level, where single-segment sessions covered at 0.92-0.98:
+    // the pool floor is a degeneracy screen, not a coverage
+    // guarantee, so interval reporting on this ladder stays off
+    // for segmented session structures until the procedure is
+    // coverage-validated for them. The point curve, origin
+    // counts and pool diagnostics are still published.
+    let segmented = segments_of(&series.observed).len() > 1;
+    let intervals_suppressed = ext_degenerate || segmented;
+    let segmented_reason = "the session is segmented (more than one fully-observed segment), and extended-ladder bootstrap intervals are suppressed on segmented sessions because extended interval coverage is not validated for segmented sessions (in validation, segmented extended resample pools of 20 to 50 distinct starts covered at only 0.21 to 0.50 at 900 s against the 95% nominal level, while single-segment sessions covered at 0.92 to 0.98); the pool-size floor is a degeneracy screen, not a coverage guarantee";
+    let mut pool = boot.pool.clone();
+    if segmented && !ext_degenerate {
+        pool.suppression_reason = Some(segmented_reason.to_string());
+    }
+    let ci = if intervals_suppressed {
         vec![(f64::NAN, f64::NAN); keep]
     } else {
         draws_ci(&boot.incl, keep)
@@ -3433,27 +3523,50 @@ fn extended_analysis(series: &BarSeries, cfg: &SpeedConfig) -> Option<ExtendedRe
     let fit = fit_exponential_w(&horizons_s[..keep], &curve[..keep], weight.as_deref())
         .or_else(|| fit_exponential_raw(&horizons_s[..keep], &curve[..keep]));
     let (_, _, flat) = profile_loss(&horizons_s[..keep], &curve[..keep], weight.as_deref());
-    let (fit_tau, fit_jump, fit_rinf, fit_r2, verdict) = if ext_degenerate {
+    let (fit_tau, fit_jump, fit_rinf, fit_r2, verdict) = if intervals_suppressed {
+        let mut reasons: Vec<String> = Vec::new();
+        if ext_degenerate {
+            reasons.push(
+                boot.pool
+                    .suppression_reason
+                    .clone()
+                    .unwrap_or_else(|| "degenerate resample pool".to_string()),
+            );
+        }
+        if segmented {
+            reasons.push(segmented_reason.to_string());
+        }
         (
             None,
             None,
             None,
             fit.map(|f| f.r_squared),
-            boot.pool
-                .suppression_reason
-                .clone()
-                .unwrap_or_else(|| "degenerate resample pool".to_string()),
+            reasons.join("; "),
         )
     } else {
         match fit {
             Some(f) => match judge_fit(&horizons_s[..keep], &curve[..keep], &f) {
-                Ok(()) => (
-                    Some(f.tau_s),
-                    Some(f.jump_bps),
-                    Some(f.r_inf_bps),
-                    Some(f.r_squared),
-                    "the extended fit passes the published judging on the long ladder".to_string(),
-                ),
+                Ok(()) => {
+                    if draw_tau_bounded(&boot.fits_all) {
+                        (
+                            Some(f.tau_s),
+                            Some(f.jump_bps),
+                            Some(f.r_inf_bps),
+                            Some(f.r_squared),
+                            "the extended fit passes the published judging on the long ladder and tau is bounded by the bootstrap draw fits, the same promotion contract as the headline fit"
+                                .to_string(),
+                        )
+                    } else {
+                        (
+                            None,
+                            None,
+                            None,
+                            Some(f.r_squared),
+                            "the extended fit passes the point-estimate gates but tau is not bounded by the bootstrap draw fits (the componentwise tau interval reaches the search-grid edge or spans a fourfold or wider ratio), so no tau is reported"
+                                .to_string(),
+                        )
+                    }
+                }
                 Err(why) => (None, None, None, Some(f.r_squared), why),
             },
             None => (
@@ -3472,14 +3585,18 @@ fn extended_analysis(series: &BarSeries, cfg: &SpeedConfig) -> Option<ExtendedRe
         post_response_bps: post_curve[..keep].to_vec(),
         n_origins: counts[..keep].to_vec(),
         block_len_s: 300.0,
-        n_resamples: if ext_degenerate { 0 } else { boot.incl.len() },
+        n_resamples: if intervals_suppressed {
+            0
+        } else {
+            boot.incl.len()
+        },
         fit_tau_s: fit_tau,
         fit_jump_bps: fit_jump,
         fit_r_inf_bps: fit_rinf,
         fit_r_squared: fit_r2,
         fit_verdict: verdict,
         profile_flat_tau_range_s: flat,
-        resample_pool: boot.pool.clone(),
+        resample_pool: pool,
     })
 }
 
@@ -3660,7 +3777,7 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
     let summary = summarize(&sessions);
     let variants = report_variants(&sessions);
     let grid = tau_grid();
-    let notes = vec![
+    let mut notes = vec![
         "The estimand is observational: order-flow imbalance and mid-price changes are \
          measured from the same quote stream, and the recorded sessions carry no news \
          timestamps. Nothing here identifies a news event, an informed trader, or a \
@@ -3700,12 +3817,59 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
             .to_string(),
         "tau is reported only for sessions whose response the jump-term adjustment \
          curve actually fits (R^2 at or above the published bar, positive long-run \
-         response, tau interior to the search grid) and whose joint parameter region \
-         from the bootstrap fits is bounded. Sessions that fail keep their empirical \
+         response, tau interior to the search grid) and whose tau is bounded by \
+         the bootstrap draw fits, meaning its componentwise percentile interval \
+         over the draw fits sits strictly inside the search grid and spans less \
+         than a fourfold ratio (the boundedness check is defined on the tau \
+         interval only; the jump and long-run-response intervals in fit_region \
+         are their own componentwise percentile intervals, and together they are \
+         not a joint confidence region). Sessions that fail keep their empirical \
          curves, the failure reason, the profile loss over tau, and the gate \
          sensitivity table instead of a forced number."
             .to_string(),
+        "The within-bootstrap-draw fits are refit with the same covariance \
+         weight matrix as the point fit, built once from the draws' covariance \
+         and held fixed across the draws, so the parameter intervals and the \
+         bootstrap fit share summarize the same estimator that produced the \
+         point estimate. The two-component draw fits remain unweighted, like \
+         their point fit."
+            .to_string(),
+        "Extended-ladder intervals are suppressed on segmented sessions (more \
+         than one fully-observed segment): validation found segmented extended \
+         resample pools of 20 to 50 distinct starts covering at only 0.21 to \
+         0.50 at 900 s against the 95% nominal level, while single-segment \
+         sessions covered at 0.92 to 0.98, so the pool floor is treated as a \
+         degeneracy screen rather than a coverage guarantee and interval \
+         reporting on the extended ladder stays off for segmented session \
+         structures until the procedure is coverage-validated for them. The \
+         point curve, origin counts and pool diagnostics are still published \
+         for segmented sessions."
+            .to_string(),
+        "Headline bootstrap coverage is at clean-session levels across the \
+         validated simulation grid with one named exception: the configuration \
+         with a planted tau of 30 s and a jump term, read at h = 0 on \
+         3,600-bar gap sessions, covered at 0.76 against 0.87 on matched clean \
+         sessions and a 95% nominal level. That configuration should be read \
+         as unreliable rather than repaired; no other validated cell showed \
+         the same shortfall."
+            .to_string(),
     ];
+    let unweighted_fallback_sessions: Vec<&str> = sessions
+        .iter()
+        .filter(|s| {
+            !s.draw_fits_weighted && (s.fit_region.is_some() || s.bootstrap_fit_share > 0.0)
+        })
+        .map(|s| s.session.as_str())
+        .collect();
+    if !unweighted_fallback_sessions.is_empty() {
+        notes.push(format!(
+            "For {} session(s), the covariance weight matrix for the within-draw fits \
+             could not be formed from the draws, so those sessions' draw fits fell \
+             back to unweighted fits: {}.",
+            unweighted_fallback_sessions.len(),
+            unweighted_fallback_sessions.join(", ")
+        ));
+    }
     SpeedReport {
         schema: SPEED_SCHEMA.to_string(),
         bar_ms: cfg.bar_ms,
@@ -3745,7 +3909,7 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
             Extension within v2 (cross-checks): each session gains a \
             `crosschecks` block (the reduced-form VAR cross-check with its \
             per-horizon comparison against the local-projection curve, and \
-            the two-component adjustment fit's parameter regions and \
+            the two-component adjustment fit's parameter intervals and \
             stability label), and the report gains a top-level `crosschecks` \
             block with the governing methods and restraints. Every \
             pre-existing field and value is unchanged by this extension \
@@ -3770,7 +3934,26 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
             their v2 meanings; bootstrap intervals and fit outcomes are \
             regenerated under the corrected resampling with the same \
             published seed, so their values move where the corrected \
-            resample distribution moves them."
+            resample distribution moves them. \
+            Correction within v3 (fit-contract alignment): no field is \
+            added, removed, or renamed, and the schema stays v3. The \
+            extended ladder now enforces the same promotion contract as \
+            the headline ladder: its tau is reported only when the \
+            point fit passes judging and tau is bounded by the extended \
+            ladder's within-draw fits. The within-draw fits behind \
+            fit_region, the parameter intervals, and the bootstrap fit \
+            share are refit with the point fit's covariance weight \
+            matrix, built once from the draws and held fixed across \
+            them, instead of unweighted; fit_region values and the fit \
+            share are regenerated accordingly, and the extended fit \
+            verdicts now state the boundedness outcome. Extended-ladder \
+            intervals on segmented sessions are suppressed with the \
+            reason recorded in the ladder's resample_pool block. The \
+            parameter intervals are described throughout as \
+            componentwise percentile intervals over the draw fits, not \
+            a joint region; the serialized field names (fit_region and \
+            the two-component *_region_* fields) are unchanged. Point \
+            estimates and response intervals are unchanged."
             .to_string(),
         timing_conventions: vec![
             "inclusive: baseline is the close of the bar before the shock bar; the 0 s rung is the within-shock-bar move"
@@ -3813,7 +3996,7 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
                 "per-session reduced-form VAR on one-second bars over the simple mid-price return in bps, per-bar OFI per session SD, the quoted spread in bps of the mid, and book imbalance (the spread and imbalance as computed by the bar builder); lag order chosen by BIC over 1..={VAR_MAX_LAG} on a common sample, never hand-tuned; cumulative price response to a one-SD OFI shock on the local-projection horizon ladder under two Cholesky orderings (OFI ordered first; returns ordered first); bands from a {VAR_BOOTSTRAP_RESAMPLES}-draw residual bootstrap with the lag held at the chosen order, seeded from the published seed"
             ),
             two_component_method:
-                "R(h) = J + Af (1 - exp(-h / tau_f)) + As (1 - exp(-h / tau_s)) on the inclusive curve, fitted unweighted on the point curve and inside every headline segment-bootstrap draw (the same draws as the single-component fit; no second bootstrap); joint parameter regions are (2.5%, 97.5%) percentiles over all draw fits, and the stability label follows criteria stated in the per-session block before any outcome"
+                "R(h) = J + Af (1 - exp(-h / tau_f)) + As (1 - exp(-h / tau_s)) on the inclusive curve, fitted unweighted on the point curve and inside every headline segment-bootstrap draw (the same draws as the single-component fit; no second bootstrap); the parameter intervals are each parameter's own (2.5%, 97.5%) percentiles over all draw fits (componentwise, not a joint region), and the stability label follows criteria stated in the per-session block before any outcome"
                     .to_string(),
             agreement_criterion:
                 "a horizon agrees (per ordering) when the local-projection estimate lies inside the VAR bootstrap band AND the VAR estimate lies inside the local-projection pointwise bootstrap interval; disagreements are reported per horizon, not smoothed over"
@@ -5233,6 +5416,159 @@ mod tests {
     }
 
     #[test]
+    fn extended_fit_with_unbounded_draw_region_reports_no_tau() {
+        // A planted 1,400 s tau on a 6,000-bar series, near the
+        // top of the search grid: the extended point fit passes
+        // the published judging (R^2 ~ 0.98) and the resample pool
+        // is large, but the within-draw taus scatter out to the
+        // grid edge, so the draw-fit tau interval is not bounded.
+        // The extended ladder must apply the headline promotion
+        // contract and report no tau; before the contract was
+        // aligned, this case promoted a tau on the point fit
+        // alone.
+        let rho = (-1.0f64 / 1400.0).exp();
+        let series = synth_geometric_state(6_000, rho, 9.0);
+        let cfg = SpeedConfig {
+            extended_resamples: 40,
+            ..small_cfg()
+        };
+        let ext = extended_analysis(&series, &cfg).expect("extended analysis");
+        assert!(
+            !ext.resample_pool.degenerate && ext.resample_pool.distinct_starts >= 20,
+            "the pool is healthy, so suppression cannot be the degenerate path"
+        );
+        // The point fit itself passes judging on the published
+        // curve: only the region check can be withholding the tau.
+        let point_fit = fit_exponential_raw(&ext.horizons_s, &ext.response_bps)
+            .expect("the published extended curve is fittable");
+        assert!(
+            judge_fit(&ext.horizons_s, &ext.response_bps, &point_fit).is_ok(),
+            "the point fit passes judging (R^2 {}), so the missing tau is the region check",
+            point_fit.r_squared
+        );
+        assert_eq!(ext.fit_tau_s, None, "an unbounded region promotes no tau");
+        assert_eq!(ext.fit_jump_bps, None);
+        assert_eq!(ext.fit_r_inf_bps, None);
+        assert!(
+            ext.fit_verdict
+                .contains("not bounded by the bootstrap draw fits"),
+            "the verdict must state the region outcome: {}",
+            ext.fit_verdict
+        );
+    }
+
+    #[test]
+    fn draw_fits_use_the_headline_weight_matrix() {
+        // The within-draw fits must be the point fit's estimator:
+        // refits of each collected draw curve with the weight
+        // matrix built once from the draws' covariance. On this
+        // fixture the weighted and unweighted fits differ on every
+        // draw, so equality with the weighted refits (and
+        // inequality with the unweighted ones) pins the path.
+        let rho = (-1.0f64 / 20.0).exp();
+        let series = synth_series(3_000, rho, 9.0);
+        let horizons_bars: Vec<usize> = SPEED_HORIZONS_S.iter().map(|s| *s as usize).collect();
+        let horizons_s: Vec<f64> = SPEED_HORIZONS_S.iter().map(|s| *s as f64).collect();
+        let boot = bootstrap_engine(
+            &series,
+            None,
+            &horizons_bars,
+            &horizons_s,
+            300,
+            40,
+            7,
+            false,
+            false,
+            false,
+        );
+        assert!(
+            boot.fits_weighted,
+            "the covariance is available, so the weighted path must be taken"
+        );
+        assert_eq!(boot.fits_all.len(), boot.incl.len());
+        let w = draws_covariance(&boot.incl, horizons_s.len())
+            .and_then(|c| invert_matrix(&c))
+            .expect("the draws' covariance weight matrix");
+        let mut differ_from_unweighted = 0usize;
+        for (curve, stored) in boot.incl.iter().zip(boot.fits_all.iter()) {
+            let weighted = fit_exponential_w(&horizons_s, curve, Some(&w))
+                .expect("weighted refit of a stored draw curve");
+            assert!(
+                (weighted.tau_s - stored.tau_s).abs() < 1e-12
+                    && (weighted.jump_bps - stored.jump_bps).abs() < 1e-9
+                    && (weighted.r_inf_bps - stored.r_inf_bps).abs() < 1e-9,
+                "a stored draw fit must be exactly the weighted refit of its curve"
+            );
+            let raw = fit_exponential_raw(&horizons_s, curve)
+                .expect("unweighted refit of a stored draw curve");
+            if (raw.tau_s - stored.tau_s).abs() > 1e-9
+                || (raw.jump_bps - stored.jump_bps).abs() > 1e-6
+                || (raw.r_inf_bps - stored.r_inf_bps).abs() > 1e-6
+            {
+                differ_from_unweighted += 1;
+            }
+        }
+        assert!(
+            differ_from_unweighted > 0,
+            "the fixture must discriminate: weighted and unweighted draw fits differ"
+        );
+    }
+
+    #[test]
+    fn segmented_extended_ladder_suppresses_intervals_with_reason() {
+        // A 6,000-bar planted-600 s session with a 100-bar
+        // unobserved stretch: two fully-observed segments and an
+        // extended pool far above the 20-start floor. The ladder
+        // must still suppress its intervals, because extended
+        // interval coverage is not validated for segmented
+        // sessions; the point curve, origin counts and pool
+        // diagnostics stay published.
+        let rho = (-1.0f64 / 600.0).exp();
+        let mut series = synth_geometric_state(6_000, rho, 9.0);
+        for o in &mut series.observed[2_600..2_700] {
+            *o = false;
+        }
+        assert_eq!(segments_of(&series.observed).len(), 2);
+        let cfg = SpeedConfig {
+            extended_resamples: 20,
+            ..small_cfg()
+        };
+        let ext = extended_analysis(&series, &cfg).expect("extended analysis");
+        assert!(
+            !ext.resample_pool.degenerate,
+            "the segmented pool is above the floor: {} starts",
+            ext.resample_pool.distinct_starts
+        );
+        assert!(ext.resample_pool.distinct_starts >= 20);
+        assert!(
+            ext.response_bps.iter().all(|v| v.is_finite()),
+            "the point curve is still published"
+        );
+        assert!(
+            ext.response_ci_bps
+                .iter()
+                .all(|(lo, hi)| lo.is_nan() && hi.is_nan()),
+            "segmented extended intervals are suppressed (null), not narrowed"
+        );
+        assert_eq!(ext.n_resamples, 0);
+        assert_eq!(ext.fit_tau_s, None);
+        let reason = ext
+            .resample_pool
+            .suppression_reason
+            .clone()
+            .expect("a suppression reason is recorded");
+        assert!(
+            reason.contains("segmented") && reason.contains("not validated"),
+            "the recorded reason names the segmented structure: {reason}"
+        );
+        assert!(
+            ext.fit_verdict.contains("segmented"),
+            "the fit verdict carries the same reason: {}",
+            ext.fit_verdict
+        );
+    }
+
+    #[test]
     fn lp_recovers_known_exponential_tau() {
         // rho = exp(-1/20): the true tau is 20 bars = 20 s at 1 s bars.
         let rho = (-1.0f64 / 20.0).exp();
@@ -5444,18 +5780,32 @@ mod tests {
     fn extended_ladder_recovers_a_slow_tau_on_a_long_series() {
         // A planted 600 s tau on a 6,000-bar series: the extended
         // ladder must reach 1800 s, and the extended fit (judged
-        // under the same published gates) must report a tau in the
-        // planted neighbourhood, because on this ladder the slow
-        // component's plateau is actually in view.
+        // under the same published gates, including the
+        // bounded-by-draw-fits promotion check the headline ladder
+        // applies) must report a tau in the planted neighbourhood,
+        // because on this ladder the slow component's plateau is
+        // actually in view. The session is a single clean segment,
+        // so its extended intervals are reported, not suppressed.
         let rho = (-1.0f64 / 600.0).exp();
         let series = synth_geometric_state(6_000, rho, 9.0);
         let cfg = SpeedConfig {
-            extended_resamples: 8,
+            extended_resamples: 60,
             ..small_cfg()
         };
         let ext = extended_analysis(&series, &cfg).expect("extended analysis");
         assert_eq!(*ext.horizons_s.last().unwrap(), 1800.0);
         assert!(ext.response_bps.iter().all(|v| v.is_finite()));
+        assert!(
+            !ext.resample_pool.degenerate,
+            "a clean 6,000-bar session has a real extended pool"
+        );
+        assert_eq!(ext.n_resamples, 60);
+        assert!(
+            ext.response_ci_bps
+                .iter()
+                .all(|(lo, hi)| lo.is_finite() && hi.is_finite()),
+            "a clean single-segment session still reports extended intervals"
+        );
         let tau = ext
             .fit_tau_s
             .expect("extended fit should be reported on an exact-family curve");
