@@ -161,12 +161,16 @@ fn analyze(
     let sd = (ofis.iter().map(|x| (x - m).powi(2)).sum::<f64>() / ofis.len() as f64).sqrt();
     println!("OFI per 10s bar: mean {m:+.4}, std {sd:.4}");
 
-    // information incorporation speed (order-flow shocks are the
-    // information-arrival proxy; the session has no news timestamps)
+    // observational OFI-price response (order flow and prices are
+    // measured from the same quote stream; the session has no news
+    // timestamps, so the response is an association, not an
+    // identified effect)
     let speed_cfg = speed::SpeedConfig::default();
     match speed::analyze_session_speed(dir, &quotes, &speed_cfg) {
         Some(s) => {
-            println!("\ninformation speed (1s bars, response to a 1 SD OFI shock, bps):");
+            println!(
+                "\nOFI-price response, inclusive baseline (1s bars, response to a 1 SD OFI shock, bps):"
+            );
             let curve: Vec<String> = s
                 .horizons_s
                 .iter()
@@ -174,18 +178,26 @@ fn analyze(
                 .map(|(h, r)| format!("{h:.0}s {r:+.2}"))
                 .collect();
             println!("  {}", curve.join("  "));
+            println!("OFI-price response, post-bar baseline (0s is zero by construction):");
+            let post: Vec<String> = s
+                .horizons_s
+                .iter()
+                .zip(s.post_response_bps.iter())
+                .map(|(h, r)| format!("{h:.0}s {r:+.2}"))
+                .collect();
+            println!("  {}", post.join("  "));
             match (s.tau_s, s.half_life_s, s.r_inf_bps) {
                 (Some(tau), Some(half), Some(rinf)) => println!(
-                    "  exponential fit: long-run {rinf:+.2} bps, tau {tau:.1}s, half-life {half:.1}s (R^2 {:.3})",
+                    "  exponential adjustment fit: long-run {rinf:+.2} bps, tau {tau:.1}s, half-life {half:.1}s (R^2 {:.3})",
                     s.fit_r_squared.unwrap_or(f64::NAN)
                 ),
                 _ => println!(
-                    "  exponential fit not reported: {}",
+                    "  exponential adjustment fit not reported: {}",
                     s.fit_failure.as_deref().unwrap_or("unknown reason")
                 ),
             }
         }
-        None => println!("\ninformation speed: session too short or no OFI variation"),
+        None => println!("\nOFI-price response: session too short or no OFI variation"),
     }
 
     // prediction
@@ -320,9 +332,11 @@ fn export_session(
             .collect::<Vec<_>>(),
     )?;
 
-    // information incorporation speed curve (same estimator as the
-    // analyze section; the dashboard data gains a speed.csv next to
-    // the other series and a speed block in the summary)
+    // observational OFI-price response curve (same estimator as
+    // the analyze section; the dashboard data gains a speed.csv
+    // next to the other series and a speed block in the summary;
+    // speed.csv keeps its v1 columns, the post-bar series is added
+    // to the summary block)
     let speed_cfg = speed::SpeedConfig::default();
     let speed_res = speed::analyze_session_speed(dir, &quotes, &speed_cfg);
     if let Some(s) = &speed_res {
@@ -410,9 +424,11 @@ fn export_session(
         "ofi": { "mean": ofi_m, "std": ofi_sd },
         "speed": speed_res.as_ref().map(|s| serde_json::json!({
             "bar_ms": s.bar_ms,
-            "shock": "one standard deviation of per-bar OFI; order-flow shocks are the information-arrival proxy, no news timestamps",
+            "shock": "one standard deviation of per-bar OFI; an observational regressor measured from the same quote stream as the price, no news timestamps",
+            "estimand": "observational OFI-price response (local projections, inclusive baseline)",
             "horizons_s": s.horizons_s,
             "response_bps": s.response_bps,
+            "post_response_bps": s.post_response_bps,
             "fit_ok": s.fit_ok,
             "fit_failure": s.fit_failure,
             "r_inf_bps": s.r_inf_bps,
