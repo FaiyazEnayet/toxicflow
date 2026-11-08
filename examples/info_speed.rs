@@ -3,7 +3,10 @@
 //! conventions, with the model-free profile, innovation
 //! projections, and the jump-term adjustment fit), for each
 //! recorded session directory named on the command line, and
-//! writes the multi-session report as JSON.
+//! writes the multi-session report as JSON. Each session's
+//! recorded trades are read as well when present: they feed the
+//! robustness variants (trade price, activity strata, volume
+//! clock) that sit alongside the headline curves in the report.
 //!
 //! Usage: info_speed <out.json> <session_dir> [<session_dir> ...]
 //!
@@ -30,13 +33,14 @@ fn run() -> Result<(), String> {
     for dir in &args[2..] {
         let quotes = storage::read_quotes(&format!("{dir}/quotes.parquet"))
             .map_err(|e| format!("{dir}: {e}"))?;
+        let trades = storage::read_trades(&format!("{dir}/trades.parquet")).ok();
         let label = dir
             .trim_end_matches('/')
             .rsplit('/')
             .next()
             .unwrap_or(dir.as_str())
             .to_string();
-        match speed::analyze_session_speed(&label, &quotes, &cfg) {
+        match speed::analyze_session_speed_with_trades(&label, &quotes, trades.as_deref(), &cfg) {
             Some(s) => {
                 match (s.tau_s, s.half_life_s) {
                     (Some(tau), Some(half)) => println!(
