@@ -50,6 +50,20 @@
 //! an unobserved stretch, or the session boundary. The headline
 //! block length is the longest horizon (300 s); sensitivity to
 //! 150/600/900 s blocks is reported alongside, never cherry-picked.
+//! Segment choice is two-stage and segment-fair (see
+//! `resample_indices`): a segment is chosen with weight
+//! max(segment length, block length), then a uniform valid start
+//! inside it, and a segment shorter than the block is drawn whole.
+//! That weighting makes every segment's expected share of the
+//! resampled bars equal to its share of the observed bars, so no
+//! segment is silently excluded for being short and no segment is
+//! weighted by its count of valid starts. Every ladder reports the
+//! size of the block-start pool it sampled from and how many
+//! distinct blocks its resamples actually drew; a ladder whose
+//! pool falls below `MIN_POOL_DISTINCT_STARTS` distinct starts is
+//! reported as degenerate, with its intervals suppressed and the
+//! reason recorded, instead of as a narrow interval backed by a
+//! full resample count.
 //! Intervals are (2.5%, 97.5%) percentiles of the resample
 //! distribution with a fixed published seed and resample count, so
 //! an interval is a deterministic function of the session.
@@ -107,7 +121,19 @@ use crate::metrics::{bar_status, ofi_bars, ofi_events, Quote, Trade};
 /// and gate-sensitivity table, the extended main-session ladder,
 /// and bootstrap provenance, on top of the v1 fields (see the
 /// report's `schema_note`).
-pub const SPEED_SCHEMA: &str = "toxicflow.info-speed/v2";
+pub const SPEED_SCHEMA: &str = "toxicflow.info-speed/v3";
+
+/// Minimum number of distinct block starts in a ladder's resample
+/// pool before its bootstrap intervals are reported at all. Below
+/// this pool size the resamples are repeats of a handful of chunks:
+/// with fewer than 20 distinct blocks, the 2.5% tail of a resample
+/// distribution is set by at most one or two distinct chunks, so a
+/// percentile interval computed from it states a precision the
+/// pool does not contain. Such a ladder is reported as degenerate
+/// (its pool size and diversity are published, its intervals are
+/// suppressed, and the reason is recorded) rather than as a narrow
+/// interval with a full resample count.
+pub const MIN_POOL_DISTINCT_STARTS: usize = 20;
 
 /// Bar length for the response analysis. One second is the finest
 /// bar the recorded sessions support: the main session averages
@@ -1829,45 +1855,130 @@ fn percentile(values: &[f64], q: f64) -> f64 {
     sorted[((q * sorted.len() as f64) as usize).min(sorted.len() - 1)]
 }
 
+/// Number of distinct block starts a segment set offers for a
+/// drawn block of `block` bars: a segment at least as long as the
+/// block offers (length - block + 1) starts; a shorter segment
+/// offers exactly one chunk, itself drawn whole. This is the size
+/// of the pool `resample_indices` samples from.
+fn pool_distinct_starts(segments: &[(usize, usize)], block: usize) -> usize {
+    if block == 0 {
+        return 0;
+    }
+    segments
+        .iter()
+        .map(|&(a, b)| {
+            let len = b - a;
+            if len >= block {
+                len - block + 1
+            } else if len > 0 {
+                1
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
 /// One segment-respecting resample, as source-bar indices plus
-/// the splice positions in the resampled path. Every block of
-/// consecutive source indices lies inside a single observed
-/// segment and advances one bar at a time; a splice is marked
-/// before the first bar of each block after the first, so window
-/// checks can refuse any response window that would cross it.
-/// The resampled length is the session's observed-bar count.
+/// the splice positions in the resampled path, plus the distinct
+/// chunks drawn into it as (start, chunk length) pairs. Every
+/// block of consecutive source indices lies inside a single
+/// observed segment and advances one bar at a time; a splice is
+/// marked before the first bar of each block after the first, so
+/// window checks can refuse any response window that would cross
+/// it. The resampled length is the session's observed-bar count.
+///
+/// Segment-fair two-stage sampling. An earlier scheme pooled
+/// every valid start of every segment and drew uniformly from
+/// that pool, which had two defects on segmented sessions: a
+/// segment shorter than the drawn block offered no valid start
+/// and never appeared in any resample at all, and a longer
+/// segment was weighted by (length - block + 1) starts rather
+/// than by its length, tilting the resample universe toward the
+/// longest segments. The scheme here instead chooses a segment
+/// first, with weight max(segment length, block): a segment at
+/// least as long as the block is weighted by its length, and a
+/// shorter segment is weighted as one whole block, because a
+/// draw from it contributes its whole length. A draw from a
+/// chosen segment then takes a uniform valid start inside it
+/// (a block-length chunk), or the whole segment when the
+/// segment is shorter than the block. Since the chunk a draw
+/// contributes is min(segment length, block) bars, the weight
+/// makes each segment's expected share of the resampled bars
+/// exactly its share of the observed bars: every observed bar
+/// is represented in expectation, short segments included.
+///
+/// On a single segment the scheme reduces to the earlier one
+/// exactly: the segment choice is forced, the start is uniform
+/// over the same valid starts, and the RNG stream is consumed
+/// identically, so a clean single-segment session's resamples
+/// are unchanged draw for draw. Splice and censoring semantics
+/// are unchanged too: chunks never join bars across a segment
+/// boundary, and a response window still has to lie wholly
+/// inside one drawn chunk to be used, so a short chunk drawn
+/// whole can only support the horizons that fit inside it,
+/// exactly as the corresponding segment does in the recorded
+/// session.
 fn resample_indices(
     segments: &[(usize, usize)],
     block: usize,
     target: usize,
     rng: &mut SplitMix64,
-) -> (Vec<usize>, Vec<bool>) {
-    // All valid (segment, start) choices for a full block.
-    let mut starts: Vec<usize> = Vec::new();
-    for &(a, b) in segments {
-        if b - a >= block {
-            starts.extend(a..=b - block);
-        }
+) -> (Vec<usize>, Vec<bool>, Vec<(usize, usize)>) {
+    if segments.is_empty() || target == 0 || block == 0 {
+        return (Vec::new(), Vec::new(), Vec::new());
     }
-    if starts.is_empty() || target == 0 || block == 0 {
-        return (Vec::new(), Vec::new());
+    // Two-stage choice: segment weights max(length, block), then
+    // a uniform start within the chosen segment.
+    let weights: Vec<usize> = segments.iter().map(|&(a, b)| (b - a).max(block)).collect();
+    let total_weight: usize = weights.iter().sum();
+    if total_weight == 0 {
+        return (Vec::new(), Vec::new(), Vec::new());
     }
     let mut out: Vec<usize> = Vec::with_capacity(target);
     let mut breaks = vec![false; target];
+    let mut drawn: Vec<(usize, usize)> = Vec::new();
     while out.len() < target {
-        let start = starts[rng.next_below(starts.len())];
+        let seg_idx = if segments.len() == 1 {
+            0
+        } else {
+            let mut pick = rng.next_below(total_weight);
+            let mut idx = 0;
+            while pick >= weights[idx] {
+                pick -= weights[idx];
+                idx += 1;
+            }
+            idx
+        };
+        let (a, b) = segments[seg_idx];
+        let seg_len = b - a;
+        if seg_len == 0 {
+            break;
+        }
+        let (start, chunk) = if seg_len >= block {
+            let n_starts = seg_len - block + 1;
+            let s = if n_starts == 1 {
+                a
+            } else {
+                a + rng.next_below(n_starts)
+            };
+            (s, block)
+        } else {
+            (a, seg_len)
+        };
+        drawn.push((start, chunk));
         let pos = out.len();
         if pos > 0 {
             breaks[pos] = true;
         }
-        for j in 0..block {
+        for j in 0..chunk {
             if out.len() >= target {
                 break;
             }
             out.push(start + j);
         }
     }
-    (out, breaks)
+    (out, breaks, drawn)
 }
 
 /// Draws produced by one bootstrap run.
@@ -1884,6 +1995,9 @@ struct BootOut {
     /// cross-check reuses these same draws and fits no second
     /// bootstrap of its own.
     two_fits_all: Vec<TwoCompFit>,
+    /// Resample-pool provenance for this run (pool size, drawn
+    /// diversity, degeneracy).
+    pool: ResamplePool,
 }
 
 /// Segment-respecting block bootstrap of the whole estimator.
@@ -1906,6 +2020,11 @@ fn bootstrap_engine(
     want_innov: bool,
     want_two: bool,
 ) -> BootOut {
+    let segments = segments_of(&series.observed);
+    let target: usize = series.observed.iter().filter(|o| **o).count();
+    let longest = segments.iter().map(|(a, b)| b - a).max().unwrap_or(0);
+    let max_h_pre = horizons_bars.iter().copied().max().unwrap_or(0);
+    let block_pre = (block_bars.max(1) + max_h_pre).min(longest);
     let mut out = BootOut {
         incl: Vec::new(),
         post: Vec::new(),
@@ -1913,10 +2032,8 @@ fn bootstrap_engine(
         fits_all: Vec::new(),
         fits_pass: Vec::new(),
         two_fits_all: Vec::new(),
+        pool: ResamplePool::new(block_pre, pool_distinct_starts(&segments, block_pre)),
     };
-    let segments = segments_of(&series.observed);
-    let target: usize = series.observed.iter().filter(|o| **o).count();
-    let longest = segments.iter().map(|(a, b)| b - a).max().unwrap_or(0);
     if target == 0 || longest == 0 || resamples == 0 {
         return out;
     }
@@ -1932,8 +2049,14 @@ fn bootstrap_engine(
         return out;
     }
     let mut rng = SplitMix64(seed);
+    let mut distinct_drawn: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    out.pool.resamples_attempted = resamples;
     for _ in 0..resamples {
-        let (idxs, breaks) = resample_indices(&segments, block, target, &mut rng);
+        let (idxs, breaks, drawn) = resample_indices(&segments, block, target, &mut rng);
+        for d in drawn {
+            distinct_drawn.insert(d);
+        }
         if idxs.len() < 30 {
             continue;
         }
@@ -1989,6 +2112,7 @@ fn bootstrap_engine(
             }
         }
     }
+    out.pool.distinct_blocks_drawn = distinct_drawn.len();
     out
 }
 
@@ -2085,6 +2209,55 @@ pub struct ModelFreeProfile {
     pub shares: Vec<ShareRatio>,
 }
 
+/// Resample-pool provenance for one bootstrap ladder: how large
+/// the pool of distinct blocks the resamples were drawn from is,
+/// and how diverse the drawn resamples actually were. A distinct
+/// block start is one valid (segment, start) chunk choice: for a
+/// segment at least as long as the drawn block, each valid start
+/// counts once; for a shorter segment, the whole segment is the
+/// single chunk choice it offers. `distinct_blocks_drawn` counts
+/// the distinct chunks that appeared across all resamples of the
+/// run. When `distinct_starts` falls below
+/// `MIN_POOL_DISTINCT_STARTS` the ladder is `degenerate`: its
+/// intervals are suppressed and `suppression_reason` says why,
+/// instead of a narrow interval being published behind a full
+/// resample count (`n_resamples` on the ladder itself is then 0,
+/// while `resamples_attempted` here keeps the draw count that was
+/// actually run for provenance).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResamplePool {
+    /// Drawn block length in bars (nominal block plus the
+    /// ladder's longest horizon, capped at the longest segment).
+    pub block_bars: usize,
+    pub distinct_starts: usize,
+    pub distinct_blocks_drawn: usize,
+    pub resamples_attempted: usize,
+    pub degenerate: bool,
+    pub suppression_reason: Option<String>,
+}
+
+impl ResamplePool {
+    fn new(block_bars: usize, distinct_starts: usize) -> Self {
+        let degenerate = distinct_starts < MIN_POOL_DISTINCT_STARTS;
+        Self {
+            block_bars,
+            distinct_starts,
+            distinct_blocks_drawn: 0,
+            resamples_attempted: 0,
+            degenerate,
+            suppression_reason: degenerate.then(|| {
+                format!(
+                    "degenerate resample pool: only {distinct_starts} distinct block starts \
+                     are available for a {block_bars}-bar drawn block, below the minimum of \
+                     {MIN_POOL_DISTINCT_STARTS}; bootstrap intervals for this ladder are \
+                     suppressed rather than reported as narrow intervals from repeated \
+                     resamples of the same few chunks"
+                )
+            }),
+        }
+    }
+}
+
 /// Block-length sensitivity for one candidate block length.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BlockSensitivity {
@@ -2098,6 +2271,8 @@ pub struct BlockSensitivity {
     pub ci_width_300_bps: Option<f64>,
     /// Mean pointwise interval width across all horizons.
     pub mean_ci_width_bps: Option<f64>,
+    /// Resample pool behind this entry, when the length was run.
+    pub resample_pool: Option<ResamplePool>,
 }
 
 /// Pre-shock diagnostics (observational; see
@@ -2190,6 +2365,11 @@ pub struct ExtendedResponse {
     pub fit_r_squared: Option<f64>,
     pub fit_verdict: String,
     pub profile_flat_tau_range_s: Option<(f64, f64)>,
+    /// Resample pool behind the extended intervals. When it is
+    /// degenerate the extended intervals are suppressed (null in
+    /// the serialized report), `n_resamples` is 0, and
+    /// `fit_verdict` records the suppression reason.
+    pub resample_pool: ResamplePool,
 }
 
 /// The reduced-form VAR cross-check for one session. This is a
@@ -2672,6 +2852,11 @@ pub struct SessionSpeed {
     pub effective_blocks_at_max_horizon: usize,
     pub n_segments: usize,
     pub longest_segment_bars: usize,
+    /// Resample pool behind the headline bootstrap intervals.
+    /// When it is degenerate the headline bootstrap intervals
+    /// above are suppressed (null in the serialized report) and
+    /// no fit is promoted from those draws.
+    pub resample_pool: ResamplePool,
     /// Fitted instantaneous term J of the headline fit, when the
     /// fit is reported.
     pub jump_bps: Option<f64>,
@@ -2796,22 +2981,66 @@ fn analyze_series(
         true,
     );
     let h_len = horizons_s.len();
-    let response_ci_bps = draws_ci(&boot.incl, h_len);
-    let post_response_ci_bps = draws_ci(&boot.post, h_len);
-    let response_band = simultaneous_band(&curve, &boot.incl);
-    let post_band = simultaneous_band(&post_curve, &boot.post);
-    let innov_ci = draws_ci(&boot.innov, h_len);
-    let innov_band = simultaneous_band(&innov_curve, &boot.innov);
+    // Degenerate-pool suppression: when the headline pool has
+    // too few distinct block starts, every interval computed from
+    // those draws is suppressed (NaN, serialized as null) and no
+    // fit is promoted from them below; the point curves and the
+    // HAC intervals, which do not come from the resamples, stand.
+    let headline_degenerate = boot.pool.degenerate;
+    let nan_ci = vec![(f64::NAN, f64::NAN); h_len];
+    let response_ci_bps = if headline_degenerate {
+        nan_ci.clone()
+    } else {
+        draws_ci(&boot.incl, h_len)
+    };
+    let post_response_ci_bps = if headline_degenerate {
+        nan_ci.clone()
+    } else {
+        draws_ci(&boot.post, h_len)
+    };
+    let response_band = if headline_degenerate {
+        nan_ci.clone()
+    } else {
+        simultaneous_band(&curve, &boot.incl)
+    };
+    let post_band = if headline_degenerate {
+        nan_ci.clone()
+    } else {
+        simultaneous_band(&post_curve, &boot.post)
+    };
+    let innov_ci = if headline_degenerate {
+        nan_ci.clone()
+    } else {
+        draws_ci(&boot.innov, h_len)
+    };
+    let innov_band = if headline_degenerate {
+        nan_ci.clone()
+    } else {
+        simultaneous_band(&innov_curve, &boot.innov)
+    };
     let n_draws = boot.incl.len().max(1);
-    let bootstrap_fit_share = boot.fits_pass.len() as f64 / n_draws as f64;
+    let bootstrap_fit_share = if headline_degenerate {
+        0.0
+    } else {
+        boot.fits_pass.len() as f64 / n_draws as f64
+    };
+    let empty_draws: &[Vec<f64>] = &[];
     let profile = build_profile(
         &horizons_s,
         &curve,
         &response_ci_bps,
-        &boot.incl,
+        if headline_degenerate {
+            empty_draws
+        } else {
+            &boot.incl
+        },
         &post_curve,
         &post_response_ci_bps,
-        &boot.post,
+        if headline_degenerate {
+            empty_draws
+        } else {
+            &boot.post
+        },
     );
     let (hac_se, hac_ci) = hac_inference(
         &series.mid,
@@ -2823,7 +3052,11 @@ fn analyze_series(
     // Headline fit: covariance-aware, weighted by the bootstrap
     // covariance of the response vector (diagonal fallback through
     // the inverse when the covariance cannot be formed).
-    let cov = draws_covariance(&boot.incl, h_len);
+    let cov = if headline_degenerate {
+        None
+    } else {
+        draws_covariance(&boot.incl, h_len)
+    };
     let weight = cov.as_ref().and_then(|c| invert_matrix(c));
     let raw_fit = fit_exponential_w(&horizons_s, &curve, weight.as_deref())
         .or_else(|| fit_exponential_raw(&horizons_s, &curve));
@@ -2854,27 +3087,40 @@ fn analyze_series(
     } else {
         None
     };
-    let (fit, fit_failure) = match raw_fit {
-        Some(f) => match judge_fit(&horizons_s, &curve, &f) {
-            Ok(()) => {
-                if fit_region.as_ref().map(|r| r.bounded).unwrap_or(false) {
-                    (Some(f), None)
-                } else {
-                    (
+    let (fit, fit_failure) = if headline_degenerate {
+        (
+            None,
+            Some(format!(
+                "{}; no tau is reported from a degenerate resample pool",
+                boot.pool
+                    .suppression_reason
+                    .clone()
+                    .unwrap_or_else(|| "degenerate resample pool".to_string())
+            )),
+        )
+    } else {
+        match raw_fit {
+            Some(f) => match judge_fit(&horizons_s, &curve, &f) {
+                Ok(()) => {
+                    if fit_region.as_ref().map(|r| r.bounded).unwrap_or(false) {
+                        (Some(f), None)
+                    } else {
+                        (
                         None,
                         Some(
                             "the fit passes the point-estimate gates but the joint parameter region from the bootstrap fits is not bounded, so no tau is reported"
                                 .to_string(),
                         ),
                     )
+                    }
                 }
-            }
-            Err(why) => (None, Some(why)),
-        },
-        None => (
-            None,
-            Some("the response curve has too few finite points to fit".to_string()),
-        ),
+                Err(why) => (None, Some(why)),
+            },
+            None => (
+                None,
+                Some("the response curve has too few finite points to fit".to_string()),
+            ),
+        }
     };
     let mut gate_sensitivity: Vec<GateSensitivity> = Vec::new();
     {
@@ -2894,7 +3140,8 @@ fn analyze_series(
             }
         }
     }
-    let (tau_ci, half_ci, rinf_ci, jump_ci) = if boot.fits_pass.len() >= 100 {
+    let (tau_ci, half_ci, rinf_ci, jump_ci) = if !headline_degenerate && boot.fits_pass.len() >= 100
+    {
         (
             Some(percentile_ci(
                 &boot.fits_pass.iter().map(|f| f.tau_s).collect::<Vec<_>>(),
@@ -2936,11 +3183,17 @@ fn analyze_series(
         // least four nominal blocks per resample.
         let feasible = longest_seg >= len_bars + max_h && n_observed / len_bars >= 4;
         if len_s == 300 {
-            let ci300 = response_ci_bps.last().copied();
+            let ci300 = if headline_degenerate {
+                None
+            } else {
+                response_ci_bps.last().copied()
+            };
             sensitivity.push(BlockSensitivity {
                 block_len_s: len_s as f64,
-                feasible,
-                reason: if feasible {
+                feasible: feasible && !headline_degenerate,
+                reason: if headline_degenerate {
+                    boot.pool.suppression_reason.clone()
+                } else if feasible {
                     None
                 } else {
                     Some(
@@ -2948,12 +3201,25 @@ fn analyze_series(
                             .to_string(),
                     )
                 },
-                n_resamples: boot.incl.len(),
+                n_resamples: if headline_degenerate {
+                    0
+                } else {
+                    boot.incl.len()
+                },
                 response_ci_300_bps: ci300,
                 ci_width_300_bps: ci300.map(|(lo, hi)| hi - lo),
-                mean_ci_width_bps: Some(
-                    response_ci_bps.iter().map(|(lo, hi)| hi - lo).sum::<f64>() / h_len as f64,
-                ),
+                mean_ci_width_bps: if headline_degenerate {
+                    None
+                } else {
+                    Some(
+                        response_ci_bps
+                            .iter()
+                            .map(|(lo, hi)| hi - lo)
+                            .sum::<f64>()
+                            / h_len as f64,
+                    )
+                },
+                resample_pool: Some(boot.pool.clone()),
             });
         } else if !feasible {
             sensitivity.push(BlockSensitivity {
@@ -2967,6 +3233,7 @@ fn analyze_series(
                 response_ci_300_bps: None,
                 ci_width_300_bps: None,
                 mean_ci_width_bps: None,
+                resample_pool: None,
             });
         } else {
             let alt = bootstrap_engine(
@@ -2982,18 +3249,30 @@ fn analyze_series(
                 false,
                 false,
             );
+            let alt_degenerate = alt.pool.degenerate;
             let alt_ci = draws_ci(&alt.incl, h_len);
-            let ci300 = alt_ci.last().copied();
+            let ci300 = if alt_degenerate {
+                None
+            } else {
+                alt_ci.last().copied()
+            };
             sensitivity.push(BlockSensitivity {
                 block_len_s: len_s as f64,
-                feasible: true,
-                reason: None,
-                n_resamples: alt.incl.len(),
+                feasible: !alt_degenerate,
+                reason: if alt_degenerate {
+                    alt.pool.suppression_reason.clone()
+                } else {
+                    None
+                },
+                n_resamples: if alt_degenerate { 0 } else { alt.incl.len() },
                 response_ci_300_bps: ci300,
                 ci_width_300_bps: ci300.map(|(lo, hi)| hi - lo),
-                mean_ci_width_bps: Some(
-                    alt_ci.iter().map(|(lo, hi)| hi - lo).sum::<f64>() / h_len as f64,
-                ),
+                mean_ci_width_bps: if alt_degenerate {
+                    None
+                } else {
+                    Some(alt_ci.iter().map(|(lo, hi)| hi - lo).sum::<f64>() / h_len as f64)
+                },
+                resample_pool: Some(alt.pool.clone()),
             });
         }
     }
@@ -3066,6 +3345,7 @@ fn analyze_series(
         effective_blocks_at_max_horizon: effective_blocks,
         n_segments: segments.len(),
         longest_segment_bars: longest_seg,
+        resample_pool: boot.pool.clone(),
         jump_bps: fit.map(|f| f.jump_bps),
         jump_ci_bps: jump_ci,
         fit_jump_raw_bps: raw_fit.map(|f| f.jump_bps),
@@ -3138,30 +3418,52 @@ fn extended_analysis(series: &BarSeries, cfg: &SpeedConfig) -> Option<ExtendedRe
         false,
         false,
     );
-    let ci = draws_ci(&boot.incl, keep);
-    let cov = draws_covariance(&boot.incl, keep);
+    let ext_degenerate = boot.pool.degenerate;
+    let ci = if ext_degenerate {
+        vec![(f64::NAN, f64::NAN); keep]
+    } else {
+        draws_ci(&boot.incl, keep)
+    };
+    let cov = if ext_degenerate {
+        None
+    } else {
+        draws_covariance(&boot.incl, keep)
+    };
     let weight = cov.as_ref().and_then(|c| invert_matrix(c));
     let fit = fit_exponential_w(&horizons_s[..keep], &curve[..keep], weight.as_deref())
         .or_else(|| fit_exponential_raw(&horizons_s[..keep], &curve[..keep]));
     let (_, _, flat) = profile_loss(&horizons_s[..keep], &curve[..keep], weight.as_deref());
-    let (fit_tau, fit_jump, fit_rinf, fit_r2, verdict) = match fit {
-        Some(f) => match judge_fit(&horizons_s[..keep], &curve[..keep], &f) {
-            Ok(()) => (
-                Some(f.tau_s),
-                Some(f.jump_bps),
-                Some(f.r_inf_bps),
-                Some(f.r_squared),
-                "the extended fit passes the published judging on the long ladder".to_string(),
+    let (fit_tau, fit_jump, fit_rinf, fit_r2, verdict) = if ext_degenerate {
+        (
+            None,
+            None,
+            None,
+            fit.map(|f| f.r_squared),
+            boot.pool
+                .suppression_reason
+                .clone()
+                .unwrap_or_else(|| "degenerate resample pool".to_string()),
+        )
+    } else {
+        match fit {
+            Some(f) => match judge_fit(&horizons_s[..keep], &curve[..keep], &f) {
+                Ok(()) => (
+                    Some(f.tau_s),
+                    Some(f.jump_bps),
+                    Some(f.r_inf_bps),
+                    Some(f.r_squared),
+                    "the extended fit passes the published judging on the long ladder".to_string(),
+                ),
+                Err(why) => (None, None, None, Some(f.r_squared), why),
+            },
+            None => (
+                None,
+                None,
+                None,
+                None,
+                "the extended curve has too few finite points to fit".to_string(),
             ),
-            Err(why) => (None, None, None, Some(f.r_squared), why),
-        },
-        None => (
-            None,
-            None,
-            None,
-            None,
-            "the extended curve has too few finite points to fit".to_string(),
-        ),
+        }
     };
     Some(ExtendedResponse {
         horizons_s: horizons_s[..keep].to_vec(),
@@ -3170,13 +3472,14 @@ fn extended_analysis(series: &BarSeries, cfg: &SpeedConfig) -> Option<ExtendedRe
         post_response_bps: post_curve[..keep].to_vec(),
         n_origins: counts[..keep].to_vec(),
         block_len_s: 300.0,
-        n_resamples: boot.incl.len(),
+        n_resamples: if ext_degenerate { 0 } else { boot.incl.len() },
         fit_tau_s: fit_tau,
         fit_jump_bps: fit_jump,
         fit_r_inf_bps: fit_rinf,
         fit_r_squared: fit_r2,
         fit_verdict: verdict,
         profile_flat_tau_range_s: flat,
+        resample_pool: boot.pool.clone(),
     })
 }
 
@@ -3388,6 +3691,13 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
          excludes zero; otherwise the share is suppressed in the report with the \
          reason recorded."
             .to_string(),
+        "Bootstrap intervals are reported only where the ladder's resample pool \
+         is non-degenerate: each session and ladder reports its pool of distinct \
+         block starts and the distinct blocks actually drawn, and a pool below \
+         20 distinct starts has its intervals suppressed with the reason \
+         recorded in its resample_pool block, instead of a narrow interval \
+         being published behind a full resample count."
+            .to_string(),
         "tau is reported only for sessions whose response the jump-term adjustment \
          curve actually fits (R^2 at or above the published bar, positive long-run \
          response, tau interior to the search grid) and whose joint parameter region \
@@ -3439,7 +3749,28 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
             stability label), and the report gains a top-level `crosschecks` \
             block with the governing methods and restraints. Every \
             pre-existing field and value is unchanged by this extension \
-            either, and no two-component parameter appears in the summary."
+            either, and no two-component parameter appears in the summary. \
+            v3 corrects the segment bootstrap's resampling: segment choice \
+            is two-stage and segment-fair (a segment is chosen with weight \
+            max(segment length, drawn block length), then a uniform valid \
+            start inside it, with a segment shorter than the block drawn \
+            whole), so every fully-observed segment is represented in \
+            proportion to its length instead of segments shorter than the \
+            block being excluded and longer segments being weighted by \
+            their valid-start counts. Each session gains a `resample_pool` \
+            block (headline ladder), each block-sensitivity entry gains \
+            one, and the extended ladder gains one: the drawn block \
+            length, the number of distinct block starts in the pool, the \
+            number of distinct blocks actually drawn, and the resamples \
+            attempted. A ladder whose pool has fewer than 20 distinct \
+            starts is degenerate: its bootstrap intervals are suppressed \
+            (null), its `n_resamples` reads 0, no fit is promoted from \
+            its draws, and the pool block records the reason. Point \
+            estimates, HAC intervals, and every non-bootstrap field keep \
+            their v2 meanings; bootstrap intervals and fit outcomes are \
+            regenerated under the corrected resampling with the same \
+            published seed, so their values move where the corrected \
+            resample distribution moves them."
             .to_string(),
         timing_conventions: vec![
             "inclusive: baseline is the close of the bar before the shock bar; the 0 s rung is the within-shock-bar move"
@@ -3462,7 +3793,14 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
                 segments; splice points are marked and no response window in a \
                 resample crosses a splice, an unobserved stretch, or the session \
                 boundary; each drawn block is extended by the longest horizon so \
-                that a max-horizon window can lie wholly inside one block"
+                that a max-horizon window can lie wholly inside one block; segment \
+                choice is two-stage and segment-fair: a segment is chosen with \
+                weight max(segment length, drawn block length), then a uniform \
+                valid start inside it, and a segment shorter than the block is \
+                drawn whole, so each segment's expected share of the resampled \
+                bars equals its share of the observed bars; a ladder whose \
+                block-start pool has fewer than 20 distinct starts is degenerate \
+                and its intervals are suppressed with the reason recorded"
                 .to_string(),
         },
         variants,
@@ -4058,7 +4396,7 @@ fn variant_bootstrap(
     }
     let mut rng = SplitMix64(seed);
     for _ in 0..resamples {
-        let (idxs, breaks) = resample_indices(&segments, block, target, &mut rng);
+        let (idxs, breaks, _) = resample_indices(&segments, block, target, &mut rng);
         if idxs.len() < 30 {
             continue;
         }
@@ -5186,7 +5524,7 @@ mod tests {
         assert_eq!(segments, vec![(0, 400), (600, 1000)]);
         let mut rng = SplitMix64(42);
         for _ in 0..50 {
-            let (idxs, breaks) = resample_indices(&segments, 50, 800, &mut rng);
+            let (idxs, breaks, _) = resample_indices(&segments, 50, 800, &mut rng);
             assert_eq!(idxs.len(), 800);
             // Every drawn bar was observed in the original series.
             assert!(idxs.iter().all(|&i| observed[i]));
@@ -5204,6 +5542,110 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn short_segments_appear_in_resamples() {
+        // Segments of 300, 50 and 600 bars with a drawn block of
+        // 200: the 50-bar segment is shorter than the block, so a
+        // pooled-valid-start scheme could never draw it at all.
+        // Under the segment-fair scheme it is drawn whole, and the
+        // pool counts it as the one chunk it offers.
+        let segments = vec![(0, 300), (400, 450), (500, 1100)];
+        assert_eq!(pool_distinct_starts(&segments, 200), 101 + 1 + 401);
+        let mut rng = SplitMix64(7);
+        let mut short_draws = 0usize;
+        let mut total_draws = 0usize;
+        for _ in 0..200 {
+            let (_, _, drawn) = resample_indices(&segments, 200, 950, &mut rng);
+            total_draws += drawn.len();
+            short_draws += drawn.iter().filter(|&&d| d == (400, 50)).count();
+        }
+        assert!(total_draws > 0);
+        assert!(
+            short_draws >= 20,
+            "the short segment was drawn {short_draws} times in 200 resamples; \
+             it must be a regular part of the resample universe, not an exception"
+        );
+    }
+
+    #[test]
+    fn single_segment_resampling_matches_the_pooled_scheme() {
+        // On one clean segment the segment-fair scheme must
+        // reduce to the earlier pooled-start scheme draw for
+        // draw (same seed, same stream), so clean sessions move
+        // only by Monte Carlo reshuffling, never systematically.
+        let segments = vec![(0, 2000)];
+        let block = 300;
+        let target = 1500;
+        // The earlier scheme, reimplemented here as the oracle:
+        // pool every valid start, draw uniformly from the pool.
+        let mut starts: Vec<usize> = Vec::new();
+        for &(a, b) in &segments {
+            if b - a >= block {
+                starts.extend(a..=b - block);
+            }
+        }
+        let mut rng_old = SplitMix64(99);
+        let mut old: Vec<usize> = Vec::new();
+        while old.len() < target {
+            let start = starts[rng_old.next_below(starts.len())];
+            for j in 0..block {
+                if old.len() >= target {
+                    break;
+                }
+                old.push(start + j);
+            }
+        }
+        let mut rng_new = SplitMix64(99);
+        let (new, _, _) = resample_indices(&segments, block, target, &mut rng_new);
+        assert_eq!(new, old);
+        assert_eq!(pool_distinct_starts(&segments, block), 2000 - block + 1);
+    }
+
+    #[test]
+    fn tiny_pool_extended_ladder_is_suppressed_not_narrow() {
+        // Three clean segments of 1,800 bars each (5,400 observed
+        // bars, so the extended ladder runs) separated by outages.
+        // The extended drawn block is 1,800 bars, so each segment
+        // offers exactly one distinct start: a pool of 3, far
+        // below the minimum of 20. The extended intervals must
+        // come out suppressed with the reason recorded, not as
+        // narrow intervals behind a full resample count.
+        let rho = (-1.0f64 / 120.0).exp();
+        let base = synth_series(5_700, rho, 3.0);
+        let mut observed = vec![true; 5_700];
+        for slot in observed.iter_mut().take(1_950).skip(1_800) {
+            *slot = false;
+        }
+        for slot in observed.iter_mut().take(3_900).skip(3_750) {
+            *slot = false;
+        }
+        let series = BarSeries {
+            mid: base.mid,
+            ofi: base.ofi,
+            observed,
+        };
+        let cfg = small_cfg();
+        let res =
+            analyze_bar_series("tiny-pool", &series, 5_699.0, &cfg).expect("session must analyze");
+        let ext = res.extended.expect("extended ladder must run");
+        assert!(ext.resample_pool.degenerate, "pool {:?}", ext.resample_pool);
+        assert_eq!(ext.resample_pool.distinct_starts, 3);
+        assert_eq!(ext.n_resamples, 0);
+        assert!(
+            ext.fit_verdict.contains("degenerate resample pool"),
+            "verdict: {}",
+            ext.fit_verdict
+        );
+        assert!(
+            ext.response_ci_bps
+                .iter()
+                .all(|(lo, hi)| lo.is_nan() && hi.is_nan()),
+            "suppressed intervals must be null, not narrow: {:?}",
+            ext.response_ci_bps
+        );
+        assert!(ext.fit_tau_s.is_none());
     }
 
     #[test]
@@ -5417,14 +5859,14 @@ mod tests {
     }
 
     #[test]
-    fn report_serializes_v2_with_provenance() {
+    fn report_serializes_v3_with_provenance() {
         let rho = (-1.0f64 / 20.0).exp();
         let series = synth_series(1799, rho, 9.0);
         let cfg = small_cfg();
         let res = analyze_series("synth", &series, 1798.0, &cfg, None).expect("analysis");
         let report = summarize_speed(vec![res], &cfg);
         let v: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
-        assert_eq!(v["schema"], "toxicflow.info-speed/v2");
+        assert_eq!(v["schema"], "toxicflow.info-speed/v3");
         assert_eq!(v["bootstrap"]["seed"], SPEED_BOOTSTRAP_SEED);
         assert_eq!(v["bootstrap"]["resamples"], 40);
         let s0 = &v["sessions"][0];
@@ -5436,6 +5878,18 @@ mod tests {
         assert!(s0["response_bps"].is_array());
         assert!(s0["bootstrap_fit_share"].is_number());
         assert!(v["summary"]["n_sessions"] == 1);
+        // v3: the headline resample pool is published and, on this
+        // single clean segment, non-degenerate with the pooled
+        // scheme's start count (1799 - 600 + 1).
+        assert_eq!(s0["resample_pool"]["distinct_starts"], 1200);
+        assert_eq!(s0["resample_pool"]["degenerate"], false);
+        assert!(
+            s0["resample_pool"]["distinct_blocks_drawn"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(s0["block_sensitivity"][1]["resample_pool"].is_object());
     }
 
     #[test]
