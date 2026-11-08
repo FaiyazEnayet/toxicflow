@@ -3209,6 +3209,23 @@ pub fn analyze_session_speed_with_trades(
     analyze_series(session, &series, span_s, cfg, Some(&inputs))
 }
 
+/// Analyze one session's bar series directly, without the
+/// quote-level robustness variants and cross-checks (those blocks
+/// never feed the headline curves, intervals, or fit). This is the
+/// entry point the power/coverage simulation harness in
+/// `examples/speed_power_sim.rs` runs: it exercises the same
+/// local-projection, segment-bootstrap, and jump-term fit code as
+/// `analyze_session_speed`, on synthetic bar series whose true
+/// response is known by construction.
+pub fn analyze_bar_series(
+    session: &str,
+    series: &BarSeries,
+    span_s: f64,
+    cfg: &SpeedConfig,
+) -> Option<SessionSpeed> {
+    analyze_series(session, series, span_s, cfg, None)
+}
+
 /// Cross-session summary over the sessions whose fit passed. The
 /// independent recording session is the sample unit, as in the TF6
 /// pilot: these are plain descriptive statistics over sessions,
