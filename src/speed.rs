@@ -74,7 +74,7 @@
 //! reported, with the reason, the profile loss over tau, and the
 //! outcome across a table of gate thresholds and interior margins.
 
-use crate::metrics::{bar_status, ofi_bars, ofi_events, Quote};
+use crate::metrics::{bar_status, ofi_bars, ofi_events, Quote, Trade};
 
 /// Schema tag written into every OFI-response report. v2 adds the
 /// post-bar series, the model-free profile with contrasts and
@@ -1598,6 +1598,11 @@ pub struct SessionSpeed {
     pub gate_sensitivity: Vec<GateSensitivity>,
     /// Extended ladder (main-length sessions only).
     pub extended: Option<ExtendedResponse>,
+    // ---- v2 extension: robustness variants ----
+    /// Robustness variants under the same frozen protocol, when
+    /// the session's recorded quotes (and trades, where a variant
+    /// needs them) were supplied to the analysis.
+    pub variants: Option<SessionVariants>,
 }
 
 /// Analyze one session's bar series. Returns None when the
@@ -1608,6 +1613,7 @@ fn analyze_series(
     series: &BarSeries,
     span_s: f64,
     cfg: &SpeedConfig,
+    variant_inputs: Option<&VariantInputs>,
 ) -> Option<SessionSpeed> {
     let n = series.mid.len();
     if n == 0 || cfg.bar_ms <= 0 {
@@ -1890,6 +1896,8 @@ fn analyze_series(
             });
         }
     }
+    let variants = variant_inputs
+        .map(|inp| compute_variants(series, inp, &horizons_bars, &horizons_s, ofi_sd, cfg));
     let effective_blocks = segments.iter().map(|(a, b)| (b - a) / max_h.max(1)).sum();
     let extended = if n_observed >= EXTENDED_MIN_OBSERVED_BARS {
         extended_analysis(series, cfg)
@@ -1955,6 +1963,7 @@ fn analyze_series(
         profile_flat_tau_range_s: pl_flat,
         gate_sensitivity,
         extended,
+        variants,
     })
 }
 
@@ -2063,12 +2072,25 @@ pub fn analyze_session_speed(
     quotes: &[Quote],
     cfg: &SpeedConfig,
 ) -> Option<SessionSpeed> {
+    analyze_session_speed_with_trades(session, quotes, None, cfg)
+}
+
+/// Analyze one session's quotes and (when available) its recorded
+/// trades: the trades feed the trade-price, activity and
+/// volume-clock variants; every other variant needs only quotes.
+pub fn analyze_session_speed_with_trades(
+    session: &str,
+    quotes: &[Quote],
+    trades: Option<&[Trade]>,
+    cfg: &SpeedConfig,
+) -> Option<SessionSpeed> {
     if quotes.is_empty() {
         return None;
     }
     let series = build_bar_series(quotes, cfg.bar_ms);
     let span_s = (quotes.last().unwrap().time_ms - quotes.first().unwrap().time_ms) as f64 / 1000.0;
-    analyze_series(session, &series, span_s, cfg)
+    let inputs = build_variant_inputs(quotes, trades, cfg.bar_ms);
+    analyze_series(session, &series, span_s, cfg, Some(&inputs))
 }
 
 /// Cross-session summary over the sessions whose fit passed. The
@@ -2178,6 +2200,12 @@ pub struct SpeedReport {
     /// The two timing conventions, stated where the numbers live.
     pub timing_conventions: Vec<String>,
     pub bootstrap: BootstrapProvenance,
+    // ---- v2 extension: robustness variants ----
+    /// Report-level variants block: the pooled six-session
+    /// description and the prespecified rules every per-session
+    /// variant follows. Per-session variant results live on each
+    /// session's `variants` field.
+    pub variants: ReportVariants,
 }
 
 impl SpeedReport {
@@ -2189,6 +2217,7 @@ impl SpeedReport {
 /// Aggregate per-session results into the report.
 pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedReport {
     let summary = summarize(&sessions);
+    let variants = report_variants(&sessions);
     let grid = tau_grid();
     let notes = vec![
         "The estimand is observational: order-flow imbalance and mid-price changes are \
@@ -2256,7 +2285,15 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
             ladder to 1800 s), timing_conventions, and bootstrap provenance. \
             Descriptive strings were renamed from incorporation-speed wording to \
             observational OFI-price-response wording; no v1 numeric field changed \
-            meaning, and the inclusive point estimates are the v1 estimates."
+            meaning, and the inclusive point estimates are the v1 estimates. \
+            Extension within v2 (robustness variants): each session gains a \
+            `variants` block (gap and censoring report with quote-age classes, \
+            microprice and trade-price curves, raw-OFI curves, the \
+            largest-OFI-burst event study, the volume-clock curve, pre-shock \
+            state strata, and frequency/event-time support), and the report \
+            gains a top-level `variants` block with the pooled six-session \
+            description and the prespecified variant rules. Every pre-existing \
+            v2 field and value is unchanged by the extension."
             .to_string(),
         timing_conventions: vec![
             "inclusive: baseline is the close of the bar before the shock bar; the 0 s rung is the within-shock-bar move"
@@ -2282,6 +2319,1331 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
                 that a max-horizon window can lie wholly inside one block"
                 .to_string(),
         },
+        variants,
+    }
+}
+
+// ------------------------------------------------------------------
+// Robustness variants (schema v2 extension): every variant below
+// runs under the same frozen protocol as the headline estimator —
+// the same sessions, the same horizon ladder, the same inclusive
+// timing convention unless stated otherwise, the same censoring
+// rule (a window touching an unobserved bar is dropped), and the
+// same segment-respecting bootstrap design where intervals are
+// reported (variant intervals use the sensitivity resample count
+// and a seed derived from the published seed, stated in the
+// report). The headline curves are never recomputed differently:
+// variants sit next to them, including where they come out null.
+// ------------------------------------------------------------------
+
+/// Prespecified quantile of |OFI| that defines a burst event.
+/// Stated here, before any result: a burst is an origin bar whose
+/// |OFI| reaches the session's 95th percentile of |OFI| over
+/// observed bars.
+pub const BURST_QUANTILE: f64 = 0.95;
+
+/// Refractory window, in bars, for the burst event study: after
+/// an accepted event, candidate bursts within this many bars are
+/// skipped (first-event-wins), so event windows at the longest
+/// horizon never overlap.
+pub const BURST_REFRACTORY_BARS: usize = 300;
+
+/// Minimum clean windows per horizon for a burst mean to be
+/// reported at that horizon.
+pub const BURST_MIN_WINDOWS: usize = 10;
+
+/// Minimum usable origins at the longest horizon for a stratum
+/// to be reported; strata below it are suppressed with a reason.
+pub const STRATUM_MIN_ORIGINS_AT_MAX_HORIZON: usize = 100;
+
+/// Trailing window, in bars, for the pre-shock activity
+/// covariate (measured strictly before the origin bar).
+pub const STRATA_ACTIVITY_WINDOW_BARS: usize = 60;
+
+/// Trailing window, in bars, for the pre-shock spread covariate.
+pub const STRATA_SPREAD_WINDOW_BARS: usize = 10;
+
+/// Quote updates per event-time bar in the frequency variant.
+pub const EVENT_TIME_QUOTES_PER_BAR: usize = 10;
+
+/// Quote-age classification of an unobserved bar, from the
+/// recorded `bar_status` quote age at the bar's end.
+pub fn classify_quote_age(quote_age_ms: i64) -> &'static str {
+    if quote_age_ms <= 2_000 {
+        "valid_no_update"
+    } else if quote_age_ms <= 30_000 {
+        "stale_quote"
+    } else {
+        "confirmed_feed_loss"
+    }
+}
+
+/// (bucket last-trade price, bucket summed quote OFI, bucket
+/// volume) on the volume clock.
+pub type VolumeClockSeries = (Vec<f64>, Vec<f64>, f64);
+
+/// Per-bar inputs the headline bar series discards but the
+/// variants need, aligned to the same bar grid as `BarSeries`.
+#[derive(Debug, Clone)]
+pub struct VariantInputs {
+    pub quote_age_ms: Vec<i64>,
+    pub micro: Vec<f64>,
+    pub spread: Vec<f64>,
+    pub quotes_in_bar: Vec<usize>,
+    pub trade_count: Vec<usize>,
+    pub trades_supplied: bool,
+    pub trade_price: Option<Vec<f64>>,
+    /// (bucket last-trade price, bucket summed quote OFI,
+    /// bucket volume) on the volume clock, when trades support it.
+    pub volume_clock: Option<VolumeClockSeries>,
+    pub volume_clock_reason: Option<String>,
+    pub half_second_series: Option<BarSeries>,
+    pub event_series: Option<BarSeries>,
+    pub n_quotes: usize,
+    pub median_interquote_ms: f64,
+    pub p90_interquote_ms: f64,
+    pub mean_quotes_per_second: f64,
+}
+
+/// Equal-volume bucket series from the crate's bucket machinery:
+/// buckets are built with `volume_buckets_sized` at a bucket
+/// volume of total traded volume / `target_buckets`, the bucket
+/// price is the last trade price in the bucket, and the bucket
+/// regressor is the sum of quote OFI events whose timestamps fall
+/// inside the bucket's trade-time interval. Returns (prices,
+/// ofis, bucket_vol).
+pub fn build_volume_clock_series(
+    trades: &[Trade],
+    quotes: &[Quote],
+    target_buckets: usize,
+) -> Option<VolumeClockSeries> {
+    if trades.is_empty() || quotes.is_empty() || target_buckets == 0 {
+        return None;
+    }
+    let total: f64 = trades.iter().map(|t| t.qty).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let bucket_vol = total / target_buckets as f64;
+    // Bucket boundaries (end time, last trade price) with the
+    // same proportional trade splitting as volume_buckets_sized.
+    let mut sorted: Vec<&Trade> = trades.iter().collect();
+    sorted.sort_by_key(|t| t.time_ms);
+    let mut ends: Vec<(i64, f64)> = Vec::new();
+    let mut filled = 0.0f64;
+    for t in &sorted {
+        let mut remaining = t.qty;
+        while remaining > 1e-12 {
+            let take = (bucket_vol - filled).min(remaining);
+            filled += take;
+            remaining -= take;
+            if filled >= bucket_vol - 1e-9 {
+                ends.push((t.time_ms, t.price));
+                filled = 0.0;
+            }
+        }
+    }
+    if ends.len() < 30 {
+        return None;
+    }
+    // Quote OFI events into buckets by timestamp.
+    let events = ofi_events(quotes);
+    let mut ofi = vec![0.0f64; ends.len()];
+    for (q, e) in quotes.iter().zip(events.iter()) {
+        let idx = ends.partition_point(|(end, _)| *end < q.time_ms);
+        if idx < ends.len() {
+            ofi[idx] += e;
+        }
+    }
+    let price: Vec<f64> = ends.iter().map(|(_, p)| *p).collect();
+    Some((price, ofi, bucket_vol))
+}
+
+/// Build the variant inputs from one session's recorded quotes
+/// and (when available) trades, on the `bar_ms` grid.
+pub fn build_variant_inputs(
+    quotes: &[Quote],
+    trades: Option<&[Trade]>,
+    bar_ms: i64,
+) -> VariantInputs {
+    let events = ofi_events(quotes);
+    let bars = ofi_bars(quotes, &events, bar_ms);
+    let status = bar_status(quotes, bar_ms);
+    let n = bars.len();
+    // Last quote per bar, carried forward, for the microprice.
+    let mut micro = vec![f64::NAN; n];
+    let mut quotes_in_bar = vec![0usize; n];
+    if !quotes.is_empty() && bar_ms > 0 {
+        let t0 = quotes[0].time_ms / bar_ms * bar_ms;
+        let micro_of = |q: &Quote| -> f64 {
+            let tot = q.bid_sz + q.ask_sz;
+            if tot > 0.0 {
+                (q.bid_px * q.ask_sz + q.ask_px * q.bid_sz) / tot
+            } else {
+                q.mid()
+            }
+        };
+        let mut last_in_bar: Vec<Option<f64>> = vec![None; n];
+        for q in quotes {
+            let idx = ((q.time_ms - t0) / bar_ms) as usize;
+            if idx < n {
+                quotes_in_bar[idx] += 1;
+                last_in_bar[idx] = Some(micro_of(q));
+            }
+        }
+        let mut carry = micro_of(&quotes[0]);
+        for i in 0..n {
+            if let Some(m) = last_in_bar[i] {
+                carry = m;
+            }
+            micro[i] = carry;
+        }
+    }
+    // Trade price / counts per bar (last trade in the bar,
+    // carried forward; seeded with the bar mid before the first
+    // trade in the session).
+    let (trade_price, trade_count, trades_supplied) = match trades {
+        Some(ts) if !ts.is_empty() && !quotes.is_empty() && bar_ms > 0 => {
+            let t0 = quotes[0].time_ms / bar_ms * bar_ms;
+            let mut px: Vec<Option<f64>> = vec![None; n];
+            let mut cnt = vec![0usize; n];
+            for t in ts {
+                let idx = ((t.time_ms - t0) / bar_ms) as usize;
+                if idx < n {
+                    px[idx] = Some(t.price);
+                    cnt[idx] += 1;
+                }
+            }
+            let mut out = Vec::with_capacity(n);
+            let mut carry: Option<f64> = None;
+            for i in 0..n {
+                if let Some(p) = px[i] {
+                    carry = Some(p);
+                }
+                out.push(carry.unwrap_or(bars[i].2));
+            }
+            (Some(out), cnt, true)
+        }
+        _ => (None, vec![0usize; n], false),
+    };
+    let (volume_clock, volume_clock_reason) = match trades {
+        Some(ts) if trades_supplied => match build_volume_clock_series(ts, quotes, n.max(1)) {
+            Some(v) => (Some(v), None),
+            None => (
+                None,
+                Some(
+                    "the recorded trades do not fill enough equal-volume buckets"
+                        .to_string(),
+                ),
+            ),
+        },
+        _ => (
+            None,
+            Some(
+                "no recorded trades were supplied for this session, so the volume clock cannot be built"
+                    .to_string(),
+            ),
+        ),
+    };
+    let half_second_series = if bar_ms == 1_000 {
+        Some(build_bar_series(quotes, 500))
+    } else {
+        None
+    };
+    let event_series = {
+        let mut mid = Vec::new();
+        let mut ofi = Vec::new();
+        let mut i = 0usize;
+        while i < quotes.len() {
+            let j = (i + EVENT_TIME_QUOTES_PER_BAR).min(quotes.len());
+            mid.push(quotes[j - 1].mid());
+            ofi.push(events[i..j].iter().sum());
+            i = j;
+        }
+        if mid.len() >= 30 {
+            Some(BarSeries {
+                observed: vec![true; mid.len()],
+                mid,
+                ofi,
+            })
+        } else {
+            None
+        }
+    };
+    let mut diffs: Vec<i64> = quotes
+        .windows(2)
+        .map(|w| w[1].time_ms - w[0].time_ms)
+        .filter(|d| *d > 0)
+        .collect();
+    diffs.sort_unstable();
+    let pct = |p: f64| -> f64 {
+        if diffs.is_empty() {
+            f64::NAN
+        } else {
+            diffs[((p * diffs.len() as f64) as usize).min(diffs.len() - 1)] as f64
+        }
+    };
+    let span_s = if quotes.len() >= 2 {
+        (quotes.last().unwrap().time_ms - quotes.first().unwrap().time_ms) as f64 / 1000.0
+    } else {
+        f64::NAN
+    };
+    VariantInputs {
+        quote_age_ms: status.iter().map(|s| s.quote_age_ms).collect(),
+        micro,
+        spread: bars.iter().map(|b| b.3).collect(),
+        quotes_in_bar,
+        trade_count,
+        trades_supplied,
+        trade_price,
+        volume_clock,
+        volume_clock_reason,
+        half_second_series,
+        event_series,
+        n_quotes: quotes.len(),
+        median_interquote_ms: pct(0.5),
+        p90_interquote_ms: pct(0.9),
+        mean_quotes_per_second: if span_s > 0.0 {
+            quotes.len() as f64 / span_s
+        } else {
+            f64::NAN
+        },
+    }
+}
+
+/// Counts of unobserved bars per quote-age class, plus the
+/// distinct unobserved stretches.
+pub fn gap_classification(
+    observed: &[bool],
+    quote_age_ms: &[i64],
+) -> (GapClassCounts, Vec<GapStretch>) {
+    let mut counts = GapClassCounts {
+        valid_no_update: 0,
+        stale_quote: 0,
+        confirmed_feed_loss: 0,
+    };
+    let mut stretches = Vec::new();
+    let mut i = 0usize;
+    while i < observed.len() {
+        if observed[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut max_age = 0i64;
+        while i < observed.len() && !observed[i] {
+            let age = quote_age_ms.get(i).copied().unwrap_or(0);
+            max_age = max_age.max(age);
+            match classify_quote_age(age) {
+                "valid_no_update" => counts.valid_no_update += 1,
+                "stale_quote" => counts.stale_quote += 1,
+                _ => counts.confirmed_feed_loss += 1,
+            }
+            i += 1;
+        }
+        stretches.push(GapStretch {
+            start_bar: start,
+            len_bars: i - start,
+            max_quote_age_ms: max_age,
+            class: classify_quote_age(max_age).to_string(),
+        });
+    }
+    (counts, stretches)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GapClassCounts {
+    pub valid_no_update: usize,
+    pub stale_quote: usize,
+    pub confirmed_feed_loss: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GapStretch {
+    pub start_bar: usize,
+    pub len_bars: usize,
+    pub max_quote_age_ms: i64,
+    pub class: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CensorBin {
+    pub covariate: String,
+    pub bin: usize,
+    pub lo: f64,
+    pub hi: f64,
+    pub n_origins: usize,
+    pub n_censored: usize,
+    pub censored_share: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SelectionSensitivity {
+    pub horizon_s: f64,
+    pub observed_slope_bps: f64,
+    pub n_usable: usize,
+    pub n_censored: usize,
+    pub required_censored_slope_bps: f64,
+    pub required_multiple_of_observed: f64,
+    pub statement: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GapReport {
+    pub n_unobserved_bars: usize,
+    pub class_counts: GapClassCounts,
+    pub classification_rule: String,
+    pub stretches: Vec<GapStretch>,
+    pub n_stretches: usize,
+    pub longest_stretch_bars: usize,
+    pub longest_stretch_share_of_unobserved: f64,
+    pub bars_outside_longest_stretch: usize,
+    pub longest_stretch_note: String,
+    /// Censoring tabulation at the longest horizon, by quartile
+    /// bins of each covariate (bins are fit on all potential
+    /// origins; the covariate is measured strictly before the
+    /// origin except |OFI|, which is the origin bar's own shock).
+    pub censoring_bins: Vec<CensorBin>,
+    pub n_potential_origins_h0: usize,
+    pub n_censored_h0: usize,
+    pub n_potential_origins_max_h: usize,
+    pub n_censored_max_h: usize,
+    pub selection_sensitivity: SelectionSensitivity,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PriceVariants {
+    pub micro_response_bps: Vec<f64>,
+    pub micro_response_ci_bps: Vec<(f64, f64)>,
+    pub micro_n_origins: Vec<usize>,
+    pub micro_minus_mid_bps: Vec<f64>,
+    pub trade_response_bps: Option<Vec<f64>>,
+    pub trade_response_ci_bps: Option<Vec<(f64, f64)>>,
+    pub trade_n_origins: Option<Vec<usize>>,
+    pub trade_minus_mid_bps: Option<Vec<f64>>,
+    pub trade_unavailable_reason: Option<String>,
+    pub max_abs_micro_minus_mid_bps: f64,
+    pub max_abs_trade_minus_mid_bps: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RawOfiVariant {
+    pub response_bps_per_ofi_unit: Vec<f64>,
+    pub response_ci_bps_per_ofi_unit: Vec<(f64, f64)>,
+    pub n_origins: Vec<usize>,
+    pub post_response_bps_per_ofi_unit: Vec<f64>,
+    pub conversion_note: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BurstStudy {
+    pub threshold_quantile: f64,
+    pub threshold_abs_ofi: f64,
+    pub refractory_bars: usize,
+    pub overlap_rule: String,
+    pub label: String,
+    pub n_candidate_events: usize,
+    pub n_events_retained: usize,
+    pub horizons_s: Vec<f64>,
+    pub mean_signed_response_bps: Vec<f64>,
+    pub n_clean_windows: Vec<usize>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VolumeClockVariant {
+    pub bucket_volume: f64,
+    pub n_buckets: usize,
+    pub bucket_ofi_sd: f64,
+    pub horizons_buckets: Vec<f64>,
+    pub response_bps: Vec<f64>,
+    pub response_ci_bps: Vec<(f64, f64)>,
+    pub n_origins: Vec<usize>,
+    pub estimand_note: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Stratum {
+    pub label: String,
+    pub response_bps: Vec<f64>,
+    pub n_origins: Vec<usize>,
+    pub reported: bool,
+    pub suppression_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Stratification {
+    pub dimension: String,
+    pub covariate_definition: String,
+    pub tercile_edges: (f64, f64),
+    pub min_origins_at_max_horizon: usize,
+    pub strata: Vec<Stratum>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FinerBarsVariant {
+    pub bar_ms: i64,
+    pub observed_share: f64,
+    pub horizons_s: Vec<f64>,
+    pub response_bps: Vec<f64>,
+    pub n_origins: Vec<usize>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EventTimeVariant {
+    pub quotes_per_bar: usize,
+    pub n_bars: usize,
+    pub horizons_event_bars: Vec<f64>,
+    pub response_bps: Vec<f64>,
+    pub response_ci_bps: Vec<(f64, f64)>,
+    pub n_origins: Vec<usize>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FrequencySupport {
+    pub n_quotes: usize,
+    pub median_interquote_ms: f64,
+    pub p90_interquote_ms: f64,
+    pub mean_quotes_per_second: f64,
+    pub finest_full_ladder_bar_ms: i64,
+    pub statement: String,
+    pub half_second: Option<FinerBarsVariant>,
+    pub event_time: Option<EventTimeVariant>,
+    pub event_time_unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionVariants {
+    pub gap: GapReport,
+    pub prices: PriceVariants,
+    pub raw_ofi: RawOfiVariant,
+    pub bursts: BurstStudy,
+    pub volume_clock: Option<VolumeClockVariant>,
+    pub volume_clock_unavailable_reason: Option<String>,
+    pub strata: Vec<Stratification>,
+    pub frequency: FrequencySupport,
+}
+
+/// Burst event selection under the prespecified rule: candidates
+/// are observed bars with |OFI| at or above `threshold`; scanning
+/// in time order, a candidate is accepted only if it is at least
+/// `refractory` bars after the last accepted event
+/// (first-event-wins, so accepted windows at the longest horizon
+/// never overlap).
+pub fn select_burst_events(
+    ofi: &[f64],
+    observed: &[bool],
+    threshold: f64,
+    refractory: usize,
+) -> Vec<usize> {
+    let mut events = Vec::new();
+    let mut last: Option<usize> = None;
+    for t in 1..ofi.len() {
+        if !observed[t] || ofi[t].abs() < threshold {
+            continue;
+        }
+        if let Some(l) = last {
+            if t < l + refractory.max(1) {
+                continue;
+            }
+        }
+        events.push(t);
+        last = Some(t);
+    }
+    events
+}
+
+/// Variant bootstrap: one segment-respecting resample set (same
+/// design and headline block length as the main bootstrap, seed
+/// derived from the published seed) carrying the microprice,
+/// trade-price and raw-OFI curves together, so their intervals
+/// come from the same draws as each other.
+#[allow(clippy::too_many_arguments)]
+/// Draws produced by one variant bootstrap run.
+struct VariantDraws {
+    micro: Vec<Vec<f64>>,
+    trade: Option<Vec<Vec<f64>>>,
+    raw: Vec<Vec<f64>>,
+}
+
+fn variant_bootstrap(
+    series: &BarSeries,
+    micro: &[f64],
+    trade: Option<&[f64]>,
+    horizons_bars: &[usize],
+    resamples: usize,
+    seed: u64,
+) -> VariantDraws {
+    let segments = segments_of(&series.observed);
+    let target: usize = series.observed.iter().filter(|o| **o).count();
+    let longest = segments.iter().map(|(a, b)| b - a).max().unwrap_or(0);
+    let max_h = horizons_bars.iter().copied().max().unwrap_or(0);
+    let block = (300usize + max_h).min(longest);
+    let mut micro_draws = Vec::new();
+    let mut trade_draws: Option<Vec<Vec<f64>>> = trade.map(|_| Vec::new());
+    let mut raw_draws = Vec::new();
+    if target == 0 || block <= max_h || resamples == 0 {
+        return VariantDraws {
+            micro: micro_draws,
+            trade: trade_draws,
+            raw: raw_draws,
+        };
+    }
+    let mut rng = SplitMix64(seed);
+    for _ in 0..resamples {
+        let (idxs, breaks) = resample_indices(&segments, block, target, &mut rng);
+        if idxs.len() < 30 {
+            continue;
+        }
+        let obs = vec![true; idxs.len()];
+        let all_ok = vec![true; idxs.len()];
+        let reg: Vec<f64> = idxs.iter().map(|&i| series.ofi[i]).collect();
+        let sd = population_sd(&reg);
+        if sd <= 0.0 || !sd.is_finite() {
+            continue;
+        }
+        let pick = |price: &[f64]| idxs.iter().map(|&i| price[i]).collect::<Vec<f64>>();
+        let (m, _, _, _) = lp_pair(
+            &pick(micro),
+            &reg,
+            &obs,
+            &breaks,
+            &all_ok,
+            horizons_bars,
+            sd,
+            false,
+        );
+        if m.iter().any(|v| !v.is_finite()) {
+            continue;
+        }
+        micro_draws.push(m);
+        let (r, _, _, _) = lp_pair(
+            &pick(&series.mid),
+            &reg,
+            &obs,
+            &breaks,
+            &all_ok,
+            horizons_bars,
+            1.0,
+            false,
+        );
+        if r.iter().all(|v| v.is_finite()) {
+            raw_draws.push(r);
+        }
+        if let (Some(tp), Some(draws)) = (trade, trade_draws.as_mut()) {
+            let (c, _, _, _) = lp_pair(
+                &pick(tp),
+                &reg,
+                &obs,
+                &breaks,
+                &all_ok,
+                horizons_bars,
+                sd,
+                false,
+            );
+            if c.iter().all(|v| v.is_finite()) {
+                draws.push(c);
+            }
+        }
+    }
+    VariantDraws {
+        micro: micro_draws,
+        trade: trade_draws,
+        raw: raw_draws,
+    }
+}
+
+fn quartile_edges(values: &[f64]) -> (f64, f64, f64, f64) {
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if sorted.is_empty() {
+        return (f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+    }
+    let q = |p: f64| sorted[((p * sorted.len() as f64) as usize).min(sorted.len() - 1)];
+    (sorted[0], q(0.25), q(0.5), q(0.75))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_variants(
+    series: &BarSeries,
+    inputs: &VariantInputs,
+    horizons_bars: &[usize],
+    horizons_s: &[f64],
+    ofi_sd: f64,
+    cfg: &SpeedConfig,
+) -> SessionVariants {
+    let n = series.mid.len();
+    let max_h = *horizons_bars.last().unwrap_or(&0);
+    let no_breaks = vec![false; n];
+    let all_ok = vec![true; n];
+    let idx = WindowIndex::new(&series.observed, &no_breaks);
+
+    // ---- (a) gap and censoring ----
+    let (class_counts, stretches) = gap_classification(&series.observed, &inputs.quote_age_ms);
+    let n_unobserved = n - series.observed.iter().filter(|o| **o).count();
+    let longest_stretch = stretches.iter().map(|s| s.len_bars).max().unwrap_or(0);
+    // Covariates per potential origin.
+    let activity_src: &[usize] = if inputs.trades_supplied {
+        &inputs.trade_count
+    } else {
+        &inputs.quotes_in_bar
+    };
+    let mut trailing_activity = vec![f64::NAN; n];
+    let mut trailing_spread = vec![f64::NAN; n];
+    let mut prev_vol = vec![f64::NAN; n];
+    for t in 1..n {
+        let a0 = t.saturating_sub(STRATA_ACTIVITY_WINDOW_BARS);
+        trailing_activity[t] = activity_src[a0..t].iter().sum::<usize>() as f64;
+        let s0 = t.saturating_sub(STRATA_SPREAD_WINDOW_BARS);
+        if t > s0 {
+            trailing_spread[t] = inputs.spread[s0..t].iter().sum::<f64>() / (t - s0) as f64;
+        }
+        let v0 = t.saturating_sub(61);
+        let mut rets = Vec::new();
+        for i in (v0 + 1)..t {
+            if series.observed[i] && series.observed[i - 1] && series.mid[i - 1] > 0.0 {
+                rets.push((series.mid[i] / series.mid[i - 1] - 1.0) * 1e4);
+            }
+        }
+        if rets.len() >= 10 {
+            prev_vol[t] = population_sd(&rets);
+        }
+    }
+    let cov_of = |t: usize, kind: usize| -> f64 {
+        match kind {
+            0 => trailing_activity[t],
+            1 => trailing_spread[t],
+            2 => prev_vol[t],
+            _ => series.ofi[t].abs(),
+        }
+    };
+    let cov_names = [
+        "trailing_activity_60_bars",
+        "trailing_spread_10_bars",
+        "preceding_volatility_60_bars_bps",
+        "abs_ofi_at_origin",
+    ];
+    let potential = |h: usize| -> Vec<usize> { (1..n).filter(|&t| t + h < n).collect() };
+    let (pot0, pot_max) = (potential(0), potential(max_h));
+    let censored = |t: usize, h: usize| !idx.clean(t - 1, t + h);
+    let n_cens0 = pot0.iter().filter(|&&t| censored(t, 0)).count();
+    let n_cens_max = pot_max.iter().filter(|&&t| censored(t, max_h)).count();
+    let mut censoring_bins = Vec::new();
+    for (kind, cov_name) in cov_names.iter().enumerate() {
+        let vals: Vec<f64> = pot_max.iter().map(|&t| cov_of(t, kind)).collect();
+        let (lo, q1, q2, q3) = quartile_edges(&vals);
+        let edges = [lo, q1, q2, q3, f64::INFINITY];
+        for b in 0..4 {
+            let in_bin: Vec<usize> = pot_max
+                .iter()
+                .copied()
+                .filter(|&t| {
+                    let v = cov_of(t, kind);
+                    v.is_finite() && v >= edges[b] && (b == 3 || v < edges[b + 1])
+                })
+                .collect();
+            let nc = in_bin.iter().filter(|&&t| censored(t, max_h)).count();
+            censoring_bins.push(CensorBin {
+                covariate: cov_name.to_string(),
+                bin: b,
+                lo: edges[b],
+                hi: if b == 3 {
+                    vals.iter()
+                        .copied()
+                        .filter(|v| v.is_finite())
+                        .fold(f64::NEG_INFINITY, f64::max)
+                } else {
+                    edges[b + 1]
+                },
+                n_origins: in_bin.len(),
+                n_censored: nc,
+                censored_share: if in_bin.is_empty() {
+                    f64::NAN
+                } else {
+                    nc as f64 / in_bin.len() as f64
+                },
+            });
+        }
+    }
+    let slope_max = {
+        // Inclusive slope at the longest horizon (recomputed from
+        // the headline curve would need it passed in; recompute
+        // cheaply from the series to keep this function local).
+        let (c, _, _, _) = lp_pair(
+            &series.mid,
+            &series.ofi,
+            &series.observed,
+            &no_breaks,
+            &all_ok,
+            &[max_h],
+            ofi_sd,
+            false,
+        );
+        c[0]
+    };
+    let n_usable_max = pot_max.len() - n_cens_max;
+    let required = if n_cens_max > 0 && slope_max.is_finite() {
+        -slope_max * n_usable_max as f64 / n_cens_max as f64
+    } else {
+        f64::NAN
+    };
+    let gap = GapReport {
+        n_unobserved_bars: n_unobserved,
+        class_counts,
+        classification_rule: "an unobserved bar is valid_no_update when the most recent quote was at most 2 s old at the bar end (the book simply did not change inside that second), stale_quote when the newest quote was over 2 s and at most 30 s old, and confirmed_feed_loss when the newest quote was over 30 s old at the bar end; a stretch takes the class of its oldest quote age".to_string(),
+        stretches,
+        n_stretches: 0, // filled below from stretches length
+        longest_stretch_bars: longest_stretch,
+        longest_stretch_share_of_unobserved: if n_unobserved > 0 {
+            longest_stretch as f64 / n_unobserved as f64
+        } else {
+            f64::NAN
+        },
+        bars_outside_longest_stretch: n_unobserved - longest_stretch,
+        longest_stretch_note: String::new(),
+        censoring_bins,
+        n_potential_origins_h0: pot0.len(),
+        n_censored_h0: n_cens0,
+        n_potential_origins_max_h: pot_max.len(),
+        n_censored_max_h: n_cens_max,
+        selection_sensitivity: SelectionSensitivity {
+            horizon_s: horizons_s.last().copied().unwrap_or(f64::NAN),
+            observed_slope_bps: slope_max,
+            n_usable: n_usable_max,
+            n_censored: n_cens_max,
+            required_censored_slope_bps: required,
+            required_multiple_of_observed: if slope_max.abs() > 1e-12 {
+                (required / slope_max).abs()
+            } else {
+                f64::NAN
+            },
+            statement: String::new(),
+        },
+    };
+    let mut gap = gap;
+    gap.n_stretches = gap.stretches.len();
+    gap.longest_stretch_note = if gap.n_unobserved_bars == 0 {
+        "this session has no unobserved bars".to_string()
+    } else {
+        format!(
+        "the {} unobserved bars fall in {} distinct stretches; the longest is {} bars and the remaining {} bars fall in the other {} stretches",
+        gap.n_unobserved_bars,
+        gap.n_stretches,
+        gap.longest_stretch_bars,
+        gap.bars_outside_longest_stretch,
+        gap.n_stretches.saturating_sub(1),
+        )
+    };
+    gap.selection_sensitivity.statement = if gap.selection_sensitivity.n_censored == 0 {
+        "no origins are censored at any horizon in this session (the session has no unobserved bars), so censoring selection cannot affect this session's estimates".to_string()
+    } else {
+        format!(
+        "at the {} s horizon {} of {} potential origins are censored. Under an equal-regressor-variance approximation, the censored origins would need an average response of {:+.3} bps per SD ({:.2}x the usable origins' {:+.3} bps, and of the opposite sign) for the pooled response at this horizon to be zero; selection weaker than that changes the size of the estimate, not its sign. This is a bound on what censoring alone could do, not evidence about what the censored origins actually did.",
+        horizons_s.last().copied().unwrap_or(f64::NAN),
+        gap.selection_sensitivity.n_censored,
+        gap.n_potential_origins_max_h,
+        gap.selection_sensitivity.required_censored_slope_bps,
+        gap.selection_sensitivity.required_multiple_of_observed,
+        gap.selection_sensitivity.observed_slope_bps,
+        )
+    };
+
+    // ---- (b) price variants and (c) raw OFI ----
+    let (micro_curve, micro_counts, _, _) = lp_pair(
+        &inputs.micro,
+        &series.ofi,
+        &series.observed,
+        &no_breaks,
+        &all_ok,
+        horizons_bars,
+        ofi_sd,
+        false,
+    );
+    let (trade_curve, trade_counts) = match &inputs.trade_price {
+        Some(tp) => {
+            let (c, k, _, _) = lp_pair(
+                tp,
+                &series.ofi,
+                &series.observed,
+                &no_breaks,
+                &all_ok,
+                horizons_bars,
+                ofi_sd,
+                false,
+            );
+            (Some(c), Some(k))
+        }
+        None => (None, None),
+    };
+    let (raw_curve, raw_counts, raw_post, _) = lp_pair(
+        &series.mid,
+        &series.ofi,
+        &series.observed,
+        &no_breaks,
+        &all_ok,
+        horizons_bars,
+        1.0,
+        true,
+    );
+    let VariantDraws {
+        micro: micro_draws,
+        trade: trade_draws,
+        raw: raw_draws,
+    } = variant_bootstrap(
+        series,
+        &inputs.micro,
+        inputs.trade_price.as_deref(),
+        horizons_bars,
+        cfg.sensitivity_resamples,
+        cfg.seed ^ 0x5EED_0000_0000_0001,
+    );
+    let h_len = horizons_bars.len();
+    let mid_curve: Vec<f64> = {
+        let (c, _, _, _) = lp_pair(
+            &series.mid,
+            &series.ofi,
+            &series.observed,
+            &no_breaks,
+            &all_ok,
+            horizons_bars,
+            ofi_sd,
+            false,
+        );
+        c
+    };
+    let diff =
+        |a: &[f64]| -> Vec<f64> { a.iter().zip(mid_curve.iter()).map(|(x, m)| x - m).collect() };
+    let max_abs = |a: &[f64]| {
+        a.iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .fold(0.0f64, |m, v| m.max(v.abs()))
+    };
+    let prices = PriceVariants {
+        micro_minus_mid_bps: diff(&micro_curve),
+        max_abs_micro_minus_mid_bps: max_abs(&diff(&micro_curve)),
+        micro_response_ci_bps: draws_ci(&micro_draws, h_len),
+        micro_response_bps: micro_curve,
+        micro_n_origins: micro_counts,
+        trade_minus_mid_bps: trade_curve.as_ref().map(|c| diff(c)),
+        max_abs_trade_minus_mid_bps: trade_curve.as_ref().map(|c| max_abs(&diff(c))),
+        trade_response_ci_bps: trade_draws.as_ref().map(|d| draws_ci(d, h_len)),
+        trade_response_bps: trade_curve,
+        trade_n_origins: trade_counts,
+        trade_unavailable_reason: if inputs.trade_price.is_some() {
+            None
+        } else {
+            Some("no recorded trades were supplied for this session, so no trade-price series can be built".to_string())
+        },
+    };
+    let raw_ofi = RawOfiVariant {
+        response_bps_per_ofi_unit: raw_curve,
+        response_ci_bps_per_ofi_unit: draws_ci(&raw_draws, h_len),
+        n_origins: raw_counts,
+        post_response_bps_per_ofi_unit: raw_post,
+        conversion_note: format!(
+            "raw-OFI slopes are in basis points per one unit of per-bar OFI; the per-SD curve is this curve multiplied by the session OFI standard deviation ({ofi_sd:.4} here), so the two are the same estimates on different shock scales"
+        ),
+    };
+
+    // ---- (d) burst event study ----
+    let obs_abs: Vec<f64> = series
+        .ofi
+        .iter()
+        .zip(series.observed.iter())
+        .filter(|(_, o)| **o)
+        .map(|(v, _)| v.abs())
+        .collect();
+    let threshold = percentile(&obs_abs, BURST_QUANTILE);
+    let n_candidates = (1..n)
+        .filter(|&t| series.observed[t] && series.ofi[t].abs() >= threshold)
+        .count();
+    let events = select_burst_events(
+        &series.ofi,
+        &series.observed,
+        threshold,
+        BURST_REFRACTORY_BARS,
+    );
+    let mut burst_means = Vec::with_capacity(h_len);
+    let mut burst_counts = Vec::with_capacity(h_len);
+    for &h in horizons_bars {
+        let mut vals = Vec::new();
+        for &t in &events {
+            let end = t + h;
+            if end < n && idx.clean(t - 1, end) && series.mid[t - 1] > 0.0 {
+                vals.push(
+                    series.ofi[t].signum() * (series.mid[end] / series.mid[t - 1] - 1.0) * 1e4,
+                );
+            }
+        }
+        burst_counts.push(vals.len());
+        burst_means.push(if vals.len() >= BURST_MIN_WINDOWS {
+            vals.iter().sum::<f64>() / vals.len() as f64
+        } else {
+            f64::NAN
+        });
+    }
+    let bursts = BurstStudy {
+        threshold_quantile: BURST_QUANTILE,
+        threshold_abs_ofi: threshold,
+        refractory_bars: BURST_REFRACTORY_BARS,
+        overlap_rule: "first-event-wins with a 300-bar refractory window: after an accepted event, candidate bursts within the next 300 bars are skipped, so accepted event windows at the longest horizon never overlap".to_string(),
+        label: "conditional result for extreme events only: this is the mean signed response around the largest OFI bursts, not the average response to a typical shock, and it must not be read as one".to_string(),
+        n_candidate_events: n_candidates,
+        n_events_retained: events.len(),
+        horizons_s: horizons_s.to_vec(),
+        mean_signed_response_bps: burst_means,
+        n_clean_windows: burst_counts,
+    };
+
+    // ---- (e) volume clock ----
+    let (volume_clock, volume_clock_reason) = match &inputs.volume_clock {
+        Some((price, ofi, vol)) => {
+            let bs = BarSeries {
+                mid: price.clone(),
+                ofi: ofi.clone(),
+                observed: vec![true; price.len()],
+            };
+            let bsd = population_sd(&bs.ofi);
+            if bsd > 0.0 && bs.mid.len() > max_h + 100 {
+                let nb = bs.mid.len();
+                let (c, k, _, _) = lp_pair(
+                    &bs.mid,
+                    &bs.ofi,
+                    &bs.observed,
+                    &vec![false; nb],
+                    &vec![true; nb],
+                    horizons_bars,
+                    bsd,
+                    false,
+                );
+                let boot = bootstrap_engine(
+                    &bs,
+                    None,
+                    horizons_bars,
+                    horizons_s,
+                    300,
+                    cfg.sensitivity_resamples,
+                    cfg.seed ^ 0xB0C1_0000_0000_0002,
+                    false,
+                    false,
+                );
+                (
+                    Some(VolumeClockVariant {
+                        bucket_volume: *vol,
+                        n_buckets: nb,
+                        bucket_ofi_sd: bsd,
+                        horizons_buckets: horizons_s.to_vec(),
+                        response_ci_bps: draws_ci(&boot.incl, h_len),
+                        response_bps: c,
+                        n_origins: k,
+                        estimand_note: "separate volume-time estimand: horizons are equal-volume buckets, not seconds, and this curve is not a seconds-based speed and is not comparable rung-by-rung with the clock-time curves".to_string(),
+                    }),
+                    None,
+                )
+            } else {
+                (
+                    None,
+                    Some(
+                        "the volume-clock series is too short for the longest horizon".to_string(),
+                    ),
+                )
+            }
+        }
+        None => (None, inputs.volume_clock_reason.clone()),
+    };
+
+    // ---- (g) pre-shock state stratification ----
+    let mut strata = Vec::new();
+    for kind in 0..2usize {
+        let (dimension, definition, cov): (&str, String, Vec<f64>) = if kind == 0 {
+            (
+                "pre_shock_activity",
+                format!(
+                    "sum of {} in the {} bars strictly before the origin (trailing window ends at the bar before the shock bar)",
+                    if inputs.trades_supplied { "trades" } else { "quotes" },
+                    STRATA_ACTIVITY_WINDOW_BARS
+                ),
+                trailing_activity.clone(),
+            )
+        } else {
+            (
+                "pre_shock_spread",
+                format!(
+                    "mean quoted spread over the {} bars strictly before the origin",
+                    STRATA_SPREAD_WINDOW_BARS
+                ),
+                trailing_spread.clone(),
+            )
+        };
+        let finite: Vec<f64> = cov.iter().copied().filter(|v| v.is_finite()).collect();
+        let mut sorted = finite.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let terc = |p: f64| -> f64 {
+            if sorted.is_empty() {
+                f64::NAN
+            } else {
+                sorted[((p * sorted.len() as f64) as usize).min(sorted.len() - 1)]
+            }
+        };
+        let (e1, e2) = (terc(1.0 / 3.0), terc(2.0 / 3.0));
+        let mut stratum_list = Vec::new();
+        for (si, label) in ["low", "middle", "high"].iter().enumerate() {
+            let ok: Vec<bool> = (0..n)
+                .map(|t| {
+                    let v = cov[t];
+                    v.is_finite()
+                        && match si {
+                            0 => v <= e1,
+                            1 => v > e1 && v <= e2,
+                            _ => v > e2,
+                        }
+                })
+                .collect();
+            let (c, k, _, _) = lp_pair(
+                &series.mid,
+                &series.ofi,
+                &series.observed,
+                &no_breaks,
+                &ok,
+                horizons_bars,
+                ofi_sd,
+                false,
+            );
+            let reported = *k.last().unwrap_or(&0) >= STRATUM_MIN_ORIGINS_AT_MAX_HORIZON
+                && k.iter().all(|&x| x >= 30);
+            stratum_list.push(Stratum {
+                label: label.to_string(),
+                response_bps: if reported { c } else { Vec::new() },
+                n_origins: k.clone(),
+                reported,
+                suppression_reason: if reported {
+                    None
+                } else {
+                    Some(format!(
+                        "suppressed: {} usable origins at the longest horizon, below the prespecified minimum of {}",
+                        k.last().copied().unwrap_or(0),
+                        STRATUM_MIN_ORIGINS_AT_MAX_HORIZON
+                    ))
+                },
+            });
+        }
+        strata.push(Stratification {
+            dimension: dimension.to_string(),
+            covariate_definition: definition,
+            tercile_edges: (e1, e2),
+            min_origins_at_max_horizon: STRATUM_MIN_ORIGINS_AT_MAX_HORIZON,
+            strata: stratum_list,
+        });
+    }
+
+    // ---- (h) frequency support ----
+    let half_second = inputs.half_second_series.as_ref().map(|hs| {
+        let hn = hs.mid.len();
+        let hsd = population_sd(
+            &hs.ofi
+                .iter()
+                .zip(hs.observed.iter())
+                .filter(|(_, o)| **o)
+                .map(|(v, _)| *v)
+                .collect::<Vec<_>>(),
+        );
+        let hbars: Vec<usize> = horizons_s.iter().map(|s| (s * 2.0) as usize).collect();
+        let (c, k, _, _) = if hsd > 0.0 && hsd.is_finite() {
+            lp_pair(&hs.mid, &hs.ofi, &hs.observed, &vec![false; hn], &vec![true; hn], &hbars, hsd, false)
+        } else {
+            (vec![f64::NAN; h_len], vec![0; h_len], Vec::new(), Vec::new())
+        };
+        let obs_share = hs.observed.iter().filter(|o| **o).count() as f64 / hn.max(1) as f64;
+        FinerBarsVariant {
+            bar_ms: 500,
+            observed_share: obs_share,
+            horizons_s: horizons_s.to_vec(),
+            response_bps: c,
+            n_origins: k,
+            note: "500 ms bars formed from the same quote stream; a clean response window at horizon h needs 2h+1 consecutive observed half-second bars, and rungs with fewer than 30 usable origins are not estimated (null). This is a resolution sensitivity on the published one-second grid, not a replacement for it.".to_string(),
+        }
+    });
+    let (event_time, event_reason) = match &inputs.event_series {
+        Some(es) if es.mid.len() > max_h + 100 => {
+            let en = es.mid.len();
+            let esd = population_sd(&es.ofi);
+            let (c, k, _, _) = lp_pair(&es.mid, &es.ofi, &es.observed, &vec![false; en], &vec![true; en], horizons_bars, esd, false);
+            let boot = bootstrap_engine(es, None, horizons_bars, horizons_s, 300, cfg.sensitivity_resamples, cfg.seed ^ 0x5EED_0000_0000_0003, false, false);
+            (
+                Some(EventTimeVariant {
+                    quotes_per_bar: EVENT_TIME_QUOTES_PER_BAR,
+                    n_bars: en,
+                    horizons_event_bars: horizons_s.to_vec(),
+                    response_ci_bps: draws_ci(&boot.incl, h_len),
+                    response_bps: c,
+                    n_origins: k,
+                    note: "event-time sensitivity: bars are blocks of 10 consecutive quote updates, so horizons are event-bar counts, not seconds; this checks whether the response shape is an artefact of the one-second clock grid, and its rungs are not seconds-based speeds".to_string(),
+                }),
+                None,
+            )
+        }
+        _ => (
+            None,
+            Some("the session's quote stream does not produce enough event-time bars for the longest horizon".to_string()),
+        ),
+    };
+    let frequency = FrequencySupport {
+        n_quotes: inputs.n_quotes,
+        median_interquote_ms: inputs.median_interquote_ms,
+        p90_interquote_ms: inputs.p90_interquote_ms,
+        mean_quotes_per_second: inputs.mean_quotes_per_second,
+        finest_full_ladder_bar_ms: 500,
+        statement: format!(
+            "the recordings are quote-update streams (median inter-quote gap {:.0} ms, 90th percentile {:.0} ms, {:.1} quotes per second on average). A 500 ms grid is {:.1}% observed in this session and supports the full 0-300 s ladder under the censoring rule, so the half-second curve is reported as a resolution sensitivity and 500 ms is the finest fully supported clock resolution on these recordings; finer clock grids were not attempted, because at a {:.0} ms median inter-quote gap a 100 ms grid would leave most bars unobserved and collapse the clean-window counts. The published grid stays at one second, and an event-time variant ({} quote updates per bar) is reported alongside",
+            inputs.median_interquote_ms,
+            inputs.p90_interquote_ms,
+            inputs.mean_quotes_per_second,
+            inputs
+                .half_second_series
+                .as_ref()
+                .map(|hs| {
+                    100.0 * hs.observed.iter().filter(|o| **o).count() as f64
+                        / hs.observed.len().max(1) as f64
+                })
+                .unwrap_or(f64::NAN),
+            inputs.median_interquote_ms,
+            EVENT_TIME_QUOTES_PER_BAR
+        ),
+        half_second,
+        event_time,
+        event_time_unavailable_reason: event_reason,
+    };
+
+    SessionVariants {
+        gap,
+        prices,
+        raw_ofi,
+        bursts,
+        volume_clock,
+        volume_clock_unavailable_reason: volume_clock_reason,
+        strata,
+        frequency,
+    }
+}
+
+/// Pooled description over the sessions in the report: a
+/// precision-weighted and an equal-weight mean curve, plus a
+/// session-demeaned shape. This is a description of these
+/// sessions only (six clusters); it carries no pooled tau, no
+/// half-life, and no market-wide claim.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PooledDescription {
+    pub n_sessions: usize,
+    pub horizons_s: Vec<f64>,
+    pub precision_weighted_response_bps: Vec<f64>,
+    pub equal_weight_response_bps: Vec<f64>,
+    pub session_demeaned_shape_bps: Vec<f64>,
+    pub response_range_bps: Vec<(f64, f64)>,
+    pub pooled_tau_reported: bool,
+    pub label: String,
+}
+
+pub fn pooled_description(sessions: &[SessionSpeed]) -> PooledDescription {
+    let horizons_s = sessions
+        .first()
+        .map(|s| s.horizons_s.clone())
+        .unwrap_or_default();
+    let h_len = horizons_s.len();
+    let mut precision_weighted = vec![f64::NAN; h_len];
+    let mut equal_weight = vec![f64::NAN; h_len];
+    let mut demeaned = vec![f64::NAN; h_len];
+    let mut range = vec![(f64::NAN, f64::NAN); h_len];
+    for k in 0..h_len {
+        let mut wsum = 0.0;
+        let mut acc = 0.0;
+        let mut plain = Vec::new();
+        for s in sessions {
+            let v = s.response_bps[k];
+            if !v.is_finite() {
+                continue;
+            }
+            plain.push(v);
+            let (lo, hi) = s.response_ci_bps[k];
+            let width = hi - lo;
+            let w = if width > 0.0 && width.is_finite() {
+                let sd = width / (2.0 * 1.96);
+                1.0 / (sd * sd)
+            } else {
+                0.0
+            };
+            if w > 0.0 {
+                wsum += w;
+                acc += w * v;
+            }
+        }
+        if wsum > 0.0 {
+            precision_weighted[k] = acc / wsum;
+        }
+        if !plain.is_empty() {
+            equal_weight[k] = plain.iter().sum::<f64>() / plain.len() as f64;
+            range[k] = (
+                plain.iter().copied().fold(f64::INFINITY, f64::min),
+                plain.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            );
+        }
+        // Session-demeaned shape: remove each session's own mean
+        // response across horizons, then average what is left.
+        let mut dacc = 0.0;
+        let mut dn = 0usize;
+        for s in sessions {
+            let finite: Vec<f64> = s
+                .response_bps
+                .iter()
+                .copied()
+                .filter(|v| v.is_finite())
+                .collect();
+            if finite.is_empty() || !s.response_bps[k].is_finite() {
+                continue;
+            }
+            let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+            dacc += s.response_bps[k] - mean;
+            dn += 1;
+        }
+        if dn > 0 {
+            demeaned[k] = dacc / dn as f64;
+        }
+    }
+    PooledDescription {
+        n_sessions: sessions.len(),
+        horizons_s,
+        precision_weighted_response_bps: precision_weighted,
+        equal_weight_response_bps: equal_weight,
+        session_demeaned_shape_bps: demeaned,
+        response_range_bps: range,
+        pooled_tau_reported: false,
+        label: "description of these six recorded sessions only (six clusters): a pooled summary of this sample, not a population or market-wide estimate, and no pooled tau or half-life is reported".to_string(),
+    }
+}
+
+/// The report-level variants block (schema v2 extension).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReportVariants {
+    pub pooled: PooledDescription,
+    pub prespecified_rules: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+pub fn report_variants(sessions: &[SessionSpeed]) -> ReportVariants {
+    ReportVariants {
+        pooled: pooled_description(sessions),
+        prespecified_rules: vec![
+            format!("burst events: |OFI| at or above the session's {:.0}th percentile of |OFI| over observed bars, first-event-wins with a {}-bar refractory window, means suppressed below {} clean windows per horizon", BURST_QUANTILE * 100.0, BURST_REFRACTORY_BARS, BURST_MIN_WINDOWS),
+            format!("strata: terciles of the pre-shock covariate per session, reported only with at least {} usable origins at the longest horizon and at least 30 at every horizon", STRATUM_MIN_ORIGINS_AT_MAX_HORIZON),
+            "volume clock: equal-volume buckets at a bucket volume of total traded volume divided by the session's one-second bar count; horizons are bucket counts".to_string(),
+            format!("event time: bars of {} consecutive quote updates; horizons are event-bar counts", EVENT_TIME_QUOTES_PER_BAR),
+            "gap classes by quote age at the unobserved bar's end: at most 2 s valid_no_update, at most 30 s stale_quote, beyond that confirmed_feed_loss".to_string(),
+        ],
+        notes: vec![
+            "Variants are published alongside the headline curves under the same frozen protocol (same sessions, horizons, timing conventions and censoring rule); variant intervals use the same segment-respecting bootstrap design at the sensitivity resample count with seeds derived from the published seed.".to_string(),
+            "The burst event study is a conditional result for extreme events only. The volume-clock and event-time curves are separate estimands whose horizons are buckets and event bars, not seconds. The pooled block describes these six sessions only and reports no pooled tau or half-life.".to_string(),
+        ],
     }
 }
 
@@ -2801,7 +4163,7 @@ mod tests {
                 .collect(),
             observed: vec![true; n],
         };
-        let res = analyze_series("flat", &series, 1798.0, &small_cfg()).expect("analysis");
+        let res = analyze_series("flat", &series, 1798.0, &small_cfg(), None).expect("analysis");
         assert_eq!(res.post_response_bps[0], 0.0);
         assert!(res.profile.shares.iter().all(|sh| sh.suppressed));
         assert!(res
@@ -2891,7 +4253,7 @@ mod tests {
         let rho = (-1.0f64 / 20.0).exp();
         let series = synth_series(1799, rho, 9.0);
         let cfg = small_cfg();
-        let res = analyze_series("synth", &series, 1798.0, &cfg).expect("analysis");
+        let res = analyze_series("synth", &series, 1798.0, &cfg, None).expect("analysis");
         let report = summarize_speed(vec![res], &cfg);
         let v: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
         assert_eq!(v["schema"], "toxicflow.info-speed/v2");
@@ -2906,6 +4268,221 @@ mod tests {
         assert!(s0["response_bps"].is_array());
         assert!(s0["bootstrap_fit_share"].is_number());
         assert!(v["summary"]["n_sessions"] == 1);
+    }
+
+    #[test]
+    fn gap_classification_counts_known_stretches() {
+        // Observed bars with three unobserved stretches: a fresh
+        // 2-bar no-update stretch (ages 800, 1800 ms), a stale
+        // 1-bar stretch (age 12 s), and a feed-loss stretch whose
+        // ages run 45 s and 300 s.
+        let observed = vec![
+            true, true, false, false, true, false, true, false, false, true,
+        ];
+        let ages = vec![0, 0, 800, 1800, 0, 12_000, 0, 45_000, 300_000, 0];
+        let (counts, stretches) = gap_classification(&observed, &ages);
+        assert_eq!(counts.valid_no_update, 2);
+        assert_eq!(counts.stale_quote, 1);
+        assert_eq!(counts.confirmed_feed_loss, 2);
+        assert_eq!(stretches.len(), 3);
+        assert_eq!(stretches[0].len_bars, 2);
+        assert_eq!(stretches[0].class, "valid_no_update");
+        assert_eq!(stretches[1].class, "stale_quote");
+        assert_eq!(stretches[2].len_bars, 2);
+        assert_eq!(stretches[2].class, "confirmed_feed_loss");
+        assert_eq!(classify_quote_age(2_000), "valid_no_update");
+        assert_eq!(classify_quote_age(2_001), "stale_quote");
+        assert_eq!(classify_quote_age(30_001), "confirmed_feed_loss");
+    }
+
+    #[test]
+    fn microprice_construction_on_a_known_book() {
+        // One bar, two quotes: the bar microprice is the last
+        // quote's size-weighted price (bid weighted by ask size).
+        let q = |t: i64, bp: f64, bq: f64, ap: f64, aq: f64| Quote {
+            time_ms: t,
+            bid_px: bp,
+            bid_sz: bq,
+            ask_px: ap,
+            ask_sz: aq,
+        };
+        let quotes = vec![
+            q(0, 100.0, 1.0, 101.0, 3.0),   // micro (100*3 + 101*1)/4 = 100.25
+            q(500, 100.0, 3.0, 101.0, 1.0), // micro (100*1 + 101*3)/4 = 100.75
+            q(3_000, 102.0, 1.0, 103.0, 1.0),
+        ];
+        let inputs = build_variant_inputs(&quotes, None, 1_000);
+        assert_eq!(inputs.micro.len(), 4);
+        assert!(
+            (inputs.micro[0] - 100.75).abs() < 1e-12,
+            "micro {}",
+            inputs.micro[0]
+        );
+        // Unobserved bars carry the last observed microprice.
+        assert!((inputs.micro[1] - 100.75).abs() < 1e-12);
+        assert!((inputs.micro[2] - 100.75).abs() < 1e-12);
+        assert!((inputs.micro[3] - 102.5).abs() < 1e-12);
+        assert_eq!(inputs.quotes_in_bar, vec![2, 0, 0, 1]);
+    }
+
+    #[test]
+    fn burst_selection_is_first_event_wins_with_refractory() {
+        // Bursts at t = 10, 20, 400 with a 300-bar refractory:
+        // t = 20 falls inside t = 10's window and is skipped.
+        let n = 1_000;
+        let mut ofi = vec![0.0; n];
+        ofi[10] = 100.0;
+        ofi[20] = -100.0;
+        ofi[400] = 100.0;
+        let observed = vec![true; n];
+        let events = select_burst_events(&ofi, &observed, 50.0, 300);
+        assert_eq!(events, vec![10, 400]);
+        // A burst on an unobserved bar is never an event.
+        let mut obs2 = observed.clone();
+        obs2[400] = false;
+        assert_eq!(select_burst_events(&ofi, &obs2, 50.0, 300), vec![10]);
+    }
+
+    #[test]
+    fn volume_clock_bucket_invariants() {
+        // 100 trades of 0.1 base units at alternating prices and
+        // a steady quote stream: target 10 buckets of 1.0 each.
+        let trades: Vec<Trade> = (0..100)
+            .map(|i| Trade {
+                time_ms: i * 100,
+                price: 100.0 + (i % 2) as f64,
+                qty: 0.1,
+                is_buyer_maker: i % 2 == 0,
+            })
+            .collect();
+        let quotes: Vec<Quote> = (0..100)
+            .map(|i| Quote {
+                time_ms: i * 100,
+                bid_px: 99.9,
+                bid_sz: 1.0 + (i % 3) as f64,
+                ask_px: 100.1,
+                ask_sz: 1.0,
+            })
+            .collect();
+        let (price, ofi, vol) =
+            build_volume_clock_series(&trades, &quotes, 50).expect("volume clock");
+        assert_eq!(price.len(), 50);
+        assert_eq!(ofi.len(), 50);
+        assert!((vol - 0.2).abs() < 1e-9, "bucket vol {vol}");
+        // Every bucket closes on the trade that filled it: bucket
+        // k ends with trade 2k+1, whose price is 101 (odd index).
+        assert!(price.iter().all(|p| (*p - 101.0).abs() < 1e-12));
+        // Bucket OFI sums to the total quote OFI inside the
+        // covered window.
+        let events = ofi_events(&quotes);
+        let total: f64 = events.iter().sum();
+        let bucketed: f64 = ofi.iter().sum();
+        assert!((bucketed - total).abs() < 1e-9, "{bucketed} vs {total}");
+    }
+
+    #[test]
+    fn raw_ofi_curve_is_the_per_sd_curve_rescaled() {
+        let rho = (-1.0f64 / 20.0).exp();
+        let series = synth_series(3_000, rho, 9.0);
+        let ofi_sd = population_sd(&series.ofi);
+        let horizons_bars: Vec<usize> = SPEED_HORIZONS_S.iter().map(|s| *s as usize).collect();
+        let n = series.mid.len();
+        let (per_sd, _, _, _) = lp_pair(
+            &series.mid,
+            &series.ofi,
+            &series.observed,
+            &vec![false; n],
+            &vec![true; n],
+            &horizons_bars,
+            ofi_sd,
+            false,
+        );
+        let (raw, _, _, _) = lp_pair(
+            &series.mid,
+            &series.ofi,
+            &series.observed,
+            &vec![false; n],
+            &vec![true; n],
+            &horizons_bars,
+            1.0,
+            false,
+        );
+        for k in 0..horizons_bars.len() {
+            assert!(
+                (raw[k] * ofi_sd - per_sd[k]).abs() < 1e-9,
+                "horizon {k}: raw {} x sd != per-SD {}",
+                raw[k],
+                per_sd[k]
+            );
+        }
+    }
+
+    #[test]
+    fn variants_end_to_end_on_a_synthetic_session() {
+        // 1,799 one-second quotes with wandering sizes (so OFI
+        // varies) and matching trades: the full variants block
+        // must be produced, with the gap report finding no
+        // unobserved bars and the volume clock available.
+        let mut s: u64 = 0xC0FFEE;
+        let n = 1799;
+        let mut price = 100_000.0f64;
+        let mut quotes = Vec::with_capacity(n);
+        let mut trades = Vec::with_capacity(n);
+        for i in 0..n {
+            let u = xorshift(&mut s) * 2.0 - 1.0;
+            price *= 1.0 + u * 0.0002;
+            quotes.push(Quote {
+                time_ms: i as i64 * 1_000,
+                bid_px: price - 0.05,
+                bid_sz: 1.0 + (xorshift(&mut s) + 1.0) * 2.0,
+                ask_px: price + 0.05,
+                ask_sz: 1.0 + (xorshift(&mut s) + 1.0) * 2.0,
+            });
+            trades.push(Trade {
+                time_ms: i as i64 * 1_000 + 500,
+                price,
+                qty: 0.01,
+                is_buyer_maker: i % 2 == 0,
+            });
+        }
+        let res = analyze_session_speed_with_trades(
+            "synth-variants",
+            &quotes,
+            Some(&trades),
+            &small_cfg(),
+        )
+        .expect("analysis");
+        let v = res.variants.as_ref().expect("variants present");
+        assert_eq!(v.gap.n_unobserved_bars, 0);
+        assert_eq!(v.gap.n_stretches, 0);
+        assert_eq!(v.gap.n_censored_h0, 0);
+        assert!(v.prices.trade_response_bps.is_some());
+        assert!(v.prices.micro_response_bps.iter().all(|x| x.is_finite()));
+        assert!(v
+            .raw_ofi
+            .response_bps_per_ofi_unit
+            .iter()
+            .all(|x| x.is_finite()));
+        assert!(v.bursts.threshold_abs_ofi > 0.0);
+        assert!(
+            v.volume_clock.is_some(),
+            "volume clock: {:?}",
+            v.volume_clock_unavailable_reason
+        );
+        assert_eq!(v.strata.len(), 2);
+        assert!(v.frequency.half_second.is_some());
+        // The report-level pooled block describes the session set
+        // and never reports a pooled tau.
+        let report = summarize_speed(vec![res], &small_cfg());
+        assert_eq!(report.variants.pooled.n_sessions, 1);
+        assert!(!report.variants.pooled.pooled_tau_reported);
+        let j: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+        assert!(j["variants"]["pooled"].is_object());
+        assert!(j["sessions"][0]["variants"]["gap"].is_object());
+        assert_eq!(
+            j["sessions"][0]["variants"]["bursts"]["threshold_quantile"],
+            0.95
+        );
     }
 
     #[test]
