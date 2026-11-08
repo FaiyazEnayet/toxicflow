@@ -1,16 +1,18 @@
-//! Information incorporation speed runner: estimates the
-//! cumulative mid-price response to a one-standard-deviation OFI
-//! shock, and the exponential adjustment time constant, for each
+//! OFI-price response runner: estimates the cumulative mid-price
+//! response to a one-standard-deviation OFI shock (both timing
+//! conventions, with the model-free profile, innovation
+//! projections, and the jump-term adjustment fit), for each
 //! recorded session directory named on the command line, and
 //! writes the multi-session report as JSON.
 //!
 //! Usage: info_speed <out.json> <session_dir> [<session_dir> ...]
 //!
 //! A session directory holds quotes.parquet and trades.parquet as
-//! written by the recorder (only quotes are read here). Order-flow
-//! shocks are the information-arrival proxy: the sessions carry no
-//! news timestamps, and the report says so in its own notes.
-//! Sessions are the report's sample unit, never bars.
+//! written by the recorder (only quotes are read here). The
+//! estimand is observational: order flow and prices come from the
+//! same quote stream and the sessions carry no news timestamps,
+//! and the report says so in its own notes. Sessions are the
+//! report's sample unit, never bars.
 
 use toxicflow::{speed, storage};
 
@@ -43,7 +45,7 @@ fn run() -> Result<(), String> {
                         s.response_bps.last().copied().unwrap_or(f64::NAN)
                     ),
                     _ => println!(
-                        "{label}: {} bars, response {:+.2} bps at 300 s, exponential fit not reported: {}",
+                        "{label}: {} bars, response {:+.2} bps at 300 s, exponential adjustment fit not reported: {}",
                         s.n_bars,
                         s.response_bps.last().copied().unwrap_or(f64::NAN),
                         s.fit_failure.as_deref().unwrap_or("unknown reason")
