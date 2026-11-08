@@ -367,6 +367,9 @@ fn run_one(
                     "max_h": e.horizons_s.last().copied().unwrap_or(f64::NAN),
                     "fit_tau_s": e.fit_tau_s, "fit_r2": e.fit_r_squared,
                     "cov": ecov, "ci": eci, "n_resamples": e.n_resamples,
+                    "pool_distinct_starts": e.resample_pool.distinct_starts,
+                    "pool_distinct_drawn": e.resample_pool.distinct_blocks_drawn,
+                    "pool_degenerate": e.resample_pool.degenerate,
                 });
             }
             // Diagnostic fields: interval bounds and HAC coverage
@@ -398,6 +401,9 @@ fn run_one(
                 "region_tau_ci": s.fit_region.as_ref().map(|r| r.tau_ci_s),
                 "cov_pt": cov_pt, "cov_sim": cov_sim, "est": est,
                 "ci": ci_map, "hac_cov": hac_cov,
+                "pool_distinct_starts": s.resample_pool.distinct_starts,
+                "pool_distinct_drawn": s.resample_pool.distinct_blocks_drawn,
+                "pool_degenerate": s.resample_pool.degenerate,
                 "fit_jump_raw": s.fit_jump_raw_bps, "fit_rinf_raw": s.fit_r_inf_raw_bps,
                 "truth_resp": {"0": pop[0], "60": pop[60], "300": pop[300],
                                "900": pop[900], "1500": pop[1500]},
