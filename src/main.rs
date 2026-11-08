@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::Message;
 use toxicflow::metrics::{
     kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, LiveVpin, Quote, Trade,
 };
-use toxicflow::{predict, recorder, storage, strategy};
+use toxicflow::{predict, recorder, speed, storage, strategy};
 
 #[derive(Parser)]
 #[command(name = "toxicflow", about = "Order-flow toxicity on free crypto data")]
@@ -161,6 +161,33 @@ fn analyze(
     let sd = (ofis.iter().map(|x| (x - m).powi(2)).sum::<f64>() / ofis.len() as f64).sqrt();
     println!("OFI per 10s bar: mean {m:+.4}, std {sd:.4}");
 
+    // information incorporation speed (order-flow shocks are the
+    // information-arrival proxy; the session has no news timestamps)
+    let speed_cfg = speed::SpeedConfig::default();
+    match speed::analyze_session_speed(dir, &quotes, &speed_cfg) {
+        Some(s) => {
+            println!("\ninformation speed (1s bars, response to a 1 SD OFI shock, bps):");
+            let curve: Vec<String> = s
+                .horizons_s
+                .iter()
+                .zip(s.response_bps.iter())
+                .map(|(h, r)| format!("{h:.0}s {r:+.2}"))
+                .collect();
+            println!("  {}", curve.join("  "));
+            match (s.tau_s, s.half_life_s, s.r_inf_bps) {
+                (Some(tau), Some(half), Some(rinf)) => println!(
+                    "  exponential fit: long-run {rinf:+.2} bps, tau {tau:.1}s, half-life {half:.1}s (R^2 {:.3})",
+                    s.fit_r_squared.unwrap_or(f64::NAN)
+                ),
+                _ => println!(
+                    "  exponential fit not reported: {}",
+                    s.fit_failure.as_deref().unwrap_or("unknown reason")
+                ),
+            }
+        }
+        None => println!("\ninformation speed: session too short or no OFI variation"),
+    }
+
     // prediction
     println!("\nshort-horizon prediction (10s bars, 30s horizon):");
     let ds = predict::build_dataset(&quotes, &trades, 10_000, 3);
@@ -293,6 +320,25 @@ fn export_session(
             .collect::<Vec<_>>(),
     )?;
 
+    // information incorporation speed curve (same estimator as the
+    // analyze section; the dashboard data gains a speed.csv next to
+    // the other series and a speed block in the summary)
+    let speed_cfg = speed::SpeedConfig::default();
+    let speed_res = speed::analyze_session_speed(dir, &quotes, &speed_cfg);
+    if let Some(s) = &speed_res {
+        write_csv(
+            &format!("{out}/speed.csv"),
+            "horizon_s,response_bps,ci_lo_bps,ci_hi_bps,n_origins",
+            &s.horizons_s
+                .iter()
+                .zip(s.response_bps.iter())
+                .zip(s.response_ci_bps.iter())
+                .zip(s.n_origins.iter())
+                .map(|(((h, r), ci), n)| format!("{h:.0},{r:.4},{:.4},{:.4},{n}", ci.0, ci.1))
+                .collect::<Vec<_>>(),
+        )?;
+    }
+
     // prediction calibration
     let ds = predict::build_dataset(&quotes, &trades, 10_000, 3);
     let detail = predict::walk_forward_detailed(&ds, 4, 3);
@@ -362,6 +408,20 @@ fn export_session(
             "last": lams.last().copied().unwrap_or(f64::NAN),
         },
         "ofi": { "mean": ofi_m, "std": ofi_sd },
+        "speed": speed_res.as_ref().map(|s| serde_json::json!({
+            "bar_ms": s.bar_ms,
+            "shock": "one standard deviation of per-bar OFI; order-flow shocks are the information-arrival proxy, no news timestamps",
+            "horizons_s": s.horizons_s,
+            "response_bps": s.response_bps,
+            "fit_ok": s.fit_ok,
+            "fit_failure": s.fit_failure,
+            "r_inf_bps": s.r_inf_bps,
+            "tau_s": s.tau_s,
+            "tau_ci_s": s.tau_ci_s,
+            "half_life_s": s.half_life_s,
+            "half_life_ci_s": s.half_life_ci_s,
+            "fit_r_squared": s.fit_r_squared,
+        })).unwrap_or(serde_json::Value::Null),
         "gaps": {
             // N2 denominators: exact bar accounting on the 10 s grid.
             // Unobserved bars are carried-forward placeholders, never
@@ -389,7 +449,7 @@ fn export_session(
         serde_json::to_string_pretty(&summary)?,
     )?;
     println!(
-        "exported session -> {out} (vpin.csv, kyle.csv, ofi.csv, calibration.csv, summary.json)"
+        "exported session -> {out} (vpin.csv, kyle.csv, ofi.csv, speed.csv, calibration.csv, summary.json)"
     );
     Ok(())
 }
@@ -620,6 +680,13 @@ mod tests {
         assert!(ofi.starts_with("time_ms,ofi,mid,spread,imbalance,signed_vol,fwd_ret_bps\n"));
         assert!(ofi.lines().count() > 40, "ofi.csv too short");
 
+        let speed_csv = std::fs::read_to_string(out.join("speed.csv")).unwrap();
+        assert!(speed_csv.starts_with("horizon_s,response_bps,ci_lo_bps,ci_hi_bps,n_origins\n"));
+        assert!(
+            speed_csv.lines().count() > 10,
+            "speed.csv has too few horizons"
+        );
+
         let cal = std::fs::read_to_string(out.join("calibration.csv")).unwrap();
         assert!(cal.starts_with("mean_pred,realized,n\n"));
 
@@ -629,6 +696,8 @@ mod tests {
         assert_eq!(summary["n_trades"], trades.len() as u64);
         assert_eq!(summary["n_quotes"], quotes.len() as u64);
         assert!(summary["vpin"]["mean"].as_f64().unwrap() > 0.0);
+        assert_eq!(summary["speed"]["bar_ms"], 1000);
+        assert!(summary["speed"]["response_bps"].as_array().unwrap().len() > 10);
         assert!(summary["predict"]["accuracy"].as_f64().is_some());
         assert!(summary["mm"]["pnl_open"].as_f64().is_some());
         std::fs::remove_dir_all(&tmp).unwrap();
