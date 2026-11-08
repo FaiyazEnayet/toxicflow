@@ -75,14 +75,14 @@ fn population_r60() -> f64 {
     let rho = (-1.0f64 / tau).exp();
     let mut g = vec![0.0; 6001];
     g[0] = jump;
-    for k in 1..=6000 {
-        g[k] = rinf * (1.0 - rho) * rho.powi((k - 1) as i32);
+    for (k, gk) in g.iter_mut().enumerate().skip(1) {
+        *gk = rinf * (1.0 - rho) * rho.powi((k - 1) as i32);
     }
     let mut total = 0.0;
     for j in 0..=60usize {
         let mut c = 0.0;
-        for k in 0..=6000usize {
-            c += g[k] * phi.powi((j as i32 - k as i32).abs());
+        for (k, gk) in g.iter().enumerate() {
+            c += gk * phi.powi((j as i32 - k as i32).abs());
         }
         total += c;
     }

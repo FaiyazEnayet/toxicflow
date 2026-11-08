@@ -63,9 +63,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use toxicflow::speed::{
-    analyze_bar_series, BarSeries, SpeedConfig, SPEED_BOOTSTRAP_SEED,
-};
+use toxicflow::speed::{analyze_bar_series, BarSeries, SpeedConfig, SPEED_BOOTSTRAP_SEED};
 
 // ----------------------------------------------------------------
 // Deterministic RNG (SplitMix64 + Box-Muller), independent of the
@@ -170,8 +168,8 @@ fn kernel(truth: &Truth, kmax: usize) -> Vec<f64> {
     g[0] = truth.jump_bps;
     for &(w, tau) in &truth.comps {
         let rho = (-1.0f64 / tau).exp();
-        for k in 1..=kmax {
-            g[k] += w * (1.0 - rho) * rho.powi((k - 1) as i32);
+        for (k, gk) in g.iter_mut().enumerate().skip(1).take(kmax) {
+            *gk += w * (1.0 - rho) * rho.powi((k - 1) as i32);
         }
     }
     g
@@ -230,7 +228,11 @@ fn gen_session(
 ) -> BarSeries {
     let mut rng = Rng(seed);
     // Component states: s_c,t = (1-rho_c) * sum_{m>=1} rho_c^{m-1} z_{t-m}
-    let rhos: Vec<f64> = truth.comps.iter().map(|&(_, tau)| (-1.0f64 / tau).exp()).collect();
+    let rhos: Vec<f64> = truth
+        .comps
+        .iter()
+        .map(|&(_, tau)| (-1.0f64 / tau).exp())
+        .collect();
     let mut states = vec![0.0; truth.comps.len()];
     let mut z = 0.0f64;
     let inov_sd = (1.0 - phi * phi).sqrt();
@@ -259,12 +261,16 @@ fn gen_session(
     if gaps_mainlike {
         let stretch = ((0.078 * n_bars as f64).round() as usize).max(1);
         let start = (0.45 * n_bars as f64) as usize;
-        for slot in observed.iter_mut().take((start + stretch).min(n_bars)).skip(start) {
+        for slot in observed
+            .iter_mut()
+            .take((start + stretch).min(n_bars))
+            .skip(start)
+        {
             *slot = false;
         }
-        for i in 0..n_bars {
-            if observed[i] && rng.next_f64() < 0.002 {
-                observed[i] = false;
+        for slot in observed.iter_mut() {
+            if *slot && rng.next_f64() < 0.002 {
+                *slot = false;
             }
         }
         // Carried-forward mid and zero OFI on unobserved bars, as
@@ -286,6 +292,7 @@ fn gen_session(
 // One session run -> one JSON record
 // ----------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn run_one(
     truth: &Truth,
     phi: f64,
@@ -303,7 +310,14 @@ fn run_one(
         n_bars as u64,
         rep as u64,
     );
-    let series = gen_session(truth, phi, gap_name == "mainlike", n_bars, sigma_noise, seed);
+    let series = gen_session(
+        truth,
+        phi,
+        gap_name == "mainlike",
+        n_bars,
+        sigma_noise,
+        seed,
+    );
     let t0 = std::time::Instant::now();
     let res = analyze_bar_series(&format!("sim-{}", rep), &series, (n_bars - 1) as f64, cfg);
     let secs = t0.elapsed().as_secs_f64();
@@ -322,9 +336,15 @@ fn run_one(
                 if let Some(k) = idx(h as i64) {
                     let truth_h = pop[h];
                     let (lo, hi) = s.response_ci_bps[k];
-                    cov_pt.insert(h.to_string(), serde_json::json!(lo <= truth_h && truth_h <= hi));
+                    cov_pt.insert(
+                        h.to_string(),
+                        serde_json::json!(lo <= truth_h && truth_h <= hi),
+                    );
                     let (slo, shi) = s.response_simultaneous_band_bps[k];
-                    cov_sim.insert(h.to_string(), serde_json::json!(slo <= truth_h && truth_h <= shi));
+                    cov_sim.insert(
+                        h.to_string(),
+                        serde_json::json!(slo <= truth_h && truth_h <= shi),
+                    );
                     est.insert(h.to_string(), serde_json::json!(s.response_bps[k]));
                 }
             }
@@ -336,7 +356,10 @@ fn run_one(
                 for h in [900usize, 1500] {
                     if let Some(k) = e.horizons_s.iter().position(|v| *v == h as f64) {
                         let (lo, hi) = e.response_ci_bps[k];
-                        ecov.insert(h.to_string(), serde_json::json!(lo <= pop[h] && pop[h] <= hi));
+                        ecov.insert(
+                            h.to_string(),
+                            serde_json::json!(lo <= pop[h] && pop[h] <= hi),
+                        );
                         eci.insert(h.to_string(), serde_json::json!([lo, hi]));
                     }
                 }
@@ -357,7 +380,10 @@ fn run_one(
                 if let Some(k) = idx(h as i64) {
                     ci_map.insert(h.to_string(), serde_json::json!(s.response_ci_bps[k]));
                     let (lo, hi) = s.hac_ci_bps[k];
-                    hac_cov.insert(h.to_string(), serde_json::json!(lo <= pop[h] && pop[h] <= hi));
+                    hac_cov.insert(
+                        h.to_string(),
+                        serde_json::json!(lo <= pop[h] && pop[h] <= hi),
+                    );
                 }
             }
             serde_json::json!({
@@ -392,15 +418,31 @@ fn arg_val(args: &[String], key: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = arg_val(&args, "--out").unwrap_or_else(|| "sim_results.jsonl".to_string());
-    let total_bps: f64 = arg_val(&args, "--total-bps").and_then(|v| v.parse().ok()).unwrap_or(0.30);
-    let sigma_noise: f64 = arg_val(&args, "--sigma-noise-bps").and_then(|v| v.parse().ok()).unwrap_or(0.75);
-    let reps: usize = arg_val(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(100);
-    let rep_offset: usize = arg_val(&args, "--rep-offset").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let threads: usize = arg_val(&args, "--threads").and_then(|v| v.parse().ok()).unwrap_or(4);
+    let total_bps: f64 = arg_val(&args, "--total-bps")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.30);
+    let sigma_noise: f64 = arg_val(&args, "--sigma-noise-bps")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.75);
+    let reps: usize = arg_val(&args, "--reps")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let rep_offset: usize = arg_val(&args, "--rep-offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let threads: usize = arg_val(&args, "--threads")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
     let cfg = SpeedConfig {
-        bootstrap_resamples: arg_val(&args, "--bootstrap").and_then(|v| v.parse().ok()).unwrap_or(SpeedConfig::default().bootstrap_resamples),
-        sensitivity_resamples: arg_val(&args, "--sensitivity").and_then(|v| v.parse().ok()).unwrap_or(SpeedConfig::default().sensitivity_resamples),
-        extended_resamples: arg_val(&args, "--extended").and_then(|v| v.parse().ok()).unwrap_or(SpeedConfig::default().extended_resamples),
+        bootstrap_resamples: arg_val(&args, "--bootstrap")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SpeedConfig::default().bootstrap_resamples),
+        sensitivity_resamples: arg_val(&args, "--sensitivity")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SpeedConfig::default().sensitivity_resamples),
+        extended_resamples: arg_val(&args, "--extended")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SpeedConfig::default().extended_resamples),
         ..SpeedConfig::default()
     };
     let all_truths = truths(total_bps);
