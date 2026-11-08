@@ -2760,6 +2760,361 @@
           },
           "event_time_unavailable_reason": null
         }
+      },
+      "crosschecks": {
+        "var": {
+          "available": true,
+          "unavailable_reason": null,
+          "variables": [
+            "return_bps",
+            "ofi_per_session_sd",
+            "spread_bps",
+            "imbalance"
+          ],
+          "returns_definition": "simple one-bar mid-price return in basis points, the same return definition as the local projections",
+          "estimation": "per-session reduced-form VAR, equation-by-equation OLS on standardized variables",
+          "lag_criterion": "BIC over lag orders 1..=10 on a common sample: ln det Sigma_ML + (p d^2 + d) ln(T) / T, d = 4",
+          "lag_range": [
+            1,
+            10
+          ],
+          "bic_by_lag": [
+            -3.4329043126281547,
+            -3.4356581705793823,
+            -3.436544740521052,
+            -3.4314295762947675,
+            -3.4328810161809273,
+            -3.4276826783374927,
+            -3.417672866584323,
+            -3.4137248654039754,
+            -3.4069451896582765,
+            -3.408352508001559
+          ],
+          "chosen_lag": 3,
+          "n_obs": 10710,
+          "horizons_s": [
+            0.0,
+            1.0,
+            2.0,
+            3.0,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            30.0,
+            45.0,
+            60.0,
+            90.0,
+            120.0,
+            180.0,
+            240.0,
+            300.0
+          ],
+          "lp_response_bps": [
+            0.09624419125447525,
+            0.10595987068640715,
+            0.11672908637621814,
+            0.11586820414485159,
+            0.12258146394524519,
+            0.13754081156785847,
+            0.156605865708091,
+            0.16668909515774957,
+            0.17289869355513762,
+            0.18875374362616845,
+            0.2248308312504485,
+            0.21661288905052975,
+            0.20199522846852838,
+            0.17742274519583837,
+            0.18913244574593355,
+            0.13781490093315554
+          ],
+          "ofi_first_irf_bps": [
+            0.09463077043966972,
+            0.10305938846955395,
+            0.11354849230264404,
+            0.11178905086671537,
+            0.11334826909614036,
+            0.11830323408053037,
+            0.12266272153176958,
+            0.12646954924422266,
+            0.13269704397744528,
+            0.1393795031079664,
+            0.1438297550510839,
+            0.1487671459518941,
+            0.1509568936913399,
+            0.1523587656722963,
+            0.15263450677264348,
+            0.15268874364694682
+          ],
+          "ofi_first_ci_bps": [
+            [
+              0.08159436627658193,
+              0.10846456164611064
+            ],
+            [
+              0.09012101190509594,
+              0.11826100784144351
+            ],
+            [
+              0.10074678644906386,
+              0.1282164858636305
+            ],
+            [
+              0.09678422660675373,
+              0.12664342461572223
+            ],
+            [
+              0.09894424904567789,
+              0.12852965722833662
+            ],
+            [
+              0.10270878966179209,
+              0.13534442410345318
+            ],
+            [
+              0.10659290956784813,
+              0.14038867265799337
+            ],
+            [
+              0.11015388156844674,
+              0.1449133196775671
+            ],
+            [
+              0.11604827461994055,
+              0.15185580182496333
+            ],
+            [
+              0.12249881639859961,
+              0.15909956131731304
+            ],
+            [
+              0.12588809822887262,
+              0.16502331583176644
+            ],
+            [
+              0.12920041957129366,
+              0.172643534852986
+            ],
+            [
+              0.13112258716432862,
+              0.17648111852429577
+            ],
+            [
+              0.1323599818933266,
+              0.17919877948134286
+            ],
+            [
+              0.13260543933014823,
+              0.1794647449888346
+            ],
+            [
+              0.13265412981821895,
+              0.1795116308537172
+            ]
+          ],
+          "returns_first_irf_bps": [
+            0.0,
+            0.019118394738357265,
+            0.030356806974336077,
+            0.025447312246507415,
+            0.027803756811898176,
+            0.0350313020678334,
+            0.041281298801678315,
+            0.04673879233600892,
+            0.05566656966617686,
+            0.06524658694622275,
+            0.07162649734790437,
+            0.07870477335741516,
+            0.08184401009243986,
+            0.0838537429676678,
+            0.08424904721937349,
+            0.08432680155844148
+          ],
+          "returns_first_ci_bps": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.014798829750473514,
+              0.023132637586212822
+            ],
+            [
+              0.025273637918096538,
+              0.03797065634201259
+            ],
+            [
+              0.01818891750532673,
+              0.034102218451628245
+            ],
+            [
+              0.020251212152996242,
+              0.03777724723841286
+            ],
+            [
+              0.0258043375644606,
+              0.046756358120582035
+            ],
+            [
+              0.031188377534707032,
+              0.05540792744552629
+            ],
+            [
+              0.03573147885771501,
+              0.06305390735573987
+            ],
+            [
+              0.04291152155401262,
+              0.07577858747998968
+            ],
+            [
+              0.04983960373797589,
+              0.08863411973656068
+            ],
+            [
+              0.054508854782369394,
+              0.09727042955941524
+            ],
+            [
+              0.05968121493886091,
+              0.10680465732391153
+            ],
+            [
+              0.061427706517572185,
+              0.11199946076514083
+            ],
+            [
+              0.06221432320599434,
+              0.11680630286666258
+            ],
+            [
+              0.062331620262648345,
+              0.11830209580699001
+            ],
+            [
+              0.06234963274151198,
+              0.11872331523895617
+            ]
+          ],
+          "diff_ofi_first_minus_lp_bps": [
+            -0.001613420814805533,
+            -0.002900482216853198,
+            -0.0031805940735741,
+            -0.004079153278136224,
+            -0.009233194849104828,
+            -0.0192375774873281,
+            -0.03394314417632144,
+            -0.040219545913526916,
+            -0.040201649577692344,
+            -0.04937424051820205,
+            -0.08100107619936461,
+            -0.06784574309863564,
+            -0.05103833477718847,
+            -0.025063979523542057,
+            -0.03649793897329007,
+            0.014873842713791274
+          ],
+          "diff_returns_first_minus_lp_bps": [
+            -0.09624419125447525,
+            -0.08684147594804989,
+            -0.08637227940188205,
+            -0.09042089189834418,
+            -0.09477770713334702,
+            -0.10250950950002508,
+            -0.1153245669064127,
+            -0.11995030282174066,
+            -0.11723212388896076,
+            -0.1235071566799457,
+            -0.15320433390254412,
+            -0.1379081156931146,
+            -0.12015121837608853,
+            -0.09356900222817056,
+            -0.10488339852656006,
+            -0.05348809937471406
+          ],
+          "lp_inside_var_band": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            true
+          ],
+          "var_inside_lp_band": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "horizons_agreeing_ofi_first": 7,
+          "horizons_agreeing_returns_first": 0,
+          "max_abs_ordering_difference_bps": 0.09463077043966972,
+          "mean_abs_ordering_difference_bps": 0.07786425879816256,
+          "n_bootstrap_draws": 200,
+          "bootstrap": "residual bootstrap: centred residuals resampled with replacement, series regenerated within each original segment, VAR re-estimated at the chosen lag",
+          "restraint": "reduced-form specification cross-check only; not a Hasbrouck information-share estimate (single venue, single price series, so that estimand is unavailable); no information share is computed or implied; orthogonalisation is an ordering assumption, not identification"
+        },
+        "two_component": {
+          "timing_convention": "inclusive (baseline is the close of the bar before the shock bar), the same convention as the headline single-component fit",
+          "point_jump_bps": 0.10238328373724664,
+          "point_a_fast_bps": 0.15836813251312037,
+          "point_a_slow_bps": -0.5476132419772686,
+          "point_tau_fast_s": 34.04412523070047,
+          "point_tau_slow_s": 1296.7570033338295,
+          "point_r_squared": 0.9471576136756565,
+          "tau_fast_region_s": [
+            5.516123335138934,
+            252.05261754328433
+          ],
+          "tau_slow_region_s": [
+            28.379279040282906,
+            1296.7570033338295
+          ],
+          "a_fast_region_bps": [
+            0.04065499788461856,
+            2.849416831540173
+          ],
+          "a_slow_region_bps": [
+            -6.034726696554354,
+            0.16330366928700563
+          ],
+          "jump_region_bps": [
+            0.06568609867398091,
+            0.11284150646462945
+          ],
+          "n_draw_fits": 2000,
+          "stable_draws": 70,
+          "stable_share": 0.035,
+          "status": "unidentified/unstable",
+          "criteria": [
+            "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+          ],
+          "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
+          "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
+        }
       }
     },
     {
@@ -5239,6 +5594,361 @@
           },
           "event_time_unavailable_reason": null
         }
+      },
+      "crosschecks": {
+        "var": {
+          "available": true,
+          "unavailable_reason": null,
+          "variables": [
+            "return_bps",
+            "ofi_per_session_sd",
+            "spread_bps",
+            "imbalance"
+          ],
+          "returns_definition": "simple one-bar mid-price return in basis points, the same return definition as the local projections",
+          "estimation": "per-session reduced-form VAR, equation-by-equation OLS on standardized variables",
+          "lag_criterion": "BIC over lag orders 1..=10 on a common sample: ln det Sigma_ML + (p d^2 + d) ln(T) / T, d = 4",
+          "lag_range": [
+            1,
+            10
+          ],
+          "bic_by_lag": [
+            -1.7012703621428213,
+            -1.6464115780233683,
+            -1.5937055551354207,
+            -1.5443342486514202,
+            -1.4804765165805436,
+            -1.4229437607860858,
+            -1.3647044607669339,
+            -1.3119480940428758,
+            -1.252802296648355,
+            -1.212604090930319
+          ],
+          "chosen_lag": 1,
+          "n_obs": 1788,
+          "horizons_s": [
+            0.0,
+            1.0,
+            2.0,
+            3.0,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            30.0,
+            45.0,
+            60.0,
+            90.0,
+            120.0,
+            180.0,
+            240.0,
+            300.0
+          ],
+          "lp_response_bps": [
+            0.7330356747828315,
+            1.001790011604787,
+            1.1209555348559856,
+            1.1813862355443416,
+            1.225782600925065,
+            1.195650406449188,
+            1.2449774386813028,
+            1.246456313640076,
+            1.1631984267809465,
+            1.2347506866730193,
+            1.312904210188896,
+            0.8563029802528166,
+            1.289231522142666,
+            1.0345478810581725,
+            1.0161731882971656,
+            0.49414617861320903
+          ],
+          "ofi_first_irf_bps": [
+            0.6800511727188843,
+            0.9133677423033857,
+            1.0123226936254703,
+            1.063945045089932,
+            1.107533613041291,
+            1.1254589021819854,
+            1.1263604686775373,
+            1.12640581475573,
+            1.1264082102427502,
+            1.126408216317418,
+            1.126408216318191,
+            1.126408216318191,
+            1.126408216318191,
+            1.126408216318191,
+            1.126408216318191,
+            1.126408216318191
+          ],
+          "ofi_first_ci_bps": [
+            [
+              0.6402613075605789,
+              0.7234510698240773
+            ],
+            [
+              0.8476384634462748,
+              0.9818465946761157
+            ],
+            [
+              0.9389300651757108,
+              1.0975417159398249
+            ],
+            [
+              0.9798599913351014,
+              1.1566801396095312
+            ],
+            [
+              1.0154755124687347,
+              1.2081721513255723
+            ],
+            [
+              1.030757661574127,
+              1.230409412052096
+            ],
+            [
+              1.0315894072142735,
+              1.2326215234053388
+            ],
+            [
+              1.0316346757644081,
+              1.232777679280346
+            ],
+            [
+              1.0316372736422423,
+              1.2327894806767008
+            ],
+            [
+              1.0316372813592547,
+              1.232789539758383
+            ],
+            [
+              1.0316372813604986,
+              1.232789539779166
+            ],
+            [
+              1.0316372813604986,
+              1.2327895397791735
+            ],
+            [
+              1.0316372813604986,
+              1.2327895397791735
+            ],
+            [
+              1.0316372813604986,
+              1.2327895397791735
+            ],
+            [
+              1.0316372813604986,
+              1.2327895397791735
+            ],
+            [
+              1.0316372813604986,
+              1.2327895397791735
+            ]
+          ],
+          "returns_first_irf_bps": [
+            0.0,
+            0.29833548959373335,
+            0.43013880271432303,
+            0.4991223038658748,
+            0.5573998078645337,
+            0.5813672817256371,
+            0.5825727461833815,
+            0.5826333774133984,
+            0.5826365803656784,
+            0.5826365884879816,
+            0.5826365884890151,
+            0.5826365884890152,
+            0.5826365884890152,
+            0.5826365884890152,
+            0.5826365884890152,
+            0.5826365884890152
+          ],
+          "returns_first_ci_bps": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.2341177234107201,
+              0.377725514151654
+            ],
+            [
+              0.3507811088852283,
+              0.5337933904071894
+            ],
+            [
+              0.4085856622202389,
+              0.6198886347903102
+            ],
+            [
+              0.4540283255106153,
+              0.6905052223758922
+            ],
+            [
+              0.47318557882536855,
+              0.7288847729052789
+            ],
+            [
+              0.47418729060662496,
+              0.7303601998981284
+            ],
+            [
+              0.47421033554267056,
+              0.7304328785794567
+            ],
+            [
+              0.47421130034187414,
+              0.7304366350439464
+            ],
+            [
+              0.4742113019070502,
+              0.730436644180054
+            ],
+            [
+              0.47421130190715216,
+              0.7304366441811462
+            ],
+            [
+              0.47421130190715216,
+              0.7304366441811463
+            ],
+            [
+              0.47421130190715216,
+              0.7304366441811463
+            ],
+            [
+              0.47421130190715216,
+              0.7304366441811463
+            ],
+            [
+              0.47421130190715216,
+              0.7304366441811463
+            ],
+            [
+              0.47421130190715216,
+              0.7304366441811463
+            ]
+          ],
+          "diff_ofi_first_minus_lp_bps": [
+            -0.052984502063947225,
+            -0.0884222693014014,
+            -0.10863284123051531,
+            -0.1174411904544097,
+            -0.11824898788377403,
+            -0.07019150426720255,
+            -0.11861697000376559,
+            -0.12005049888434582,
+            -0.03679021653819636,
+            -0.1083424703556013,
+            -0.18649599387070492,
+            0.2701052360653744,
+            -0.16282330582447502,
+            0.09186033526001847,
+            0.11023502802102536,
+            0.6322620377049819
+          ],
+          "diff_returns_first_minus_lp_bps": [
+            -0.7330356747828315,
+            -0.7034545220110537,
+            -0.6908167321416626,
+            -0.6822639316784669,
+            -0.6683827930605313,
+            -0.6142831247235508,
+            -0.6624046924979213,
+            -0.6638229362266775,
+            -0.5805618464152681,
+            -0.6521140981850377,
+            -0.7302676216998808,
+            -0.27366639176380136,
+            -0.7065949336536508,
+            -0.4519112925691573,
+            -0.4335365998081504,
+            0.0884904098758062
+          ],
+          "lp_inside_var_band": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false
+          ],
+          "var_inside_lp_band": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "horizons_agreeing_ofi_first": 3,
+          "horizons_agreeing_returns_first": 1,
+          "max_abs_ordering_difference_bps": 0.6800511727188843,
+          "mean_abs_ordering_difference_bps": 0.5608780417321813,
+          "n_bootstrap_draws": 200,
+          "bootstrap": "residual bootstrap: centred residuals resampled with replacement, series regenerated within each original segment, VAR re-estimated at the chosen lag",
+          "restraint": "reduced-form specification cross-check only; not a Hasbrouck information-share estimate (single venue, single price series, so that estimand is unavailable); no information share is computed or implied; orthogonalisation is an ordering assumption, not identification"
+        },
+        "two_component": {
+          "timing_convention": "inclusive (baseline is the close of the bar before the shock bar), the same convention as the headline single-component fit",
+          "point_jump_bps": 0.7510208903888619,
+          "point_a_fast_bps": 0.5443385474557109,
+          "point_a_slow_bps": -2.707562895250541,
+          "point_tau_fast_s": 1.8509259368191013,
+          "point_tau_slow_s": 1296.7570033338295,
+          "point_r_squared": 0.6657908899603467,
+          "tau_fast_region_s": [
+            0.29990301358939225,
+            1080.9803041103023
+          ],
+          "tau_slow_region_s": [
+            3.195299008184013,
+            1296.7570033338295
+          ],
+          "a_fast_region_bps": [
+            -224.28987522033023,
+            803.0323477401796
+          ],
+          "a_slow_region_bps": [
+            -942.5575048661549,
+            276.23254231933527
+          ],
+          "jump_region_bps": [
+            0.6694885706558733,
+            1.1616193627597815
+          ],
+          "n_draw_fits": 2000,
+          "stable_draws": 3,
+          "stable_share": 0.0015,
+          "status": "unidentified/unstable",
+          "criteria": [
+            "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+          ],
+          "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
+          "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
+        }
       }
     },
     {
@@ -7713,6 +8423,361 @@
           },
           "event_time_unavailable_reason": null
         }
+      },
+      "crosschecks": {
+        "var": {
+          "available": true,
+          "unavailable_reason": null,
+          "variables": [
+            "return_bps",
+            "ofi_per_session_sd",
+            "spread_bps",
+            "imbalance"
+          ],
+          "returns_definition": "simple one-bar mid-price return in basis points, the same return definition as the local projections",
+          "estimation": "per-session reduced-form VAR, equation-by-equation OLS on standardized variables",
+          "lag_criterion": "BIC over lag orders 1..=10 on a common sample: ln det Sigma_ML + (p d^2 + d) ln(T) / T, d = 4",
+          "lag_range": [
+            1,
+            10
+          ],
+          "bic_by_lag": [
+            -27.386034956800337,
+            -27.37637218539299,
+            -27.31779198156295,
+            -27.256479513613634,
+            -27.203988166905724,
+            -27.142451478644407,
+            -27.07841085491295,
+            -27.015721061606147,
+            -26.95385511221934,
+            -26.89370254116865
+          ],
+          "chosen_lag": 1,
+          "n_obs": 1788,
+          "horizons_s": [
+            0.0,
+            1.0,
+            2.0,
+            3.0,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            30.0,
+            45.0,
+            60.0,
+            90.0,
+            120.0,
+            180.0,
+            240.0,
+            300.0
+          ],
+          "lp_response_bps": [
+            0.07224930453699825,
+            0.09154989836871237,
+            0.09764972326528618,
+            0.09942538283524904,
+            0.11547679653161162,
+            0.1299596072980452,
+            0.15423327413180152,
+            0.18803199706215323,
+            0.20430769264578877,
+            0.2105113228103978,
+            0.19129213756572655,
+            0.18301419176564312,
+            0.1601518385291461,
+            0.1614786880633121,
+            0.10534189509661372,
+            0.07537410861841792
+          ],
+          "ofi_first_irf_bps": [
+            0.07115745598458804,
+            0.08799941611125064,
+            0.09229507902024303,
+            0.0938350458706896,
+            0.0955530811316337,
+            0.09906445054429623,
+            0.10216513045130844,
+            0.10490035851041031,
+            0.10940216626739246,
+            0.11414231690878432,
+            0.11700187265429063,
+            0.11883975008118139,
+            0.11746661218638839,
+            0.1103409706389526,
+            0.101352852361281,
+            0.0923557978505542
+          ],
+          "ofi_first_ci_bps": [
+            [
+              0.05658131608195956,
+              0.0894709738049932
+            ],
+            [
+              0.07267239154203756,
+              0.10863105575194547
+            ],
+            [
+              0.07572482147274047,
+              0.11330773525327269
+            ],
+            [
+              0.07668147759702722,
+              0.11501591060544382
+            ],
+            [
+              0.0787341289619391,
+              0.11682055320803583
+            ],
+            [
+              0.08229714234138828,
+              0.12021514564628259
+            ],
+            [
+              0.08487237399268086,
+              0.12239813363763713
+            ],
+            [
+              0.08619989774179027,
+              0.12494605857140943
+            ],
+            [
+              0.08528276813801788,
+              0.12777191926212128
+            ],
+            [
+              0.08441227914743102,
+              0.1340136657943397
+            ],
+            [
+              0.08092353602199834,
+              0.13631243349570338
+            ],
+            [
+              0.07077959281503035,
+              0.13680852829516563
+            ],
+            [
+              0.05855907254314046,
+              0.1365151343776165
+            ],
+            [
+              0.038211210766172315,
+              0.13118823194001095
+            ],
+            [
+              0.019569102497395942,
+              0.1292907670785733
+            ],
+            [
+              0.007781994984998831,
+              0.12437854911559088
+            ]
+          ],
+          "returns_first_irf_bps": [
+            0.0,
+            0.015146022046923415,
+            0.021065871204994625,
+            0.02428967325438169,
+            0.029249580792428682,
+            0.04033769389733775,
+            0.05033951519830285,
+            0.05935969340592719,
+            0.07479352160305074,
+            0.09251217766176424,
+            0.10512945269459371,
+            0.11973075900901267,
+            0.12537085581450788,
+            0.12375756652416596,
+            0.11561178873295597,
+            0.10598771387151644
+          ],
+          "returns_first_ci_bps": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.006665612147228216,
+              0.022325440111274956
+            ],
+            [
+              0.010961870789952501,
+              0.029724657611373925
+            ],
+            [
+              0.01437074233819321,
+              0.033594111013597036
+            ],
+            [
+              0.01875437289407625,
+              0.03944604570288966
+            ],
+            [
+              0.028243091290161972,
+              0.053493805358702635
+            ],
+            [
+              0.03436619256384066,
+              0.06732429750109961
+            ],
+            [
+              0.03968633178042549,
+              0.07975404391186684
+            ],
+            [
+              0.04741613024552119,
+              0.10032954617578897
+            ],
+            [
+              0.05474528886681766,
+              0.12451424282809669
+            ],
+            [
+              0.059460738762863244,
+              0.1417872517502243
+            ],
+            [
+              0.05738867872998807,
+              0.162702236190458
+            ],
+            [
+              0.05134342888217014,
+              0.1709792932429044
+            ],
+            [
+              0.038802847125443345,
+              0.17587053131981403
+            ],
+            [
+              0.021336824681254217,
+              0.15850520563796236
+            ],
+            [
+              0.012811444846213589,
+              0.1463615703572799
+            ]
+          ],
+          "diff_ofi_first_minus_lp_bps": [
+            -0.0010918485524102073,
+            -0.003550482257461726,
+            -0.005354644245043144,
+            -0.0055903369645594475,
+            -0.01992371539997792,
+            -0.030895156753748973,
+            -0.052068143680493076,
+            -0.08313163855174292,
+            -0.0949055263783963,
+            -0.09636900590161349,
+            -0.07429026491143592,
+            -0.06417444168446174,
+            -0.04268522634275772,
+            -0.05113771742435949,
+            -0.0039890427353327235,
+            0.016981689232136277
+          ],
+          "diff_returns_first_minus_lp_bps": [
+            -0.07224930453699825,
+            -0.07640387632178895,
+            -0.07658385206029156,
+            -0.07513570958086735,
+            -0.08622721573918293,
+            -0.08962191340070746,
+            -0.10389375893349867,
+            -0.12867230365622603,
+            -0.12951417104273805,
+            -0.11799914514863356,
+            -0.08616268487113284,
+            -0.06328343275663045,
+            -0.034780982714638226,
+            -0.03772112153914613,
+            0.010269893636342245,
+            0.030613605253098516
+          ],
+          "lp_inside_var_band": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            true
+          ],
+          "var_inside_lp_band": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            true,
+            true,
+            true
+          ],
+          "horizons_agreeing_ofi_first": 7,
+          "horizons_agreeing_returns_first": 4,
+          "max_abs_ordering_difference_bps": 0.07285339406432723,
+          "mean_abs_ordering_difference_bps": 0.0390872420330615,
+          "n_bootstrap_draws": 200,
+          "bootstrap": "residual bootstrap: centred residuals resampled with replacement, series regenerated within each original segment, VAR re-estimated at the chosen lag",
+          "restraint": "reduced-form specification cross-check only; not a Hasbrouck information-share estimate (single venue, single price series, so that estimand is unavailable); no information share is computed or implied; orthogonalisation is an ordering assumption, not identification"
+        },
+        "two_component": {
+          "timing_convention": "inclusive (baseline is the close of the bar before the shock bar), the same convention as the headline single-component fit",
+          "point_jump_bps": 0.07517367827774271,
+          "point_a_fast_bps": 0.1640579740219988,
+          "point_a_slow_bps": -0.7699394828306914,
+          "point_tau_fast_s": 16.439132459700406,
+          "point_tau_slow_s": 1296.7570033338295,
+          "point_r_squared": 0.9592689851131818,
+          "tau_fast_region_s": [
+            9.522619501502374,
+            751.1663744378361
+          ],
+          "tau_slow_region_s": [
+            19.7205814618374,
+            1296.7570033338295
+          ],
+          "a_fast_region_bps": [
+            0.07744012006884762,
+            20.56382839186397
+          ],
+          "a_slow_region_bps": [
+            -23.68947065173993,
+            0.5356519464195791
+          ],
+          "jump_region_bps": [
+            0.0529785761271009,
+            0.12363070848201974
+          ],
+          "n_draw_fits": 2000,
+          "stable_draws": 13,
+          "stable_share": 0.0065,
+          "status": "unidentified/unstable",
+          "criteria": [
+            "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+          ],
+          "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
+          "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
+        }
       }
     },
     {
@@ -10186,6 +11251,361 @@
             "note": "event-time sensitivity: bars are blocks of 10 consecutive quote updates, so horizons are event-bar counts, not seconds; this checks whether the response shape is an artefact of the one-second clock grid, and its rungs are not seconds-based speeds"
           },
           "event_time_unavailable_reason": null
+        }
+      },
+      "crosschecks": {
+        "var": {
+          "available": true,
+          "unavailable_reason": null,
+          "variables": [
+            "return_bps",
+            "ofi_per_session_sd",
+            "spread_bps",
+            "imbalance"
+          ],
+          "returns_definition": "simple one-bar mid-price return in basis points, the same return definition as the local projections",
+          "estimation": "per-session reduced-form VAR, equation-by-equation OLS on standardized variables",
+          "lag_criterion": "BIC over lag orders 1..=10 on a common sample: ln det Sigma_ML + (p d^2 + d) ln(T) / T, d = 4",
+          "lag_range": [
+            1,
+            10
+          ],
+          "bic_by_lag": [
+            -23.493316585027276,
+            -23.47345309687542,
+            -23.432702603829675,
+            -23.383636924318804,
+            -23.325784834366324,
+            -23.27137175006675,
+            -23.220074963102594,
+            -23.1602691867037,
+            -23.100947881157676,
+            -23.03958230238388
+          ],
+          "chosen_lag": 1,
+          "n_obs": 1788,
+          "horizons_s": [
+            0.0,
+            1.0,
+            2.0,
+            3.0,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            30.0,
+            45.0,
+            60.0,
+            90.0,
+            120.0,
+            180.0,
+            240.0,
+            300.0
+          ],
+          "lp_response_bps": [
+            0.2441798473737992,
+            0.310024389891095,
+            0.36386183187145155,
+            0.398169926466938,
+            0.4414845288751824,
+            0.5024530547644253,
+            0.4967925177100075,
+            0.5306285193176009,
+            0.4434483733142669,
+            0.3931088897175847,
+            0.40967773658047096,
+            0.2966020277187438,
+            0.409249345916836,
+            0.3162311807644282,
+            0.4472397699256554,
+            0.5864057406935418
+          ],
+          "ofi_first_irf_bps": [
+            0.23689072821057433,
+            0.29120020251059203,
+            0.31402259442623986,
+            0.3304775315750916,
+            0.3561362501813491,
+            0.3951233792022862,
+            0.41332105553143217,
+            0.4211681564786183,
+            0.4240023061875243,
+            0.41905399631780615,
+            0.41227776850365044,
+            0.39856707074733155,
+            0.38527708848881287,
+            0.3600104298659596,
+            0.33640035469957796,
+            0.31433825866588466
+          ],
+          "ofi_first_ci_bps": [
+            [
+              0.21370604455786887,
+              0.26432576552843157
+            ],
+            [
+              0.2616040599012033,
+              0.3191180302004361
+            ],
+            [
+              0.2823134396956424,
+              0.34378789784805136
+            ],
+            [
+              0.29784910301276,
+              0.36201642775130144
+            ],
+            [
+              0.3207077740959486,
+              0.386294905251965
+            ],
+            [
+              0.3459305726715129,
+              0.42811896548941064
+            ],
+            [
+              0.35007132035317995,
+              0.45255357830892473
+            ],
+            [
+              0.34834457514442535,
+              0.45744190159681297
+            ],
+            [
+              0.327724150182205,
+              0.466841136810063
+            ],
+            [
+              0.29567705688605955,
+              0.463526886581012
+            ],
+            [
+              0.2575106926423837,
+              0.4569206651731552
+            ],
+            [
+              0.1959725447074137,
+              0.4349006174290239
+            ],
+            [
+              0.14594819882463508,
+              0.42329724335666397
+            ],
+            [
+              0.0805974548136368,
+              0.40369462264131173
+            ],
+            [
+              0.04314869947526043,
+              0.3794162817820679
+            ],
+            [
+              0.023077492793959868,
+              0.36527368778045677
+            ]
+          ],
+          "returns_first_irf_bps": [
+            0.0,
+            0.05991712933622018,
+            0.09489098707223512,
+            0.12312241345978112,
+            0.16831795396732654,
+            0.23813118308814477,
+            0.2720457454761654,
+            0.2880791411248115,
+            0.2979050501103868,
+            0.2966599946748679,
+            0.292136945290557,
+            0.28245792720438667,
+            0.27303880532962965,
+            0.25513022982532696,
+            0.23839580370624255,
+            0.2227585592860541
+          ],
+          "returns_first_ci_bps": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.03913755240337665,
+              0.08403220506193665
+            ],
+            [
+              0.06993407704687106,
+              0.12097509966153144
+            ],
+            [
+              0.09171627830498492,
+              0.15445705193698217
+            ],
+            [
+              0.12622356463229492,
+              0.2124251374889501
+            ],
+            [
+              0.1792391570392822,
+              0.2990581713975791
+            ],
+            [
+              0.19856777386395608,
+              0.3368803099502152
+            ],
+            [
+              0.20720563314998705,
+              0.3515517555250912
+            ],
+            [
+              0.20141551391521328,
+              0.36926317379223617
+            ],
+            [
+              0.18011219427479885,
+              0.35679405338575776
+            ],
+            [
+              0.15688139883807284,
+              0.3513502020660411
+            ],
+            [
+              0.12046774525169464,
+              0.3435979648408127
+            ],
+            [
+              0.09287925413705005,
+              0.32736985395857665
+            ],
+            [
+              0.05127239449553498,
+              0.29971558001335036
+            ],
+            [
+              0.029270762734609383,
+              0.28109923314642643
+            ],
+            [
+              0.01589953481721835,
+              0.2636385063411579
+            ]
+          ],
+          "diff_ofi_first_minus_lp_bps": [
+            -0.007289119163224861,
+            -0.018824187380502955,
+            -0.04983923744521168,
+            -0.06769239489184642,
+            -0.08534827869383332,
+            -0.10732967556213907,
+            -0.08347146217857532,
+            -0.10946036283898258,
+            -0.019446067126742572,
+            0.02594510660022148,
+            0.00260003192317948,
+            0.10196504302858778,
+            -0.023972257428023114,
+            0.043779249101531414,
+            -0.11083941522607743,
+            -0.2720674820276571
+          ],
+          "diff_returns_first_minus_lp_bps": [
+            -0.2441798473737992,
+            -0.2501072605548748,
+            -0.2689708447992164,
+            -0.2750475130071569,
+            -0.2731665749078559,
+            -0.2643218716762805,
+            -0.2247467722338421,
+            -0.24254937819278943,
+            -0.14554332320388008,
+            -0.09644889504271675,
+            -0.11754079128991396,
+            -0.014144100514357105,
+            -0.13621054058720633,
+            -0.06110095093910123,
+            -0.20884396621941284,
+            -0.3636471814074877
+          ],
+          "lp_inside_var_band": [
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          "var_inside_lp_band": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            true
+          ],
+          "horizons_agreeing_ofi_first": 5,
+          "horizons_agreeing_returns_first": 1,
+          "max_abs_ordering_difference_bps": 0.23689072821057433,
+          "mean_abs_ordering_difference_bps": 0.15032995641503716,
+          "n_bootstrap_draws": 200,
+          "bootstrap": "residual bootstrap: centred residuals resampled with replacement, series regenerated within each original segment, VAR re-estimated at the chosen lag",
+          "restraint": "reduced-form specification cross-check only; not a Hasbrouck information-share estimate (single venue, single price series, so that estimand is unavailable); no information share is computed or implied; orthogonalisation is an ordering assumption, not identification"
+        },
+        "two_component": {
+          "timing_convention": "inclusive (baseline is the close of the bar before the shock bar), the same convention as the headline single-component fit",
+          "point_jump_bps": 0.24633033928179968,
+          "point_a_fast_bps": 2.392831541037371,
+          "point_a_slow_bps": -2.230808517637313,
+          "point_tau_fast_s": 7.938082538360324,
+          "point_tau_slow_s": 9.522619501502374,
+          "point_r_squared": 0.5498283624311806,
+          "tau_fast_region_s": [
+            3.833119207494326,
+            1080.9803041103023
+          ],
+          "tau_slow_region_s": [
+            11.423449143062712,
+            1296.7570033338295
+          ],
+          "a_fast_region_bps": [
+            -120.78033762702583,
+            5.394395422368799
+          ],
+          "a_slow_region_bps": [
+            -5.491305461527028,
+            143.25816244838114
+          ],
+          "jump_region_bps": [
+            0.19430120863497236,
+            0.36885532385339337
+          ],
+          "n_draw_fits": 2000,
+          "stable_draws": 0,
+          "stable_share": 0.0,
+          "status": "unidentified/unstable",
+          "criteria": [
+            "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+          ],
+          "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
+          "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
         }
       }
     },
@@ -12678,6 +14098,361 @@
           },
           "event_time_unavailable_reason": null
         }
+      },
+      "crosschecks": {
+        "var": {
+          "available": true,
+          "unavailable_reason": null,
+          "variables": [
+            "return_bps",
+            "ofi_per_session_sd",
+            "spread_bps",
+            "imbalance"
+          ],
+          "returns_definition": "simple one-bar mid-price return in basis points, the same return definition as the local projections",
+          "estimation": "per-session reduced-form VAR, equation-by-equation OLS on standardized variables",
+          "lag_criterion": "BIC over lag orders 1..=10 on a common sample: ln det Sigma_ML + (p d^2 + d) ln(T) / T, d = 4",
+          "lag_range": [
+            1,
+            10
+          ],
+          "bic_by_lag": [
+            -2.2735832771513764,
+            -2.2244257303390387,
+            -2.176481965858574,
+            -2.1302134686171432,
+            -2.077897276413567,
+            -2.024147383761088,
+            -1.9677822150915383,
+            -1.9147563651723878,
+            -1.8724206383224702,
+            -1.8197697271064353
+          ],
+          "chosen_lag": 1,
+          "n_obs": 1788,
+          "horizons_s": [
+            0.0,
+            1.0,
+            2.0,
+            3.0,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            30.0,
+            45.0,
+            60.0,
+            90.0,
+            120.0,
+            180.0,
+            240.0,
+            300.0
+          ],
+          "lp_response_bps": [
+            0.2649070239753058,
+            0.32991232213382743,
+            0.37767094764056985,
+            0.42792013113137267,
+            0.5220308881267886,
+            0.569985208973796,
+            0.5757229036067548,
+            0.6000155580066198,
+            0.6221666262247875,
+            0.7552933566721677,
+            0.9765299617149458,
+            1.0723619790560295,
+            1.3727595585601287,
+            1.285595523075076,
+            1.4220261189177195,
+            1.3288079773096866
+          ],
+          "ofi_first_irf_bps": [
+            0.25333329602520943,
+            0.302149635919827,
+            0.3241720299177129,
+            0.3420970111106274,
+            0.3692968303278648,
+            0.4058909614778086,
+            0.4203615491779578,
+            0.42608372168125364,
+            0.42924123536104286,
+            0.4297902980681538,
+            0.4298242485761024,
+            0.42982647766330034,
+            0.4298264861859713,
+            0.42982648621868147,
+            0.4298264862186818,
+            0.4298264862186818
+          ],
+          "ofi_first_ci_bps": [
+            [
+              0.2201861153481305,
+              0.29178954578304966
+            ],
+            [
+              0.2686246241832839,
+              0.34080674535403227
+            ],
+            [
+              0.2912051507058837,
+              0.3642381554305447
+            ],
+            [
+              0.3111251977713423,
+              0.38202312238829306
+            ],
+            [
+              0.33549339437016934,
+              0.4101122844003122
+            ],
+            [
+              0.36616433914207874,
+              0.45097589964654533
+            ],
+            [
+              0.37583659327198893,
+              0.46846369238431873
+            ],
+            [
+              0.3788131321347272,
+              0.476006195032636
+            ],
+            [
+              0.3803281308288317,
+              0.479499410814266
+            ],
+            [
+              0.38055785139804527,
+              0.4797616148981656
+            ],
+            [
+              0.3805696005016098,
+              0.4797719264376824
+            ],
+            [
+              0.3805702321454862,
+              0.47977234790074924
+            ],
+            [
+              0.3805702337977598,
+              0.4797723485525692
+            ],
+            [
+              0.3805702338020932,
+              0.4797723485535787
+            ],
+            [
+              0.3805702338020932,
+              0.4797723485535787
+            ],
+            [
+              0.3805702338020932,
+              0.4797723485535787
+            ]
+          ],
+          "returns_first_irf_bps": [
+            0.0,
+            0.07248228697556577,
+            0.11126348916582596,
+            0.1432654677147226,
+            0.1918625238328682,
+            0.25724574946182294,
+            0.28310054405632706,
+            0.29332442699547767,
+            0.29896599935673346,
+            0.29994701711537686,
+            0.3000076769467243,
+            0.3000116596869439,
+            0.300011674914515,
+            0.3000116749729587,
+            0.30001167497295944,
+            0.30001167497295944
+          ],
+          "returns_first_ci_bps": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.0485843724601859,
+              0.09790831920567646
+            ],
+            [
+              0.0827795044939311,
+              0.1431541274330849
+            ],
+            [
+              0.1090805532532256,
+              0.18136325077677024
+            ],
+            [
+              0.14602625936749059,
+              0.23984954210467746
+            ],
+            [
+              0.1990151556568086,
+              0.3216386910557243
+            ],
+            [
+              0.2147174629214161,
+              0.3578081266100086
+            ],
+            [
+              0.22104741553016968,
+              0.37149122069007917
+            ],
+            [
+              0.22402515384131777,
+              0.38172658402880094
+            ],
+            [
+              0.22442004816545516,
+              0.38460660189446805
+            ],
+            [
+              0.2244368022163338,
+              0.3848077131588636
+            ],
+            [
+              0.22443754319257364,
+              0.3848167420551822
+            ],
+            [
+              0.22443754452634737,
+              0.3848167898863702
+            ],
+            [
+              0.22443754452875245,
+              0.38481679014110126
+            ],
+            [
+              0.22443754452875245,
+              0.38481679014110837
+            ],
+            [
+              0.22443754452875245,
+              0.38481679014110837
+            ]
+          ],
+          "diff_ofi_first_minus_lp_bps": [
+            -0.011573727950096369,
+            -0.02776268621400041,
+            -0.053498917722856976,
+            -0.08582312002074527,
+            -0.15273405779892374,
+            -0.1640942474959874,
+            -0.155361354428797,
+            -0.17393183632536613,
+            -0.1929253908637446,
+            -0.3255030586040139,
+            -0.5467057131388433,
+            -0.6425355013927292,
+            -0.9429330723741574,
+            -0.8557690368563945,
+            -0.9921996326990377,
+            -0.8989814910910048
+          ],
+          "diff_returns_first_minus_lp_bps": [
+            -0.2649070239753058,
+            -0.2574300351582617,
+            -0.2664074584747439,
+            -0.2846546634166501,
+            -0.3301683642939204,
+            -0.3127394595119731,
+            -0.29262235955042776,
+            -0.3066911310111421,
+            -0.323200626868054,
+            -0.4553463395567908,
+            -0.6765222847682215,
+            -0.7723503193690856,
+            -1.0727478836456137,
+            -0.9855838481021173,
+            -1.1220144439447601,
+            -1.028796302336727
+          ],
+          "lp_inside_var_band": [
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "var_inside_lp_band": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            true
+          ],
+          "horizons_agreeing_ofi_first": 2,
+          "horizons_agreeing_returns_first": 0,
+          "max_abs_ordering_difference_bps": 0.25333329602520943,
+          "mean_abs_ordering_difference_bps": 0.15811560618794349,
+          "n_bootstrap_draws": 200,
+          "bootstrap": "residual bootstrap: centred residuals resampled with replacement, series regenerated within each original segment, VAR re-estimated at the chosen lag",
+          "restraint": "reduced-form specification cross-check only; not a Hasbrouck information-share estimate (single venue, single price series, so that estimand is unavailable); no information share is computed or implied; orthogonalisation is an ordering assumption, not identification"
+        },
+        "two_component": {
+          "timing_convention": "inclusive (baseline is the close of the bar before the shock bar), the same convention as the headline single-component fit",
+          "point_jump_bps": 0.2581269035557727,
+          "point_a_fast_bps": 0.14986621760857058,
+          "point_a_slow_bps": 1.0388767721956134,
+          "point_tau_fast_s": 1.5429370937843168,
+          "point_tau_slow_s": 84.57583322731485,
+          "point_r_squared": 0.9723602056832323,
+          "tau_fast_region_s": [
+            1.286196723498756,
+            1080.9803041103023
+          ],
+          "tau_slow_region_s": [
+            40.83974300680695,
+            1296.7570033338295
+          ],
+          "a_fast_region_bps": [
+            -3.36742278891805,
+            653.8960049008231
+          ],
+          "a_slow_region_bps": [
+            -767.9847085025757,
+            9.324881311103686
+          ],
+          "jump_region_bps": [
+            0.21351568713401525,
+            0.4065303899076864
+          ],
+          "n_draw_fits": 2000,
+          "stable_draws": 383,
+          "stable_share": 0.1915,
+          "status": "unidentified/unstable",
+          "criteria": [
+            "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+          ],
+          "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
+          "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
+        }
       }
     },
     {
@@ -15169,6 +16944,361 @@
           },
           "event_time_unavailable_reason": null
         }
+      },
+      "crosschecks": {
+        "var": {
+          "available": true,
+          "unavailable_reason": null,
+          "variables": [
+            "return_bps",
+            "ofi_per_session_sd",
+            "spread_bps",
+            "imbalance"
+          ],
+          "returns_definition": "simple one-bar mid-price return in basis points, the same return definition as the local projections",
+          "estimation": "per-session reduced-form VAR, equation-by-equation OLS on standardized variables",
+          "lag_criterion": "BIC over lag orders 1..=10 on a common sample: ln det Sigma_ML + (p d^2 + d) ln(T) / T, d = 4",
+          "lag_range": [
+            1,
+            10
+          ],
+          "bic_by_lag": [
+            -1.2172460592665102,
+            -1.1901514403178879,
+            -1.1349173389252478,
+            -1.0797831879343005,
+            -1.0229684644496135,
+            -0.9681046674695489,
+            -0.9194946066545735,
+            -0.8579013082976445,
+            -0.8035108027122926,
+            -0.7472829379788046
+          ],
+          "chosen_lag": 1,
+          "n_obs": 1788,
+          "horizons_s": [
+            0.0,
+            1.0,
+            2.0,
+            3.0,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            30.0,
+            45.0,
+            60.0,
+            90.0,
+            120.0,
+            180.0,
+            240.0,
+            300.0
+          ],
+          "lp_response_bps": [
+            1.1405518411977118,
+            1.5374679287457234,
+            1.6644445717678404,
+            1.7346261630244877,
+            1.7528912734535784,
+            1.799961926282971,
+            1.95362804637488,
+            1.9683098394402534,
+            2.555820660083499,
+            2.741034333246664,
+            2.6177393753890863,
+            3.0659993673010733,
+            3.446247865848565,
+            4.512773641899542,
+            4.685096774554955,
+            3.7532659251996936
+          ],
+          "ofi_first_irf_bps": [
+            1.0730361901818457,
+            1.4602771439643967,
+            1.5445820087874536,
+            1.561998623669041,
+            1.5664088150021882,
+            1.5666118095206365,
+            1.5666118919252334,
+            1.566611891958686,
+            1.5666118919586993,
+            1.5666118919586993,
+            1.5666118919586993,
+            1.5666118919586993,
+            1.5666118919586993,
+            1.5666118919586993,
+            1.5666118919586993,
+            1.5666118919586993
+          ],
+          "ofi_first_ci_bps": [
+            [
+              0.9811807945110748,
+              1.1581785785039498
+            ],
+            [
+              1.324722861257379,
+              1.584556563760895
+            ],
+            [
+              1.3985067774404116,
+              1.6815479568424918
+            ],
+            [
+              1.4059171896201526,
+              1.703460822345845
+            ],
+            [
+              1.4078890115856049,
+              1.7095803881823997
+            ],
+            [
+              1.407955594511442,
+              1.7099095029734923
+            ],
+            [
+              1.4079556095273027,
+              1.7099096975092167
+            ],
+            [
+              1.4079556095305874,
+              1.7099096976242685
+            ],
+            [
+              1.407955609530588,
+              1.7099096976243366
+            ],
+            [
+              1.407955609530588,
+              1.7099096976243366
+            ],
+            [
+              1.407955609530588,
+              1.7099096976243366
+            ],
+            [
+              1.407955609530588,
+              1.7099096976243366
+            ],
+            [
+              1.407955609530588,
+              1.7099096976243366
+            ],
+            [
+              1.407955609530588,
+              1.7099096976243366
+            ],
+            [
+              1.407955609530588,
+              1.7099096976243366
+            ],
+            [
+              1.407955609530588,
+              1.7099096976243366
+            ]
+          ],
+          "returns_first_irf_bps": [
+            0.0,
+            0.4495667798178642,
+            0.5559080966762932,
+            0.5774834034107417,
+            0.5829226715132446,
+            0.5831732002225342,
+            0.5831733019210839,
+            0.5831733019623686,
+            0.5831733019623853,
+            0.5831733019623853,
+            0.5831733019623853,
+            0.5831733019623853,
+            0.5831733019623853,
+            0.5831733019623853,
+            0.5831733019623853,
+            0.5831733019623853
+          ],
+          "returns_first_ci_bps": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.33960953381054726,
+              0.5779627327859586
+            ],
+            [
+              0.4312027442256249,
+              0.6969008266205039
+            ],
+            [
+              0.4519793757665573,
+              0.7235987937752796
+            ],
+            [
+              0.45382952463984777,
+              0.7341898979684369
+            ],
+            [
+              0.4538717519700099,
+              0.7358188518675578
+            ],
+            [
+              0.45387175540358515,
+              0.7358234637970381
+            ],
+            [
+              0.4538717554038603,
+              0.735823476853704
+            ],
+            [
+              0.4538717554038603,
+              0.7358234768907728
+            ],
+            [
+              0.4538717554038603,
+              0.7358234768907731
+            ],
+            [
+              0.4538717554038603,
+              0.7358234768907731
+            ],
+            [
+              0.4538717554038603,
+              0.7358234768907731
+            ],
+            [
+              0.4538717554038603,
+              0.7358234768907731
+            ],
+            [
+              0.4538717554038603,
+              0.7358234768907731
+            ],
+            [
+              0.4538717554038603,
+              0.7358234768907731
+            ],
+            [
+              0.4538717554038603,
+              0.7358234768907731
+            ]
+          ],
+          "diff_ofi_first_minus_lp_bps": [
+            -0.0675156510158661,
+            -0.07719078478132668,
+            -0.11986256298038689,
+            -0.1726275393554466,
+            -0.18648245845139022,
+            -0.23335011676233441,
+            -0.38701615444964665,
+            -0.4016979474815674,
+            -0.9892087681247999,
+            -1.1744224412879647,
+            -1.051127483430387,
+            -1.499387475342374,
+            -1.8796359738898656,
+            -2.9461617499408423,
+            -3.1184848825962557,
+            -2.1866540332409943
+          ],
+          "diff_returns_first_minus_lp_bps": [
+            -1.1405518411977118,
+            -1.0879011489278592,
+            -1.1085364750915474,
+            -1.157142759613746,
+            -1.169968601940334,
+            -1.2167887260604369,
+            -1.3704547444537962,
+            -1.3851365374778848,
+            -1.972647358121114,
+            -2.1578610312842788,
+            -2.034566073426701,
+            -2.482826065338688,
+            -2.8630745638861796,
+            -3.9296003399371564,
+            -4.10192347259257,
+            -3.1700926232373083
+          ],
+          "lp_inside_var_band": [
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "var_inside_lp_band": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "horizons_agreeing_ofi_first": 3,
+          "horizons_agreeing_returns_first": 0,
+          "max_abs_ordering_difference_bps": 1.0730361901818457,
+          "mean_abs_ordering_difference_bps": 0.9911403962159916,
+          "n_bootstrap_draws": 200,
+          "bootstrap": "residual bootstrap: centred residuals resampled with replacement, series regenerated within each original segment, VAR re-estimated at the chosen lag",
+          "restraint": "reduced-form specification cross-check only; not a Hasbrouck information-share estimate (single venue, single price series, so that estimand is unavailable); no information share is computed or implied; orthogonalisation is an ordering assumption, not identification"
+        },
+        "two_component": {
+          "timing_convention": "inclusive (baseline is the close of the bar before the shock bar), the same convention as the headline single-component fit",
+          "point_jump_bps": 1.5143093449875855,
+          "point_a_fast_bps": 856.0367956860299,
+          "point_a_slow_bps": -992.26445859062,
+          "point_tau_fast_s": 1080.9803041103023,
+          "point_tau_slow_s": 1296.7570033338295,
+          "point_r_squared": 0.9498605260720673,
+          "tau_fast_region_s": [
+            0.4315811541432172,
+            1080.9803041103023
+          ],
+          "tau_slow_region_s": [
+            23.657047240560555,
+            1296.7570033338295
+          ],
+          "a_fast_region_bps": [
+            0.37771729754488986,
+            1900.5245154112147
+          ],
+          "a_slow_region_bps": [
+            -2230.8144176830465,
+            6.493583785291351
+          ],
+          "jump_region_bps": [
+            0.9825583356836074,
+            1.5549368725738193
+          ],
+          "n_draw_fits": 2000,
+          "stable_draws": 226,
+          "stable_share": 0.113,
+          "status": "unidentified/unstable",
+          "criteria": [
+            "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive",
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)"
+          ],
+          "amplitude_policy": "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block",
+          "promotion_note": "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
+        }
       }
     }
   ],
@@ -15195,7 +17325,7 @@
     "Response-share ratios are reported only when the denominator's interval excludes zero; otherwise the share is suppressed in the report with the reason recorded.",
     "tau is reported only for sessions whose response the jump-term adjustment curve actually fits (R^2 at or above the published bar, positive long-run response, tau interior to the search grid) and whose joint parameter region from the bootstrap fits is bounded. Sessions that fail keep their empirical curves, the failure reason, the profile loss over tau, and the gate sensitivity table instead of a forced number."
   ],
-  "schema_note": "v2 keeps every v1 field with its v1 meaning (schema, bar_ms, horizons_s, shock_definition, effective_sample_unit, the per-session response/response_ci/n_origins/fit fields, and the summary block) and adds: post_response_bps / post_response_ci_bps / post_n_origins (the strictly post-bar timing convention), response_simultaneous_band_bps and its post-bar twin, hac_se_bps / hac_ci_bps, profile (prespecified horizons, contrasts, and share ratios under the suppression rule), shock_diagnostics (OFI autocorrelation and pre-shock regressions), innovation (the lag-conditioned OFI-innovation projections), block_sensitivity, effective_blocks_at_max_horizon, n_segments and longest_segment_bars, the jump-term fit fields (jump_bps, fit_jump_raw_bps, fit_r_inf_raw_bps, fit_tau_raw_s, fit_region, profile_loss_* and gate_sensitivity), extended (the long-session ladder to 1800 s), timing_conventions, and bootstrap provenance. Descriptive strings were renamed from incorporation-speed wording to observational OFI-price-response wording; no v1 numeric field changed meaning, and the inclusive point estimates are the v1 estimates. Extension within v2 (robustness variants): each session gains a `variants` block (gap and censoring report with quote-age classes, microprice and trade-price curves, raw-OFI curves, the largest-OFI-burst event study, the volume-clock curve, pre-shock state strata, and frequency/event-time support), and the report gains a top-level `variants` block with the pooled six-session description and the prespecified variant rules. Every pre-existing v2 field and value is unchanged by the extension.",
+  "schema_note": "v2 keeps every v1 field with its v1 meaning (schema, bar_ms, horizons_s, shock_definition, effective_sample_unit, the per-session response/response_ci/n_origins/fit fields, and the summary block) and adds: post_response_bps / post_response_ci_bps / post_n_origins (the strictly post-bar timing convention), response_simultaneous_band_bps and its post-bar twin, hac_se_bps / hac_ci_bps, profile (prespecified horizons, contrasts, and share ratios under the suppression rule), shock_diagnostics (OFI autocorrelation and pre-shock regressions), innovation (the lag-conditioned OFI-innovation projections), block_sensitivity, effective_blocks_at_max_horizon, n_segments and longest_segment_bars, the jump-term fit fields (jump_bps, fit_jump_raw_bps, fit_r_inf_raw_bps, fit_tau_raw_s, fit_region, profile_loss_* and gate_sensitivity), extended (the long-session ladder to 1800 s), timing_conventions, and bootstrap provenance. Descriptive strings were renamed from incorporation-speed wording to observational OFI-price-response wording; no v1 numeric field changed meaning, and the inclusive point estimates are the v1 estimates. Extension within v2 (robustness variants): each session gains a `variants` block (gap and censoring report with quote-age classes, microprice and trade-price curves, raw-OFI curves, the largest-OFI-burst event study, the volume-clock curve, pre-shock state strata, and frequency/event-time support), and the report gains a top-level `variants` block with the pooled six-session description and the prespecified variant rules. Every pre-existing v2 field and value is unchanged by the extension. Extension within v2 (cross-checks): each session gains a `crosschecks` block (the reduced-form VAR cross-check with its per-horizon comparison against the local-projection curve, and the two-component adjustment fit's parameter regions and stability label), and the report gains a top-level `crosschecks` block with the governing methods and restraints. Every pre-existing field and value is unchanged by this extension either, and no two-component parameter appears in the summary.",
   "timing_conventions": [
     "inclusive: baseline is the close of the bar before the shock bar; the 0 s rung is the within-shock-bar move",
     "post_bar: baseline is the shock bar's own close; the 0 s rung is identically zero by construction and is stated, not estimated"
@@ -15373,5 +17503,14 @@
       "Variants are published alongside the headline curves under the same frozen protocol (same sessions, horizons, timing conventions and censoring rule); variant intervals use the same segment-respecting bootstrap design at the sensitivity resample count with seeds derived from the published seed.",
       "The burst event study is a conditional result for extreme events only. The volume-clock and event-time curves are separate estimands whose horizons are buckets and event bars, not seconds. The pooled block describes these six sessions only and reports no pooled tau or half-life."
     ]
+  },
+  "crosschecks": {
+    "restraints": [
+      "The VAR block is a reduced-form specification cross-check only; it is NOT a Hasbrouck information-share estimate (single venue, single price series — that estimand is unavailable); no information share is computed or implied anywhere; orthogonalisation is an ordering assumption, not identification.",
+      "No tau_f, tau_s or derived half-life from the two-component model is reported as a result anywhere: those values live only in the per-session crosschecks blocks, labelled unidentified/unstable wherever the bootstrap draws say so, and the report summary carries no two-component field."
+    ],
+    "var_method": "per-session reduced-form VAR on one-second bars over the simple mid-price return in bps, per-bar OFI per session SD, the quoted spread in bps of the mid, and book imbalance (the spread and imbalance as computed by the bar builder); lag order chosen by BIC over 1..=10 on a common sample, never hand-tuned; cumulative price response to a one-SD OFI shock on the local-projection horizon ladder under two Cholesky orderings (OFI ordered first; returns ordered first); bands from a 200-draw residual bootstrap with the lag held at the chosen order, seeded from the published seed",
+    "two_component_method": "R(h) = J + Af (1 - exp(-h / tau_f)) + As (1 - exp(-h / tau_s)) on the inclusive curve, fitted unweighted on the point curve and inside every headline segment-bootstrap draw (the same draws as the single-component fit; no second bootstrap); joint parameter regions are (2.5%, 97.5%) percentiles over all draw fits, and the stability label follows criteria stated in the per-session block before any outcome",
+    "agreement_criterion": "a horizon agrees (per ordering) when the local-projection estimate lies inside the VAR bootstrap band AND the VAR estimate lies inside the local-projection pointwise bootstrap interval; disagreements are reported per horizon, not smoothed over"
   }
 }

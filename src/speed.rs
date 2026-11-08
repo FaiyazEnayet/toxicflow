@@ -73,6 +73,29 @@
 //! curve stands on its own and the report says the fit was not
 //! reported, with the reason, the profile loss over tau, and the
 //! outcome across a table of gate thresholds and interior margins.
+//!
+//! Cross-checks (reported per session in a `crosschecks` block,
+//! never in the report summary):
+//!
+//! - A reduced-form VAR on the same bar series (price returns,
+//!   OFI, spread, imbalance), estimated per session with its lag
+//!   order chosen by BIC over a bounded range. Its cumulative
+//!   price response to a one-SD OFI shock is computed under two
+//!   Cholesky orderings and compared against the local-projection
+//!   curves horizon by horizon. This is a reduced-form
+//!   specification cross-check only; it is NOT a Hasbrouck
+//!   information-share estimate (single venue, single price
+//!   series — that estimand is unavailable); no information share
+//!   is computed or implied anywhere; orthogonalisation is an
+//!   ordering assumption, not identification.
+//! - A two-component adjustment fit,
+//!   R(h) = J + Af (1 - exp(-h / tau_f)) + As (1 - exp(-h / tau_s)),
+//!   fitted inside the same segment-respecting bootstrap draws as
+//!   the single-component fit. No tau_f, tau_s, or derived
+//!   half-life from this model is reported as a result anywhere:
+//!   the block carries joint parameter regions and a stability
+//!   label only, and sessions are labelled unidentified/unstable
+//!   wherever the draws say so.
 
 use crate::metrics::{bar_status, ofi_bars, ofi_events, Quote, Trade};
 
@@ -150,6 +173,19 @@ pub const SPEED_BOOTSTRAP_SEED: u64 = 0x85EB_CA6B_27D4_EA27;
 /// regressed on its own previous 10 bars, within observed segments
 /// only, and the residual is the innovation.
 pub const INNOVATION_LAGS: usize = 10;
+
+/// Bounded lag range searched for the reduced-form VAR
+/// cross-check: orders 1..=VAR_MAX_LAG are fit on a common sample
+/// and the order minimizing BIC is used. The range is stated here,
+/// before any result, and lags are never hand-tuned per session.
+pub const VAR_MAX_LAG: usize = 10;
+
+/// Residual-bootstrap resamples behind the VAR cross-check bands.
+/// The VAR bootstrap is a separate, smaller design from the
+/// headline segment bootstrap (it resamples VAR residuals, not
+/// bars), so it carries its own stated count and a seed derived
+/// from the published seed.
+pub const VAR_BOOTSTRAP_RESAMPLES: usize = 200;
 
 /// Knobs for one response analysis. `Default` is the published
 /// configuration; tests shrink the bootstrap counts, nothing else.
@@ -877,6 +913,718 @@ fn fit_exponential_raw(horizons_s: &[f64], response: &[f64]) -> Option<ExpFit> {
     fit_exponential_w(horizons_s, response, None)
 }
 
+// ------------------------------------------------------------------
+// Cross-check 2: the two-component adjustment fit, under guardrails.
+//
+// Model: R(h) = J + Af (1 - exp(-h / tau_f)) + As (1 - exp(-h / tau_s))
+// with tau_f < tau_s, fitted unweighted to the full response vector
+// (the same timing convention as the headline single-component fit:
+// the inclusive curve). The fit runs on the point curve and inside
+// every headline bootstrap draw, reusing the segment-respecting
+// bootstrap and its within-draw fitting machinery; no second
+// bootstrap is built for it.
+//
+// Amplitude policy, stated before any result: amplitudes are
+// fitted UNCONSTRAINED, so Af or As may come out negative. A
+// negative amplitude is not an adjustment component: it describes
+// reversal or overshoot (part of the response being given back),
+// which is exactly what the three sessions whose responses decline
+// from 60 to 300 s would need. Allowing negative amplitudes keeps
+// the fit honest on those curves instead of forcing a shape they
+// do not have, at the cost of the two-component reading: a fit
+// with a negative amplitude cannot be read as two adjustment
+// speeds, and the stability criteria below say so.
+//
+// Stability criteria, stated before looking at any outcome. A
+// single draw's fit counts as stable / identified-looking only if
+// ALL of the following hold:
+//   1. its unweighted R^2 is at least FIT_MIN_R_SQUARED (the same
+//      bar the headline single-component fit is judged at);
+//   2. tau_f and tau_s are both strictly interior to the
+//      two-component search grid by at least one grid step;
+//   3. the components are separated: tau_s / tau_f >= 3;
+//   4. both amplitudes are positive (Af > 0 and As > 0);
+//   5. the total long-run response J + Af + As is positive.
+// A session is labelled stable only if its point fit passes the
+// same five criteria, at least half of its bootstrap draws are
+// stable, and the bootstrap percentile regions for both taus are
+// bounded (inside the grid interior, ratio of ends below 4, the
+// same boundedness reading as the single-component fit region).
+// Otherwise the session is labelled unidentified/unstable. The
+// label is the published outcome: no tau_f, tau_s or derived
+// half-life from this model is promoted anywhere.
+// ------------------------------------------------------------------
+
+/// One two-component adjustment fit.
+#[derive(Debug, Clone, Copy)]
+pub struct TwoCompFit {
+    pub jump_bps: f64,
+    pub a_fast_bps: f64,
+    pub a_slow_bps: f64,
+    pub tau_fast_s: f64,
+    pub tau_slow_s: f64,
+    pub r_squared: f64,
+    pub loss: f64,
+}
+
+/// Tau grid for the two-component fit: every fifth point of the
+/// single-component grid (48 log-spaced values, 0.25-1500 s). The
+/// pair search is quadratic in the grid size, and this fit runs
+/// inside every bootstrap draw, so it profiles a coarser grid
+/// than the single-component fit; the grid is stated here and the
+/// stability criteria read interiority against this grid.
+fn two_tau_grid() -> Vec<f64> {
+    tau_grid().iter().step_by(5).copied().collect()
+}
+
+/// Fit the two-component path over the finite response points by
+/// profiling (tau_f, tau_s) over the two-component grid and solving
+/// for (J, Af, As) in closed form at each pair. Unweighted, like
+/// the within-draw single-component fits it sits alongside.
+/// Returns the best fit found, without judging it.
+fn fit_two_component_raw(horizons_s: &[f64], response: &[f64]) -> Option<TwoCompFit> {
+    let keep: Vec<usize> = (0..response.len())
+        .filter(|&i| response[i].is_finite())
+        .collect();
+    if keep.len() < 5 {
+        return None;
+    }
+    let hs: Vec<f64> = keep.iter().map(|&i| horizons_s[i]).collect();
+    let ys: Vec<f64> = keep.iter().map(|&i| response[i]).collect();
+    let hp = hs.len();
+    let mean = ys.iter().sum::<f64>() / hp as f64;
+    let sst: f64 = ys.iter().map(|y| (y - mean).powi(2)).sum();
+    if sst <= 0.0 || sst.is_nan() {
+        return None;
+    }
+    let syy: f64 = ys.iter().map(|y| y * y).sum();
+    let sy: f64 = ys.iter().sum();
+    let grid = two_tau_grid();
+    // Basis vectors per grid tau: f_k[h] = 1 - exp(-h / tau_k).
+    let basis: Vec<Vec<f64>> = grid
+        .iter()
+        .map(|tau| hs.iter().map(|h| 1.0 - (-h / tau).exp()).collect())
+        .collect();
+    let bsum: Vec<f64> = basis.iter().map(|b| b.iter().sum()).collect();
+    let by: Vec<f64> = basis
+        .iter()
+        .map(|b| b.iter().zip(ys.iter()).map(|(f, y)| f * y).sum())
+        .collect();
+    let mut best: Option<TwoCompFit> = None;
+    for i in 0..grid.len() {
+        for j in (i + 1)..grid.len() {
+            let (u, v) = (&basis[i], &basis[j]);
+            let suu: f64 = u.iter().map(|x| x * x).sum();
+            let svv: f64 = v.iter().map(|x| x * x).sum();
+            let suv: f64 = u.iter().zip(v.iter()).map(|(a, b)| a * b).sum();
+            let m = [
+                vec![hp as f64, bsum[i], bsum[j]],
+                vec![bsum[i], suu, suv],
+                vec![bsum[j], suv, svv],
+            ];
+            let rhs = vec![sy, by[i], by[j]];
+            let Some(coef) = solve_linear(&m, &rhs) else {
+                continue;
+            };
+            // SSE from the normal equations: syy - coef . (X^T y).
+            let sse = syy - (coef[0] * sy + coef[1] * by[i] + coef[2] * by[j]);
+            if !sse.is_finite() {
+                continue;
+            }
+            let fit = TwoCompFit {
+                jump_bps: coef[0],
+                a_fast_bps: coef[1],
+                a_slow_bps: coef[2],
+                tau_fast_s: grid[i],
+                tau_slow_s: grid[j],
+                r_squared: 1.0 - sse / sst,
+                loss: sse,
+            };
+            if best.as_ref().is_none_or(|b| fit.loss < b.loss) {
+                best = Some(fit);
+            }
+        }
+    }
+    best
+}
+
+/// Whether one two-component fit passes the pre-stated stability
+/// criteria (see the block comment above). This judges stability
+/// of the two-component reading only; it never promotes a number.
+fn two_component_stable(fit: &TwoCompFit) -> bool {
+    if fit.r_squared < FIT_MIN_R_SQUARED {
+        return false;
+    }
+    let grid = two_tau_grid();
+    if grid.len() < 3 {
+        return false;
+    }
+    let (lo, hi) = (grid[1], grid[grid.len() - 2]);
+    if fit.tau_fast_s <= lo || fit.tau_slow_s >= hi {
+        return false;
+    }
+    if fit.tau_slow_s / fit.tau_fast_s < 3.0 {
+        return false;
+    }
+    if fit.a_fast_bps <= 0.0 || fit.a_slow_bps <= 0.0 {
+        return false;
+    }
+    if fit.jump_bps + fit.a_fast_bps + fit.a_slow_bps <= 0.0 {
+        return false;
+    }
+    true
+}
+
+// ------------------------------------------------------------------
+// Cross-check 1: the reduced-form VAR.
+//
+// Specification, stated once and followed for every session:
+// - Per-session estimation. The six sessions are heterogeneous
+//   (their OFI standard deviations differ about fivefold, and the
+//   local projections are per-session for the same reason), so no
+//   pooled VAR is fit; a pooled fit with session effects would
+//   average dynamics the report elsewhere refuses to average.
+// - Variables, one per bar on the same 1 s grid the projections
+//   use: the simple mid-price return of the bar in bps (the same
+//   return definition as the projections, whose cumulative sums
+//   the VAR responses are compared against), per-bar OFI divided
+//   by the session OFI standard deviation (the projection shock
+//   scale), the quoted spread in bps of the mid, and the book
+//   imbalance, both as computed by `metrics::ofi_bars`.
+// - Observations are bars whose return is defined inside one
+//   fully-observed segment; lag windows never cross a segment
+//   boundary, the same censoring discipline as the projections.
+// - Lag order: BIC over orders 1..=VAR_MAX_LAG on a common sample
+//   (every order is fit on the observations usable at the maximum
+//   lag, so the criteria are comparable). BIC per observation is
+//   ln det Sigma_ML + (p d^2 + d) ln(T) / T with d = 4 variables.
+//   Lags are chosen by this criterion alone, never adjusted to
+//   match the projection curves.
+// - Estimation is equation-by-equation OLS (exact for a VAR with
+//   the same regressors in every equation), carried out on
+//   standardized variables for numerical conditioning (the spread
+//   is near-constant at one tick); responses are converted back
+//   to bps per one-SD OFI shock before they are reported.
+// - Impulse responses: cumulative sums of the return responses to
+//   a structural OFI shock scaled so its impact on OFI is one
+//   session SD of per-bar OFI, under two Cholesky orderings (OFI
+//   ordered first; returns ordered first). Summing the per-bar
+//   return responses to bar H gives the response over the same
+//   window as the inclusive local projection at horizon H, whose
+//   baseline is the close before the shock bar.
+// - Bands: a residual bootstrap (VAR_BOOTSTRAP_RESAMPLES draws,
+//   SplitMix64 seeded from the published seed). Residuals are
+//   centred, resampled with replacement, and new series are
+//   generated recursively inside each original segment from that
+//   segment's own first p observations; the VAR is re-estimated
+//   at the chosen lag (the lag is not re-selected per draw) and
+//   the responses recomputed. Bands are (2.5%, 97.5%) percentiles.
+//
+// Restraints, in substance: this is a reduced-form specification
+// cross-check only; it is NOT a Hasbrouck information-share
+// estimate (single venue, single price series — that estimand is
+// unavailable); no information share is computed or implied
+// anywhere; orthogonalisation is an ordering assumption, not
+// identification.
+// ------------------------------------------------------------------
+
+/// Variable names of the VAR, in the storage order of `VarData`.
+pub const VAR_VARIABLES: [&str; 4] = [
+    "return_bps",
+    "ofi_per_session_sd",
+    "spread_bps",
+    "imbalance",
+];
+
+/// Index of the return variable in the VAR storage order.
+const VAR_RET: usize = 0;
+/// Index of the OFI variable in the VAR storage order.
+const VAR_OFI: usize = 1;
+
+/// Per-bar VAR observations: rows of [return, OFI, spread,
+/// imbalance] for bars whose return is defined inside a segment,
+/// plus the half-open row ranges of each segment in row space.
+struct VarData {
+    rows: Vec<[f64; 4]>,
+    seg_rows: Vec<(usize, usize)>,
+    /// Sample mean and SD of each variable over the common
+    /// estimation sample at the maximum lag (the standardization
+    /// the estimation is carried out under).
+    mean: [f64; 4],
+    sd: [f64; 4],
+}
+
+/// Build the VAR observations from the bar series and the
+/// liquidity series (`ofi_bars` spread and imbalance, aligned to
+/// the same bar grid). Returns are simple returns in bps against
+/// the previous bar of the same segment.
+fn build_var_data(series: &BarSeries, spread: &[f64], imbalance: &[f64]) -> Option<VarData> {
+    let n = series.mid.len();
+    if spread.len() != n || imbalance.len() != n || n == 0 {
+        return None;
+    }
+    let obs_ofi: Vec<f64> = series
+        .ofi
+        .iter()
+        .zip(series.observed.iter())
+        .filter(|(_, o)| **o)
+        .map(|(v, _)| *v)
+        .collect();
+    let ofi_sd = population_sd(&obs_ofi);
+    if ofi_sd <= 0.0 || !ofi_sd.is_finite() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    let mut seg_rows = Vec::new();
+    for (a, b) in segments_of(&series.observed) {
+        if b - a < 2 {
+            continue;
+        }
+        let start = rows.len();
+        for t in (a + 1)..b {
+            if series.mid[t - 1] <= 0.0 || series.mid[t] <= 0.0 {
+                continue;
+            }
+            rows.push([
+                (series.mid[t] / series.mid[t - 1] - 1.0) * 1e4,
+                series.ofi[t] / ofi_sd,
+                spread[t] / series.mid[t] * 1e4,
+                imbalance[t],
+            ]);
+        }
+        if rows.len() > start {
+            seg_rows.push((start, rows.len()));
+        }
+    }
+    if rows.len() < 200 {
+        return None;
+    }
+    // Standardization over the common sample at the maximum lag.
+    let sample: Vec<usize> = var_sample_indices(&seg_rows, VAR_MAX_LAG);
+    if sample.len() < 100 {
+        return None;
+    }
+    let mut mean = [0.0; 4];
+    let mut sd = [0.0; 4];
+    for (v, m) in mean.iter_mut().enumerate() {
+        let vals: Vec<f64> = sample.iter().map(|&i| rows[i][v]).collect();
+        *m = vals.iter().sum::<f64>() / vals.len() as f64;
+        sd[v] = population_sd(&vals);
+    }
+    if sd.iter().any(|v| *v <= 0.0 || !v.is_finite()) {
+        return None;
+    }
+    Some(VarData {
+        rows,
+        seg_rows,
+        mean,
+        sd,
+    })
+}
+
+/// Row indices of the estimation sample at lag `p`: rows t whose
+/// whole lag window (t-p..=t) lies in the same segment as t.
+fn var_sample_indices(seg_rows: &[(usize, usize)], p: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    for &(a, b) in seg_rows {
+        if b - a > p {
+            out.extend((a + p)..b);
+        }
+    }
+    out
+}
+
+/// One fitted VAR at a fixed lag, on standardized variables.
+struct VarFit {
+    /// Intercept per equation (standardized space).
+    intercept: [f64; 4],
+    /// Coefficient matrices A_1..A_p (standardized space), each
+    /// stored as coef[lag][equation][variable].
+    coef: Vec<[[f64; 4]; 4]>,
+    /// Residual covariance (ML, divided by T) in standardized space.
+    sigma_ml: [[f64; 4]; 4],
+    /// Residuals in sample order (standardized space).
+    residuals: Vec<[f64; 4]>,
+    n_obs: usize,
+    bic: f64,
+}
+
+/// Fit a VAR(p) on the common sample at the maximum lag (the
+/// sample is the same for every p, by the stated BIC design).
+/// Returns None when the design is singular or too short.
+fn fit_var(data: &VarData, p: usize) -> Option<VarFit> {
+    let sample = var_sample_indices(&data.seg_rows, VAR_MAX_LAG);
+    let t_n = sample.len();
+    let k = 1 + 4 * p;
+    if t_n < k + 20 {
+        return None;
+    }
+    let z = |row: &[f64; 4], v: usize| (row[v] - data.mean[v]) / data.sd[v];
+    // Design: [1, z_{t-1}, ..., z_{t-p}] (only the first p lag
+    // blocks are used at this order).
+    let mut xtx = vec![vec![0.0; k]; k];
+    let mut xty = vec![vec![0.0; 4]; k];
+    for &t in &sample {
+        let mut x = vec![0.0; k];
+        x[0] = 1.0;
+        for lag in 1..=p {
+            for v in 0..4 {
+                x[1 + (lag - 1) * 4 + v] = z(&data.rows[t - lag], v);
+            }
+        }
+        let y: [f64; 4] = std::array::from_fn(|v| z(&data.rows[t], v));
+        for i in 0..k {
+            for j in 0..k {
+                xtx[i][j] += x[i] * x[j];
+            }
+            for v in 0..4 {
+                xty[i][v] += x[i] * y[v];
+            }
+        }
+    }
+    let mut beta = vec![vec![0.0; 4]; k]; // beta[regressor][equation]
+    for v in 0..4 {
+        let rhs: Vec<f64> = xty.iter().map(|r| r[v]).collect();
+        let col = solve_linear(&xtx, &rhs)?;
+        for i in 0..k {
+            beta[i][v] = col[i];
+        }
+    }
+    let mut intercept = [0.0; 4];
+    let mut coef = vec![[[0.0; 4]; 4]; p];
+    for v in 0..4 {
+        intercept[v] = beta[0][v];
+        for (lag, mat) in coef.iter_mut().enumerate() {
+            for (u, cell) in mat[v].iter_mut().enumerate() {
+                *cell = beta[1 + lag * 4 + u][v];
+            }
+        }
+    }
+    // Residuals and ML covariance.
+    let mut residuals = Vec::with_capacity(t_n);
+    let mut rss = [[0.0; 4]; 4];
+    for &t in &sample {
+        let mut e = [0.0; 4];
+        for v in 0..4 {
+            let mut pred = intercept[v];
+            for (li, mat) in coef.iter().enumerate() {
+                let lrow = &data.rows[t - 1 - li];
+                pred += mat[v]
+                    .iter()
+                    .enumerate()
+                    .map(|(u, c)| c * z(lrow, u))
+                    .sum::<f64>();
+            }
+            e[v] = z(&data.rows[t], v) - pred;
+        }
+        for i in 0..4 {
+            for j in 0..4 {
+                rss[i][j] += e[i] * e[j];
+            }
+        }
+        residuals.push(e);
+    }
+    let mut sigma_ml = [[0.0; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            sigma_ml[i][j] = rss[i][j] / t_n as f64;
+        }
+    }
+    let det = det4(&sigma_ml);
+    if det <= 0.0 || !det.is_finite() {
+        return None;
+    }
+    let bic = det.ln() + ((p * 16 + 4) as f64) * (t_n as f64).ln() / t_n as f64;
+    Some(VarFit {
+        intercept,
+        coef,
+        sigma_ml,
+        residuals,
+        n_obs: t_n,
+        bic,
+    })
+}
+
+/// Determinant of a 4x4 matrix by cofactor expansion.
+fn det4(m: &[[f64; 4]; 4]) -> f64 {
+    let det3 = |a: [[f64; 3]; 3]| -> f64 {
+        a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+            - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+            + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
+    };
+    let mut total = 0.0;
+    for j in 0..4 {
+        let mut sub = [[0.0; 3]; 3];
+        for (ri, i) in (1..4).enumerate() {
+            let mut cj = 0;
+            for (jj, val) in m[i].iter().enumerate() {
+                if jj != j {
+                    sub[ri][cj] = *val;
+                    cj += 1;
+                }
+            }
+        }
+        let sign = if j % 2 == 0 { 1.0 } else { -1.0 };
+        total += sign * m[0][j] * det3(sub);
+    }
+    total
+}
+
+/// Lower Cholesky factor of a symmetric positive-definite 4x4.
+fn cholesky4(sigma: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
+    let mut l = [[0.0; 4]; 4];
+    for i in 0..4 {
+        for j in 0..=i {
+            let mut s = sigma[i][j];
+            s -= l[i]
+                .iter()
+                .zip(l[j].iter())
+                .take(j)
+                .map(|(a, b)| a * b)
+                .sum::<f64>();
+            if i == j {
+                if s <= 0.0 || !s.is_finite() {
+                    return None;
+                }
+                l[i][j] = s.sqrt();
+            } else {
+                l[i][j] = s / l[j][j];
+            }
+        }
+    }
+    Some(l)
+}
+
+/// Cumulative price response (bps) to the OFI structural shock,
+/// at the given horizon rungs in bars, under one Cholesky
+/// ordering (`ordering` lists variable indices in Cholesky order,
+/// first variable first). The shock is scaled so its impact on
+/// the OFI variable is exactly one unit of that variable in
+/// original scale (one session SD of per-bar OFI). Responses are
+/// computed in standardized space and the return leg is converted
+/// back to bps with the return variable's SD.
+fn var_cumulative_irf(
+    fit: &VarFit,
+    sd: &[f64; 4],
+    ordering: &[usize; 4],
+    horizons_bars: &[usize],
+) -> Option<Vec<f64>> {
+    let p = fit.coef.len();
+    // Permute coefficients and covariance into the ordering.
+    let mut a: Vec<[[f64; 4]; 4]> = vec![[[0.0; 4]; 4]; p];
+    let mut sigma = [[0.0; 4]; 4];
+    for (lag, amat) in a.iter_mut().enumerate() {
+        for (i, row) in amat.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell = fit.coef[lag][ordering[i]][ordering[j]];
+            }
+        }
+    }
+    for (i, row) in sigma.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = fit.sigma_ml[ordering[i]][ordering[j]];
+        }
+    }
+    let chol = cholesky4(&sigma)?;
+    let ofi_pos = ordering.iter().position(|&v| v == VAR_OFI)?;
+    let ret_pos = ordering.iter().position(|&v| v == VAR_RET)?;
+    // Structural shock vector (standardized space), rescaled so
+    // the OFI impact in original units is one SD of OFI.
+    let impact_z = chol[ofi_pos][ofi_pos];
+    if impact_z <= 0.0 {
+        return None;
+    }
+    let scale = 1.0 / (impact_z * sd[VAR_OFI]);
+    let shock: [f64; 4] = std::array::from_fn(|i| chol[i][ofi_pos] * scale);
+    let max_h = horizons_bars.iter().copied().max().unwrap_or(0);
+    // MA recursion: psi_0 = I, psi_h = sum_i A_i psi_{h-i}.
+    let mut psis: Vec<[[f64; 4]; 4]> = Vec::with_capacity(max_h + 1);
+    let mut id = [[0.0; 4]; 4];
+    for (i, row) in id.iter_mut().enumerate() {
+        row[i] = 1.0;
+    }
+    psis.push(id);
+    for h in 1..=max_h {
+        let mut acc = [[0.0; 4]; 4];
+        for (li, amat) in a.iter().take(p.min(h)).enumerate() {
+            let psi = &psis[h - 1 - li];
+            for i in 0..4 {
+                for j in 0..4 {
+                    let mut s = 0.0;
+                    for q in 0..4 {
+                        s += amat[i][q] * psi[q][j];
+                    }
+                    acc[i][j] += s;
+                }
+            }
+        }
+        psis.push(acc);
+    }
+    let mut cum = 0.0;
+    let mut by_h: Vec<f64> = Vec::with_capacity(max_h + 1);
+    for psi in &psis {
+        let mut resp = 0.0;
+        for q in 0..4 {
+            resp += psi[ret_pos][q] * shock[q];
+        }
+        cum += resp * sd[VAR_RET];
+        by_h.push(cum);
+    }
+    Some(horizons_bars.iter().map(|&h| by_h[h.min(max_h)]).collect())
+}
+
+/// The two Cholesky orderings used as the sensitivity check:
+/// OFI ordered first, and returns ordered first. Everything else
+/// (spread, imbalance last) is held fixed between them.
+pub const VAR_ORDERING_OFI_FIRST: [usize; 4] = [1, 0, 2, 3];
+/// Returns-ordered-first Cholesky ordering (see above).
+pub const VAR_ORDERING_RET_FIRST: [usize; 4] = [0, 1, 2, 3];
+
+/// Residual-bootstrap VAR responses: new series are generated
+/// recursively within each original segment from that segment's
+/// first p standardized observations, with centred residuals
+/// resampled with replacement. The VAR is re-estimated at the
+/// fixed chosen lag on the generated series (same segment layout
+/// and common-sample rule) and both orderings' cumulative
+/// responses recomputed. Returns draws for (OFI-first,
+/// returns-first).
+#[allow(clippy::too_many_arguments)]
+fn var_bootstrap_irfs(
+    data: &VarData,
+    fit: &VarFit,
+    horizons_bars: &[usize],
+    resamples: usize,
+    seed: u64,
+) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    let p = fit.coef.len();
+    let mut draws_a = Vec::new();
+    let mut draws_b = Vec::new();
+    if fit.residuals.is_empty() || p == 0 {
+        return (draws_a, draws_b);
+    }
+    // Centred residuals.
+    let mut centre = [0.0; 4];
+    for e in &fit.residuals {
+        for v in 0..4 {
+            centre[v] += e[v];
+        }
+    }
+    for c in centre.iter_mut() {
+        *c /= fit.residuals.len() as f64;
+    }
+    let centred: Vec<[f64; 4]> = fit
+        .residuals
+        .iter()
+        .map(|e| std::array::from_fn(|v| e[v] - centre[v]))
+        .collect();
+    // Standardized observations, segment by segment.
+    let zrow = |row: &[f64; 4]| -> [f64; 4] {
+        std::array::from_fn(|v| (row[v] - data.mean[v]) / data.sd[v])
+    };
+    let mut rng = SplitMix64(seed);
+    for _ in 0..resamples {
+        // Generate a full standardized series with the original
+        // segment layout.
+        let mut gen: Vec<[f64; 4]> = vec![[0.0; 4]; data.rows.len()];
+        let mut ok = true;
+        for &(a, b) in &data.seg_rows {
+            // This segment's generated values, built locally and
+            // copied in: seeded with the segment's own first p
+            // standardized observations (segments too short to
+            // seed keep their own values throughout and never
+            // enter the estimation sample).
+            let mut seg: Vec<[f64; 4]> = data.rows[a..b].iter().map(&zrow).collect();
+            if b - a > p {
+                seg.truncate(p);
+                while seg.len() < b - a {
+                    let e = centred[rng.next_below(centred.len())];
+                    let mut y = fit.intercept;
+                    for (li, amat) in fit.coef.iter().enumerate() {
+                        let prev = seg[seg.len() - 1 - li];
+                        for (v, yv) in y.iter_mut().enumerate() {
+                            *yv += amat[v]
+                                .iter()
+                                .zip(prev.iter())
+                                .map(|(c, x)| c * x)
+                                .sum::<f64>();
+                        }
+                    }
+                    for (v, yv) in y.iter_mut().enumerate() {
+                        *yv += e[v];
+                    }
+                    if y.iter().any(|v| !v.is_finite() || v.abs() > 1e6) {
+                        ok = false;
+                        break;
+                    }
+                    seg.push(y);
+                }
+                if !ok {
+                    break;
+                }
+            }
+            for (slot, val) in gen.iter_mut().take(b).skip(a).zip(seg.iter()) {
+                *slot = *val;
+            }
+        }
+        if !ok {
+            continue;
+        }
+        // Re-estimate at the same lag on the generated series:
+        // wrap it as VarData in original units so `fit_var`
+        // applies the identical sample rule (its standardization
+        // then re-derives mean/SD of the generated sample, which
+        // is the correct bootstrap analogue).
+        let gen_data = VarData {
+            rows: gen
+                .iter()
+                .map(|z| std::array::from_fn(|v| z[v] * data.sd[v] + data.mean[v]))
+                .collect(),
+            seg_rows: data.seg_rows.clone(),
+            mean: data.mean,
+            sd: data.sd,
+        };
+        // Recompute the standardization from the generated sample
+        // itself, exactly as build_var_data does.
+        let Some(gen_data) = var_restandardize(gen_data) else {
+            continue;
+        };
+        let Some(gfit) = fit_var(&gen_data, p) else {
+            continue;
+        };
+        let ia = var_cumulative_irf(&gfit, &gen_data.sd, &VAR_ORDERING_OFI_FIRST, horizons_bars);
+        let ib = var_cumulative_irf(&gfit, &gen_data.sd, &VAR_ORDERING_RET_FIRST, horizons_bars);
+        if let (Some(a), Some(b)) = (ia, ib) {
+            if a.iter()
+                .chain(b.iter())
+                .all(|v| v.is_finite() && v.abs() < 1e4)
+            {
+                draws_a.push(a);
+                draws_b.push(b);
+            }
+        }
+    }
+    (draws_a, draws_b)
+}
+
+/// Recompute a VarData's standardization (mean/SD over the common
+/// sample at the maximum lag), as `build_var_data` does. Returns
+/// None when a variable has no variation.
+fn var_restandardize(mut data: VarData) -> Option<VarData> {
+    let sample = var_sample_indices(&data.seg_rows, VAR_MAX_LAG);
+    if sample.len() < 100 {
+        return None;
+    }
+    for v in 0..4 {
+        let vals: Vec<f64> = sample.iter().map(|&i| data.rows[i][v]).collect();
+        data.mean[v] = vals.iter().sum::<f64>() / vals.len() as f64;
+        data.sd[v] = population_sd(&vals);
+    }
+    if data.sd.iter().any(|v| *v <= 0.0 || !v.is_finite()) {
+        return None;
+    }
+    Some(data)
+}
+
 /// Profile loss over the tau grid for a (possibly weighted) fit:
 /// how flat or unbounded the loss surface is matters more than
 /// the single minimizing tau. Returns (taus, losses) downsampled
@@ -1131,6 +1879,11 @@ struct BootOut {
     fits_all: Vec<ExpFit>,
     /// The subset of draw fits that passed the published judging.
     fits_pass: Vec<ExpFit>,
+    /// Every draw's own two-component fit (unweighted), collected
+    /// only on the headline run (`want_two`): the two-component
+    /// cross-check reuses these same draws and fits no second
+    /// bootstrap of its own.
+    two_fits_all: Vec<TwoCompFit>,
 }
 
 /// Segment-respecting block bootstrap of the whole estimator.
@@ -1151,6 +1904,7 @@ fn bootstrap_engine(
     seed: u64,
     want_post: bool,
     want_innov: bool,
+    want_two: bool,
 ) -> BootOut {
     let mut out = BootOut {
         incl: Vec::new(),
@@ -1158,6 +1912,7 @@ fn bootstrap_engine(
         innov: Vec::new(),
         fits_all: Vec::new(),
         fits_pass: Vec::new(),
+        two_fits_all: Vec::new(),
     };
     let segments = segments_of(&series.observed);
     let target: usize = series.observed.iter().filter(|o| **o).count();
@@ -1212,6 +1967,11 @@ fn bootstrap_engine(
                 out.fits_pass.push(fit);
             }
             out.fits_all.push(fit);
+        }
+        if want_two {
+            if let Some(tfit) = fit_two_component_raw(horizons_s, &incl) {
+                out.two_fits_all.push(tfit);
+            }
         }
         if want_innov {
             if let Some(innov_series) = innov {
@@ -1432,6 +2192,339 @@ pub struct ExtendedResponse {
     pub profile_flat_tau_range_s: Option<(f64, f64)>,
 }
 
+/// The reduced-form VAR cross-check for one session. This is a
+/// reduced-form specification cross-check only; it is NOT a
+/// Hasbrouck information-share estimate (single venue, single
+/// price series — that estimand is unavailable); no information
+/// share is computed or implied anywhere; orthogonalisation is
+/// an ordering assumption, not identification.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VarCrosscheck {
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
+    /// Variable definitions, in the order of `VAR_VARIABLES`.
+    pub variables: Vec<String>,
+    pub returns_definition: String,
+    pub estimation: String,
+    pub lag_criterion: String,
+    pub lag_range: (usize, usize),
+    /// BIC per candidate lag order (null where that order's
+    /// design was singular on this session).
+    pub bic_by_lag: Vec<Option<f64>>,
+    pub chosen_lag: Option<usize>,
+    pub n_obs: usize,
+    pub horizons_s: Vec<f64>,
+    /// The inclusive local-projection curve the VAR is compared
+    /// against (copied from the session's headline fields).
+    pub lp_response_bps: Vec<f64>,
+    pub ofi_first_irf_bps: Vec<f64>,
+    pub ofi_first_ci_bps: Vec<(f64, f64)>,
+    pub returns_first_irf_bps: Vec<f64>,
+    pub returns_first_ci_bps: Vec<(f64, f64)>,
+    /// VAR minus LP, per horizon and ordering, in bps.
+    pub diff_ofi_first_minus_lp_bps: Vec<f64>,
+    pub diff_returns_first_minus_lp_bps: Vec<f64>,
+    /// Agreement criterion, per horizon, for the OFI-first
+    /// ordering: the LP estimate lies inside the VAR band AND
+    /// the VAR estimate lies inside the LP pointwise interval.
+    pub lp_inside_var_band: Vec<bool>,
+    pub var_inside_lp_band: Vec<bool>,
+    pub horizons_agreeing_ofi_first: usize,
+    pub horizons_agreeing_returns_first: usize,
+    pub max_abs_ordering_difference_bps: f64,
+    pub mean_abs_ordering_difference_bps: f64,
+    pub n_bootstrap_draws: usize,
+    pub bootstrap: String,
+    pub restraint: String,
+}
+
+/// The two-component adjustment fit cross-check for one session.
+/// This block is the only place this model's parameters appear:
+/// no tau_f, tau_s or derived half-life from it is a headline, a
+/// summary field, or a reported result anywhere in the report.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TwoComponentCrosscheck {
+    pub timing_convention: String,
+    /// Raw point-fit values on the session's inclusive curve,
+    /// reported inside this cross-check block only and never
+    /// promoted (null when the curve could not be fit at all).
+    pub point_jump_bps: Option<f64>,
+    pub point_a_fast_bps: Option<f64>,
+    pub point_a_slow_bps: Option<f64>,
+    pub point_tau_fast_s: Option<f64>,
+    pub point_tau_slow_s: Option<f64>,
+    pub point_r_squared: Option<f64>,
+    /// Joint parameter region from the within-draw fits
+    /// ((2.5%, 97.5%) percentiles over all draws, stable or not).
+    pub tau_fast_region_s: Option<(f64, f64)>,
+    pub tau_slow_region_s: Option<(f64, f64)>,
+    pub a_fast_region_bps: Option<(f64, f64)>,
+    pub a_slow_region_bps: Option<(f64, f64)>,
+    pub jump_region_bps: Option<(f64, f64)>,
+    pub n_draw_fits: usize,
+    pub stable_draws: usize,
+    pub stable_share: f64,
+    /// "unidentified/unstable" unless the point fit and the draws
+    /// jointly pass the pre-stated stability criteria.
+    pub status: String,
+    pub criteria: Vec<String>,
+    pub amplitude_policy: String,
+    pub promotion_note: String,
+}
+
+/// Both Phase-3 cross-checks for one session.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionCrosschecks {
+    pub var: VarCrosscheck,
+    pub two_component: TwoComponentCrosscheck,
+}
+
+/// Report-level cross-check block: the methods and restraints
+/// that govern the per-session `crosschecks` blocks. It carries
+/// no pooled VAR result and no two-component parameter of any
+/// kind.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReportCrosschecks {
+    pub restraints: Vec<String>,
+    pub var_method: String,
+    pub two_component_method: String,
+    pub agreement_criterion: String,
+}
+
+fn var_unavailable(reason: &str, horizons_s: &[f64], lp: &[f64]) -> VarCrosscheck {
+    let h = horizons_s.len();
+    VarCrosscheck {
+        available: false,
+        unavailable_reason: Some(reason.to_string()),
+        variables: VAR_VARIABLES.iter().map(|s| s.to_string()).collect(),
+        returns_definition:
+            "simple one-bar mid-price return in basis points, the same return definition as the local projections"
+                .to_string(),
+        estimation: "per-session reduced-form VAR, equation-by-equation OLS on standardized variables".to_string(),
+        lag_criterion: format!(
+            "BIC over lag orders 1..={VAR_MAX_LAG} on a common sample: ln det Sigma_ML + (p d^2 + d) ln(T) / T, d = 4"
+        ),
+        lag_range: (1, VAR_MAX_LAG),
+        bic_by_lag: vec![None; VAR_MAX_LAG],
+        chosen_lag: None,
+        n_obs: 0,
+        horizons_s: horizons_s.to_vec(),
+        lp_response_bps: lp.to_vec(),
+        ofi_first_irf_bps: vec![f64::NAN; h],
+        ofi_first_ci_bps: vec![(f64::NAN, f64::NAN); h],
+        returns_first_irf_bps: vec![f64::NAN; h],
+        returns_first_ci_bps: vec![(f64::NAN, f64::NAN); h],
+        diff_ofi_first_minus_lp_bps: vec![f64::NAN; h],
+        diff_returns_first_minus_lp_bps: vec![f64::NAN; h],
+        lp_inside_var_band: vec![false; h],
+        var_inside_lp_band: vec![false; h],
+        horizons_agreeing_ofi_first: 0,
+        horizons_agreeing_returns_first: 0,
+        max_abs_ordering_difference_bps: f64::NAN,
+        mean_abs_ordering_difference_bps: f64::NAN,
+        n_bootstrap_draws: 0,
+        bootstrap:
+            "residual bootstrap: centred residuals resampled with replacement, series regenerated within each original segment, VAR re-estimated at the chosen lag"
+                .to_string(),
+        restraint:
+            "reduced-form specification cross-check only; not a Hasbrouck information-share estimate (single venue, single price series, so that estimand is unavailable); no information share is computed or implied; orthogonalisation is an ordering assumption, not identification"
+                .to_string(),
+    }
+}
+
+/// Compute the VAR cross-check for one session.
+#[allow(clippy::too_many_arguments)]
+fn compute_var_crosscheck(
+    series: &BarSeries,
+    spread: &[f64],
+    imbalance: &[f64],
+    horizons_s: &[f64],
+    horizons_bars: &[usize],
+    lp: &[f64],
+    lp_ci: &[(f64, f64)],
+    cfg: &SpeedConfig,
+) -> VarCrosscheck {
+    let Some(data) = build_var_data(series, spread, imbalance) else {
+        return var_unavailable(
+            "the session does not provide enough usable bars with return and liquidity variation for a VAR",
+            horizons_s,
+            lp,
+        );
+    };
+    let mut bics: Vec<Option<f64>> = Vec::new();
+    let mut fits: Vec<Option<VarFit>> = Vec::new();
+    for p in 1..=VAR_MAX_LAG {
+        let f = fit_var(&data, p);
+        bics.push(f.as_ref().map(|x| x.bic));
+        fits.push(f);
+    }
+    let mut chosen: Option<usize> = None;
+    for (i, b) in bics.iter().enumerate() {
+        if let Some(b) = b {
+            if chosen.is_none_or(|c| *b < bics[c].unwrap()) {
+                chosen = Some(i);
+            }
+        }
+    }
+    let Some(ci) = chosen else {
+        return var_unavailable(
+            "every candidate VAR lag order had a singular design or a non-positive residual determinant on this session",
+            horizons_s,
+            lp,
+        );
+    };
+    let fit = fits
+        .into_iter()
+        .nth(ci)
+        .flatten()
+        .expect("chosen fit exists");
+    let p = ci + 1;
+    let (Some(irf_a), Some(irf_b)) = (
+        var_cumulative_irf(&fit, &data.sd, &VAR_ORDERING_OFI_FIRST, horizons_bars),
+        var_cumulative_irf(&fit, &data.sd, &VAR_ORDERING_RET_FIRST, horizons_bars),
+    ) else {
+        return var_unavailable(
+            "the residual covariance at the chosen lag is not positive definite, so no Cholesky responses can be computed",
+            horizons_s,
+            lp,
+        );
+    };
+    let resamples = cfg.sensitivity_resamples.min(VAR_BOOTSTRAP_RESAMPLES);
+    let (draws_a, draws_b) = var_bootstrap_irfs(
+        &data,
+        &fit,
+        horizons_bars,
+        resamples,
+        cfg.seed ^ 0x0A12_0000_0000_0004,
+    );
+    let h_len = horizons_s.len();
+    let ci_a = draws_ci(&draws_a, h_len);
+    let ci_b = draws_ci(&draws_b, h_len);
+    let agree = |irf: &[f64], ci: &[(f64, f64)]| -> (Vec<bool>, Vec<bool>, usize) {
+        let mut lp_in = Vec::with_capacity(h_len);
+        let mut var_in = Vec::with_capacity(h_len);
+        let mut count = 0;
+        for k in 0..h_len {
+            let a = lp[k] >= ci[k].0 && lp[k] <= ci[k].1;
+            let b = irf[k] >= lp_ci[k].0 && irf[k] <= lp_ci[k].1;
+            if a && b {
+                count += 1;
+            }
+            lp_in.push(a);
+            var_in.push(b);
+        }
+        (lp_in, var_in, count)
+    };
+    let (lp_in_a, var_in_a, agree_a) = agree(&irf_a, &ci_a);
+    let (_, _, agree_b) = agree(&irf_b, &ci_b);
+    let ord_diffs: Vec<f64> = irf_a
+        .iter()
+        .zip(irf_b.iter())
+        .map(|(a, b)| (a - b).abs())
+        .collect();
+    let mut out = var_unavailable("", horizons_s, lp);
+    out.available = true;
+    out.unavailable_reason = None;
+    out.bic_by_lag = bics;
+    out.chosen_lag = Some(p);
+    out.n_obs = fit.n_obs;
+    out.ofi_first_irf_bps = irf_a.clone();
+    out.ofi_first_ci_bps = ci_a;
+    out.returns_first_irf_bps = irf_b.clone();
+    out.returns_first_ci_bps = ci_b;
+    out.diff_ofi_first_minus_lp_bps = irf_a.iter().zip(lp.iter()).map(|(v, l)| v - l).collect();
+    out.diff_returns_first_minus_lp_bps = irf_b.iter().zip(lp.iter()).map(|(v, l)| v - l).collect();
+    out.lp_inside_var_band = lp_in_a;
+    out.var_inside_lp_band = var_in_a;
+    out.horizons_agreeing_ofi_first = agree_a;
+    out.horizons_agreeing_returns_first = agree_b;
+    out.max_abs_ordering_difference_bps = ord_diffs.iter().copied().fold(0.0, f64::max);
+    out.mean_abs_ordering_difference_bps = if ord_diffs.is_empty() {
+        f64::NAN
+    } else {
+        ord_diffs.iter().sum::<f64>() / ord_diffs.len() as f64
+    };
+    out.n_bootstrap_draws = draws_a.len();
+    out
+}
+
+/// Summarize the two-component cross-check for one session from
+/// the point curve and the within-draw fits collected by the
+/// headline bootstrap (the same draws as the single-component
+/// fit; no second bootstrap).
+fn summarize_two_component(
+    horizons_s: &[f64],
+    curve: &[f64],
+    draw_fits: &[TwoCompFit],
+) -> TwoComponentCrosscheck {
+    let point = fit_two_component_raw(horizons_s, curve);
+    let region = |get: &dyn Fn(&TwoCompFit) -> f64| -> Option<(f64, f64)> {
+        if draw_fits.len() >= 10 {
+            Some(percentile_ci(
+                &draw_fits.iter().map(get).collect::<Vec<_>>(),
+            ))
+        } else {
+            None
+        }
+    };
+    let stable_draws = draw_fits.iter().filter(|f| two_component_stable(f)).count();
+    let stable_share = if draw_fits.is_empty() {
+        0.0
+    } else {
+        stable_draws as f64 / draw_fits.len() as f64
+    };
+    let grid = two_tau_grid();
+    let region_bounded = |r: Option<(f64, f64)>| -> bool {
+        match r {
+            Some((lo, hi)) => {
+                lo > grid[1] && hi < grid[grid.len() - 2] && lo > 0.0 && hi / lo < 4.0
+            }
+            None => false,
+        }
+    };
+    let tau_f_region = region(&|f| f.tau_fast_s);
+    let tau_s_region = region(&|f| f.tau_slow_s);
+    let stable = point.map(|f| two_component_stable(&f)).unwrap_or(false)
+        && stable_share >= 0.5
+        && region_bounded(tau_f_region)
+        && region_bounded(tau_s_region);
+    TwoComponentCrosscheck {
+        timing_convention:
+            "inclusive (baseline is the close of the bar before the shock bar), the same convention as the headline single-component fit"
+                .to_string(),
+        point_jump_bps: point.map(|f| f.jump_bps),
+        point_a_fast_bps: point.map(|f| f.a_fast_bps),
+        point_a_slow_bps: point.map(|f| f.a_slow_bps),
+        point_tau_fast_s: point.map(|f| f.tau_fast_s),
+        point_tau_slow_s: point.map(|f| f.tau_slow_s),
+        point_r_squared: point.map(|f| f.r_squared),
+        tau_fast_region_s: tau_f_region,
+        tau_slow_region_s: tau_s_region,
+        a_fast_region_bps: region(&|f| f.a_fast_bps),
+        a_slow_region_bps: region(&|f| f.a_slow_bps),
+        jump_region_bps: region(&|f| f.jump_bps),
+        n_draw_fits: draw_fits.len(),
+        stable_draws,
+        stable_share,
+        status: if stable {
+            "stable in the bootstrap draws under the pre-stated criteria; still not promoted, because no held-out confirmation on independent sessions exists"
+                .to_string()
+        } else {
+            "unidentified/unstable".to_string()
+        },
+        criteria: vec![
+            "a draw fit is stable only if its R^2 reaches the headline bar (0.85), both taus are interior to the two-component search grid by at least one grid step, tau_slow / tau_fast >= 3, both amplitudes are positive, and the total long-run response J + Af + As is positive".to_string(),
+            "a session is labelled stable only if its point fit passes the same criteria, at least half of its bootstrap draws are stable, and both tau percentile regions are bounded (inside the grid interior, ratio of ends below 4)".to_string(),
+        ],
+        amplitude_policy:
+            "amplitudes are fitted unconstrained and may be negative: a negative amplitude describes reversal or overshoot, not an adjustment component, so any fit carrying one fails the stability criteria and cannot be read as two adjustment speeds; this caveat applies wherever a negative amplitude appears in this block"
+                .to_string(),
+        promotion_note:
+            "no tau_f, tau_s or derived half-life from this model is reported as a result anywhere: these values live only in this per-session cross-check block, and the session is labelled unidentified/unstable wherever the draws say so; held-out confirmation on independent sessions does not exist yet"
+                .to_string(),
+    }
+}
+
 /// Build the model-free profile from point curves, pointwise
 /// intervals, and the bootstrap draws of both conventions.
 #[allow(clippy::too_many_arguments)]
@@ -1603,6 +2696,12 @@ pub struct SessionSpeed {
     /// the session's recorded quotes (and trades, where a variant
     /// needs them) were supplied to the analysis.
     pub variants: Option<SessionVariants>,
+    // ---- v2 extension: cross-checks ----
+    /// The reduced-form VAR and two-component cross-checks, when
+    /// the session's recorded quotes were supplied to the
+    /// analysis. The two-component parameters live only inside
+    /// this block.
+    pub crosschecks: Option<SessionCrosschecks>,
 }
 
 /// Analyze one session's bar series. Returns None when the
@@ -1692,6 +2791,7 @@ fn analyze_series(
         headline_block,
         cfg.bootstrap_resamples,
         cfg.seed,
+        true,
         true,
         true,
     );
@@ -1880,6 +2980,7 @@ fn analyze_series(
                     .wrapping_add((len_s as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
                 false,
                 false,
+                false,
             );
             let alt_ci = draws_ci(&alt.incl, h_len);
             let ci300 = alt_ci.last().copied();
@@ -1898,6 +2999,19 @@ fn analyze_series(
     }
     let variants = variant_inputs
         .map(|inp| compute_variants(series, inp, &horizons_bars, &horizons_s, ofi_sd, cfg));
+    let crosschecks = variant_inputs.map(|inp| SessionCrosschecks {
+        var: compute_var_crosscheck(
+            series,
+            &inp.spread,
+            &inp.imbalance,
+            &horizons_s,
+            &horizons_bars,
+            &curve,
+            &response_ci_bps,
+            cfg,
+        ),
+        two_component: summarize_two_component(&horizons_s, &curve, &boot.two_fits_all),
+    });
     let effective_blocks = segments.iter().map(|(a, b)| (b - a) / max_h.max(1)).sum();
     let extended = if n_observed >= EXTENDED_MIN_OBSERVED_BARS {
         extended_analysis(series, cfg)
@@ -1964,6 +3078,7 @@ fn analyze_series(
         gate_sensitivity,
         extended,
         variants,
+        crosschecks,
     })
 }
 
@@ -2020,6 +3135,7 @@ fn extended_analysis(series: &BarSeries, cfg: &SpeedConfig) -> Option<ExtendedRe
         cfg.extended_resamples,
         cfg.seed ^ 0xE57E_D1A6_5EED_0001,
         true,
+        false,
         false,
     );
     let ci = draws_ci(&boot.incl, keep);
@@ -2206,6 +3322,11 @@ pub struct SpeedReport {
     /// variant follows. Per-session variant results live on each
     /// session's `variants` field.
     pub variants: ReportVariants,
+    // ---- v2 extension: cross-checks ----
+    /// Report-level cross-check block: methods and restraints for
+    /// the per-session `crosschecks` blocks. It carries no pooled
+    /// VAR result and no two-component parameter.
+    pub crosschecks: ReportCrosschecks,
 }
 
 impl SpeedReport {
@@ -2293,7 +3414,15 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
             state strata, and frequency/event-time support), and the report \
             gains a top-level `variants` block with the pooled six-session \
             description and the prespecified variant rules. Every pre-existing \
-            v2 field and value is unchanged by the extension."
+            v2 field and value is unchanged by the extension. \
+            Extension within v2 (cross-checks): each session gains a \
+            `crosschecks` block (the reduced-form VAR cross-check with its \
+            per-horizon comparison against the local-projection curve, and \
+            the two-component adjustment fit's parameter regions and \
+            stability label), and the report gains a top-level `crosschecks` \
+            block with the governing methods and restraints. Every \
+            pre-existing field and value is unchanged by this extension \
+            either, and no two-component parameter appears in the summary."
             .to_string(),
         timing_conventions: vec![
             "inclusive: baseline is the close of the bar before the shock bar; the 0 s rung is the within-shock-bar move"
@@ -2320,6 +3449,21 @@ pub fn summarize_speed(sessions: Vec<SessionSpeed>, cfg: &SpeedConfig) -> SpeedR
                 .to_string(),
         },
         variants,
+        crosschecks: ReportCrosschecks {
+            restraints: vec![
+                "The VAR block is a reduced-form specification cross-check only; it is NOT a Hasbrouck information-share estimate (single venue, single price series — that estimand is unavailable); no information share is computed or implied anywhere; orthogonalisation is an ordering assumption, not identification.".to_string(),
+                "No tau_f, tau_s or derived half-life from the two-component model is reported as a result anywhere: those values live only in the per-session crosschecks blocks, labelled unidentified/unstable wherever the bootstrap draws say so, and the report summary carries no two-component field.".to_string(),
+            ],
+            var_method: format!(
+                "per-session reduced-form VAR on one-second bars over the simple mid-price return in bps, per-bar OFI per session SD, the quoted spread in bps of the mid, and book imbalance (the spread and imbalance as computed by the bar builder); lag order chosen by BIC over 1..={VAR_MAX_LAG} on a common sample, never hand-tuned; cumulative price response to a one-SD OFI shock on the local-projection horizon ladder under two Cholesky orderings (OFI ordered first; returns ordered first); bands from a {VAR_BOOTSTRAP_RESAMPLES}-draw residual bootstrap with the lag held at the chosen order, seeded from the published seed"
+            ),
+            two_component_method:
+                "R(h) = J + Af (1 - exp(-h / tau_f)) + As (1 - exp(-h / tau_s)) on the inclusive curve, fitted unweighted on the point curve and inside every headline segment-bootstrap draw (the same draws as the single-component fit; no second bootstrap); joint parameter regions are (2.5%, 97.5%) percentiles over all draw fits, and the stability label follows criteria stated in the per-session block before any outcome"
+                    .to_string(),
+            agreement_criterion:
+                "a horizon agrees (per ordering) when the local-projection estimate lies inside the VAR bootstrap band AND the VAR estimate lies inside the local-projection pointwise bootstrap interval; disagreements are reported per horizon, not smoothed over"
+                    .to_string(),
+        },
     }
 }
 
@@ -2389,6 +3533,10 @@ pub struct VariantInputs {
     pub quote_age_ms: Vec<i64>,
     pub micro: Vec<f64>,
     pub spread: Vec<f64>,
+    /// Book imbalance per bar, as computed by `ofi_bars` (the
+    /// liquidity series the VAR cross-check uses alongside the
+    /// spread).
+    pub imbalance: Vec<f64>,
     pub quotes_in_bar: Vec<usize>,
     pub trade_count: Vec<usize>,
     pub trades_supplied: bool,
@@ -2592,6 +3740,7 @@ pub fn build_variant_inputs(
         quote_age_ms: status.iter().map(|s| s.quote_age_ms).collect(),
         micro,
         spread: bars.iter().map(|b| b.3).collect(),
+        imbalance: bars.iter().map(|b| b.4).collect(),
         quotes_in_bar,
         trade_count,
         trades_supplied,
@@ -3328,6 +4477,7 @@ fn compute_variants(
                     cfg.seed ^ 0xB0C1_0000_0000_0002,
                     false,
                     false,
+                    false,
                 );
                 (
                     Some(VolumeClockVariant {
@@ -3470,7 +4620,7 @@ fn compute_variants(
             let en = es.mid.len();
             let esd = population_sd(&es.ofi);
             let (c, k, _, _) = lp_pair(&es.mid, &es.ofi, &es.observed, &vec![false; en], &vec![true; en], horizons_bars, esd, false);
-            let boot = bootstrap_engine(es, None, horizons_bars, horizons_s, 300, cfg.sensitivity_resamples, cfg.seed ^ 0x5EED_0000_0000_0003, false, false);
+            let boot = bootstrap_engine(es, None, horizons_bars, horizons_s, 300, cfg.sensitivity_resamples, cfg.seed ^ 0x5EED_0000_0000_0003, false, false, false);
             (
                 Some(EventTimeVariant {
                     quotes_per_bar: EVENT_TIME_QUOTES_PER_BAR,
@@ -4057,6 +5207,7 @@ mod tests {
                 cfg.seed,
                 true,
                 false,
+                false,
             )
         };
         let (c1, c2) = (run(&cfg), run(&cfg));
@@ -4483,6 +5634,281 @@ mod tests {
             j["sessions"][0]["variants"]["bursts"]["threshold_quantile"],
             0.95
         );
+    }
+
+    /// A planted VAR(1) in bar space: OFI (session-standardized)
+    /// is AR(1) with phi = 0.6, returns load on lagged OFI with
+    /// beta = 2 bps and on their own lag with alpha = 0.2, and
+    /// spread / imbalance are exogenous noise. Returns (bar
+    /// series, spread, imbalance).
+    fn synth_var_series(n: usize, contemporaneous: f64) -> (BarSeries, Vec<f64>, Vec<f64>) {
+        let mut s: u64 = 0x5EED_1234_5678_9ABC;
+        let (phi, alpha, beta) = (0.6f64, 0.2f64, 2.0f64);
+        let mut ofi_z = 0.0f64;
+        let mut ret = 0.0f64;
+        let mut imb = 0.0f64;
+        let mut price = 100_000.0f64;
+        let mut mid = Vec::with_capacity(n);
+        let mut ofi = Vec::with_capacity(n);
+        let mut spread = Vec::with_capacity(n);
+        let mut imbalance = Vec::with_capacity(n);
+        for _ in 0..n {
+            // Unit-variance innovations (the raw xorshift draw is
+            // uniform on (-1, 1), variance 1/3, hence the sqrt(3)).
+            let e = (xorshift(&mut s) * 2.0 - 1.0) * 3.0f64.sqrt();
+            let u = (xorshift(&mut s) * 2.0 - 1.0) * 0.5;
+            // Returns load on the PREVIOUS bar's OFI (and, when
+            // `contemporaneous` is nonzero, on this bar's OFI
+            // innovation e, which is what correlates the two
+            // series within the bar). ofi_z has SD
+            // 1/sqrt(1-phi^2) = 1.25, so ofi_z / 1.25 is the
+            // session-standardized OFI the estimator recovers.
+            ret = alpha * ret + beta * (ofi_z / 1.25) + contemporaneous * e + u;
+            ofi_z = phi * ofi_z + e;
+            imb = 0.3 * imb + 0.5 * (xorshift(&mut s) * 2.0 - 1.0);
+            price *= 1.0 + ret / 1e4;
+            mid.push(price);
+            ofi.push(ofi_z * 37.0);
+            spread.push(price * 1e-4 * (1.0 + 0.1 * (xorshift(&mut s) * 2.0 - 1.0)));
+            imbalance.push(imb);
+        }
+        (
+            BarSeries {
+                mid,
+                ofi,
+                observed: vec![true; n],
+            },
+            spread,
+            imbalance,
+        )
+    }
+
+    #[test]
+    fn var_recovers_planted_var1_dynamics() {
+        let (series, spread, imbalance) = synth_var_series(20_000, 0.0);
+        let data = build_var_data(&series, &spread, &imbalance).expect("var data");
+        // BIC over the bounded range must select the planted
+        // order 1 (the criterion is the stated one; nothing is
+        // hand-tuned to the projections, which are not involved).
+        let bics: Vec<Option<f64>> = (1..=VAR_MAX_LAG)
+            .map(|p| fit_var(&data, p).map(|f| f.bic))
+            .collect();
+        let chosen = bics
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| b.map(|v| (i + 1, v)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(p, _)| p);
+        assert_eq!(chosen, Some(1), "BIC by lag: {bics:?}");
+        let fit = fit_var(&data, 1).expect("VAR(1) fit");
+        let horizons_bars: Vec<usize> = SPEED_HORIZONS_S.iter().map(|s| *s as usize).collect();
+        let irf = var_cumulative_irf(&fit, &data.sd, &VAR_ORDERING_OFI_FIRST, &horizons_bars)
+            .expect("irf");
+        // Analytic cumulative response of the planted system to a
+        // one-unit (one session SD) OFI shock: the standardized
+        // OFI is AR(1) with phi and innovation SD sqrt(1-phi^2);
+        // a one-unit level shock propagates as phi^k, and returns
+        // follow ret_k = alpha ret_{k-1} + beta ofi_{k-1} with a
+        // zero impact return (independent innovations).
+        let (phi, alpha, beta) = (0.6f64, 0.2f64, 2.0f64);
+        let analytic = |h_max: usize| -> f64 {
+            let (mut cum, mut r, mut o) = (0.0, 0.0, 1.0);
+            for _ in 0..=h_max {
+                cum += r;
+                let next_o = phi * o;
+                r = alpha * r + beta * o;
+                o = next_o;
+            }
+            cum
+        };
+        for (idx, h) in [(10usize, 10usize), (13, 60), (15, 300)] {
+            let want = analytic(h);
+            assert!(
+                (irf[idx] - want).abs() < 1.0,
+                "h={h}: fitted IRF {} vs analytic {want}",
+                irf[idx]
+            );
+        }
+        // With independent innovations the contemporaneous
+        // response is zero under either ordering.
+        assert!(irf[0].abs() < 0.35, "impact response {}", irf[0]);
+    }
+
+    #[test]
+    fn var_ordering_changes_only_the_contemporaneous_split() {
+        // Returns load on the OFI innovation itself, so the
+        // within-bar split between flow and price is real in the
+        // data and the ordering decides who is credited with it:
+        // OFI-first must show a positive impact response, and
+        // returns-first must show exactly none at h = 0 (the OFI
+        // shock cannot move returns contemporaneously when returns
+        // are ordered first), while both orderings agree closely
+        // at long horizons.
+        let (series, spread, imbalance) = synth_var_series(20_000, 1.5);
+        let data = build_var_data(&series, &spread, &imbalance).expect("var data");
+        let fit = fit_var(&data, 1).expect("VAR(1) fit");
+        let horizons_bars: Vec<usize> = SPEED_HORIZONS_S.iter().map(|s| *s as usize).collect();
+        let a = var_cumulative_irf(&fit, &data.sd, &VAR_ORDERING_OFI_FIRST, &horizons_bars)
+            .expect("ofi-first irf");
+        let b = var_cumulative_irf(&fit, &data.sd, &VAR_ORDERING_RET_FIRST, &horizons_bars)
+            .expect("returns-first irf");
+        assert!(a[0] > 0.3, "OFI-first impact {} should be positive", a[0]);
+        assert!(
+            b[0].abs() < 1e-9,
+            "returns-first impact {} is zero by construction of the ordering",
+            b[0]
+        );
+        // Both orderings find the lagged response (beta on lagged
+        // OFI), so both cumulative curves are large at 300 s. They
+        // do not fully converge in cumulative terms: the impact-bar
+        // difference is retained by the cumulation and decays only
+        // through the return's own alpha, so the OFI-first curve
+        // stays above the returns-first one by roughly
+        // a[0] / (1 - alpha). The ordering sensitivity is the
+        // contemporaneous split, and the test pins its size.
+        let last = horizons_bars.len() - 1;
+        assert!(
+            b[last] > 1.5,
+            "returns-first long-horizon response {} should find the lagged response",
+            b[last]
+        );
+        let gap = a[last] - b[last];
+        let expected_gap = a[0] / (1.0 - 0.2);
+        assert!(
+            (gap - expected_gap).abs() < 0.45 * expected_gap,
+            "cumulative ordering gap {gap} should sit near the impact gap cumulated through alpha: {expected_gap}"
+        );
+    }
+
+    #[test]
+    fn two_component_fit_recovers_a_planted_two_scale_curve() {
+        // Exact planted curve: J = 1, Af = 2 at tau_f = 5 s,
+        // As = 4 at tau_s = 120 s. The fit must recover the
+        // parameters closely and pass the pre-stated stability
+        // criteria (positive amplitudes, separated interior taus).
+        let horizons_s: Vec<f64> = SPEED_HORIZONS_S.iter().map(|s| *s as f64).collect();
+        let curve: Vec<f64> = horizons_s
+            .iter()
+            .map(|h| 1.0 + 2.0 * (1.0 - (-h / 5.0).exp()) + 4.0 * (1.0 - (-h / 120.0).exp()))
+            .collect();
+        let fit = fit_two_component_raw(&horizons_s, &curve).expect("two-component fit");
+        assert!(fit.r_squared > 0.99, "R^2 {}", fit.r_squared);
+        assert!((fit.jump_bps - 1.0).abs() < 0.4, "J {}", fit.jump_bps);
+        assert!((fit.a_fast_bps - 2.0).abs() < 0.6, "Af {}", fit.a_fast_bps);
+        assert!((fit.a_slow_bps - 4.0).abs() < 0.6, "As {}", fit.a_slow_bps);
+        assert!(
+            (fit.tau_fast_s - 5.0).abs() < 3.0,
+            "tau_f {}",
+            fit.tau_fast_s
+        );
+        assert!(
+            (fit.tau_slow_s - 120.0).abs() < 45.0,
+            "tau_s {}",
+            fit.tau_slow_s
+        );
+        assert!(
+            two_component_stable(&fit),
+            "an exact, separated, positive two-scale curve must read as stable"
+        );
+    }
+
+    #[test]
+    fn two_component_declining_curve_is_labelled_unstable() {
+        // Adversarial case: a response that declines steadily
+        // from 60 to 300 s, the shape three recorded sessions
+        // actually have. Representing it needs a negative slow
+        // amplitude, which the pre-stated criteria refuse to call
+        // stable, and the summary must label the session
+        // unidentified/unstable rather than promoting anything.
+        let horizons_s: Vec<f64> = SPEED_HORIZONS_S.iter().map(|s| *s as f64).collect();
+        let curve: Vec<f64> = horizons_s
+            .iter()
+            .map(|h| 2.6 - 1.8 * (1.0 - (-h / 100.0).exp()))
+            .collect();
+        assert!(curve[10] > *curve.last().unwrap(), "curve declines");
+        let fit = fit_two_component_raw(&horizons_s, &curve).expect("raw fit exists");
+        assert!(
+            !two_component_stable(&fit),
+            "declining curve must not read as a stable two-component adjustment: {fit:?}"
+        );
+        let summary = summarize_two_component(&horizons_s, &curve, &[]);
+        assert_eq!(summary.status, "unidentified/unstable");
+        assert_eq!(summary.stable_share, 0.0);
+    }
+
+    #[test]
+    fn crosschecks_guardrail_no_two_component_fields_in_summary() {
+        // The guardrail, asserted on a full serialized report:
+        // the summary block keeps exactly its pre-existing fields
+        // (no two-component tau, half-life or amplitude of any
+        // kind), while the per-session cross-checks block exists
+        // and the report-level restraints travel with the numbers.
+        let mut s: u64 = 0xBEEF;
+        let n = 1799;
+        let mut price = 100_000.0f64;
+        let mut quotes = Vec::with_capacity(n);
+        let mut trades = Vec::with_capacity(n);
+        for i in 0..n {
+            let u = xorshift(&mut s) * 2.0 - 1.0;
+            price *= 1.0 + u * 0.0002;
+            quotes.push(Quote {
+                time_ms: i as i64 * 1_000,
+                bid_px: price - 0.05,
+                bid_sz: 1.0 + (xorshift(&mut s) + 1.0) * 2.0,
+                ask_px: price + 0.05,
+                ask_sz: 1.0 + (xorshift(&mut s) + 1.0) * 2.0,
+            });
+            trades.push(Trade {
+                time_ms: i as i64 * 1_000 + 500,
+                price,
+                qty: 0.01,
+                is_buyer_maker: i % 2 == 0,
+            });
+        }
+        let res = analyze_session_speed_with_trades(
+            "synth-guardrail",
+            &quotes,
+            Some(&trades),
+            &small_cfg(),
+        )
+        .expect("analysis");
+        let cc = res.crosschecks.as_ref().expect("crosschecks present");
+        assert!(cc.var.available, "VAR: {:?}", cc.var.unavailable_reason);
+        assert!(cc.var.chosen_lag.is_some());
+        assert_eq!(cc.two_component.status, "unidentified/unstable");
+        let report = summarize_speed(vec![res], &small_cfg());
+        let v: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+        let summary = v["summary"].as_object().unwrap();
+        let mut keys: Vec<&str> = summary.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "half_life_max_s",
+                "half_life_mean_s",
+                "half_life_median_s",
+                "half_life_min_s",
+                "half_life_std_s",
+                "n_fit_ok",
+                "n_sessions",
+                "tau_max_s",
+                "tau_mean_s",
+                "tau_median_s",
+                "tau_min_s",
+                "tau_std_s",
+            ],
+            "the summary must keep exactly its pre-existing fields"
+        );
+        let summary_json = serde_json::to_string(&v["summary"]).unwrap();
+        assert!(!summary_json.contains("tau_fast") && !summary_json.contains("tau_slow"));
+        assert!(v["sessions"][0]["crosschecks"]["two_component"]["status"]
+            .as_str()
+            .unwrap()
+            .contains("unidentified"));
+        assert!(v["crosschecks"]["restraints"][0]
+            .as_str()
+            .unwrap()
+            .contains("Hasbrouck"));
     }
 
     #[test]
