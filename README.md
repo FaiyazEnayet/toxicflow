@@ -15,7 +15,7 @@
   <a href="#run-locally"><img src="https://img.shields.io/badge/Run-Locally-202326?style=for-the-badge&labelColor=17191b" alt="Run Locally"></a>
 </p>
 
-Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information. The dashboard keeps weak results visible rather than turning diagnostics into trading claims.
+Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information, and traces how the mid-price responds to order-flow shocks over the seconds after they land. The dashboard keeps weak results visible rather than turning diagnostics into trading claims.
 
 
 <p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><img src="docs/demo.gif?v=showcase-20261017b" alt="Toxicflow demo"></a></p>
@@ -28,6 +28,7 @@ The important question is whether a toxicity signal arrives early enough to chan
 - Inspect market price and VPIN with aligned timestamps and cross-chart readouts.
 - Compare flow, impact and calibration without hiding the majority-class baseline.
 - Review market-making outcomes under the same recorded session.
+- Trace how the mid-price response to an order-flow shock unfolds over the 300 seconds after it lands.
 
 ## Method
 
