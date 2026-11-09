@@ -542,6 +542,49 @@ pub struct WalkForwardDetail {
     pub baseline_correct: Vec<f64>,
 }
 
+/// Calibration table: mean predicted probability vs realized rate
+/// over rank bins of the out-of-sample predictions.
+///
+/// The bins partition the probability-sorted predictions by rank, not
+/// by a fixed chunk size: with `k = min(10, n)` bins, bin `j` holds
+/// sorted positions `floor(j*n/k) .. floor((j+1)*n/k)`, so there are
+/// always exactly `k` nonempty bins, every prediction lands in
+/// exactly one bin, and bin sizes differ by at most one row. (The
+/// previous `chunks(n / 10)` partition produced an eleventh,
+/// nearly empty bin whenever `n` was not a multiple of 10: at
+/// n = 832 the table was ten bins of 83 rows plus a final 2-row bin.)
+/// The sort is stable, so tied probabilities keep ledger order.
+/// Empty input yields no bins. The tuple schema is
+/// (mean predicted probability, realized rate, row count).
+fn calibration_bins(predictions: &[PredictionRow]) -> Vec<(f64, f64, usize)> {
+    let mut order: Vec<usize> = (0..predictions.len()).collect();
+    order.sort_by(|&i, &j| {
+        predictions[i]
+            .proba
+            .partial_cmp(&predictions[j].proba)
+            .unwrap()
+    });
+    let n = order.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let k = n.min(10);
+    let mut calibration = Vec::with_capacity(k);
+    for j in 0..k {
+        let lo = j * n / k;
+        let hi = (j + 1) * n / k;
+        let chunk = &order[lo..hi];
+        let mp = chunk.iter().map(|&i| predictions[i].proba).sum::<f64>() / chunk.len() as f64;
+        let rl = chunk
+            .iter()
+            .map(|&i| f64::from(predictions[i].target))
+            .sum::<f64>()
+            / chunk.len() as f64;
+        calibration.push((mp, rl, chunk.len()));
+    }
+    calibration
+}
+
 /// Purged walk-forward evaluation.
 pub fn walk_forward(bars: &[Bar], n_splits: usize, horizon: usize) -> Option<EvalReport> {
     walk_forward_detailed(bars, n_splits, horizon).map(|d| d.report)
@@ -640,26 +683,7 @@ pub fn walk_forward_detailed(
         BOOTSTRAP_SEED,
     );
 
-    let mut order: Vec<usize> = (0..predictions.len()).collect();
-    order.sort_by(|&i, &j| {
-        predictions[i]
-            .proba
-            .partial_cmp(&predictions[j].proba)
-            .unwrap()
-    });
-    let mut calibration = Vec::new();
-    for chunk in order.chunks(order.len() / 10) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let mp = chunk.iter().map(|&i| predictions[i].proba).sum::<f64>() / chunk.len() as f64;
-        let rl = chunk
-            .iter()
-            .map(|&i| f64::from(predictions[i].target))
-            .sum::<f64>()
-            / chunk.len() as f64;
-        calibration.push((mp, rl, chunk.len()));
-    }
+    let calibration = calibration_bins(&predictions);
     Some(WalkForwardDetail {
         report: EvalReport {
             feature_version: FEATURE_VERSION,
@@ -2062,5 +2086,183 @@ mod tests {
         assert!(-0.04 <= lo && lo <= hi && hi <= 0.02, "ci ({lo}, {hi})");
         // The pilot report serializes with its schema tag.
         assert!(pilot.to_json().contains(SESSION_PILOT_SCHEMA));
+    }
+
+    fn calib_rows(probas: &[f64], targets: &[u8]) -> Vec<PredictionRow> {
+        probas
+            .iter()
+            .zip(targets.iter())
+            .enumerate()
+            .map(|(i, (&proba, &target))| PredictionRow {
+                fold: 0,
+                row: i,
+                time_ms: i as i64 * 10_000,
+                features: [0.0; N_FEATURES],
+                target,
+                proba,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn calibration_bins_empty_input_yields_no_bins() {
+        assert!(calibration_bins(&[]).is_empty());
+    }
+
+    #[test]
+    fn calibration_bins_fewer_rows_than_bins_gives_one_row_per_bin() {
+        // n = 7 < 10, so k = 7 bins of one row each, sorted by proba.
+        let rows = calib_rows(&[0.7, 0.1, 0.4, 0.2, 0.6, 0.3, 0.5], &[1, 0, 1, 0, 1, 0, 1]);
+        let bins = calibration_bins(&rows);
+        assert_eq!(
+            bins,
+            vec![
+                (0.1, 0.0, 1),
+                (0.2, 0.0, 1),
+                (0.3, 0.0, 1),
+                (0.4, 1.0, 1),
+                (0.5, 1.0, 1),
+                (0.6, 1.0, 1),
+                (0.7, 1.0, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn calibration_bins_twenty_rows_split_into_ten_pairs() {
+        // n = 20: k = 10 bins of exactly 2 rows. Sorted probas are
+        // 0.04, 0.08, ..., 0.80; the first ten sorted rows have
+        // target 0 and the last ten target 1. Input is reversed so
+        // the sort has to do the work.
+        let probas: Vec<f64> = (0..20).map(|m| (20 - m) as f64 * 0.04).collect();
+        let targets: Vec<u8> = (0..20).map(|m| u8::from(m < 10)).collect();
+        let rows = calib_rows(&probas, &targets);
+        let bins = calibration_bins(&rows);
+        assert_eq!(bins.len(), 10);
+        assert_eq!(bins.iter().map(|b| b.2).sum::<usize>(), 20);
+        for (j, b) in bins.iter().enumerate() {
+            assert_eq!(b.2, 2, "bin {j} size");
+            let want_mp = (4 * j + 3) as f64 * 0.02;
+            assert!((b.0 - want_mp).abs() < 1e-12, "bin {j} mean proba {}", b.0);
+            let want_rl = if j < 5 { 0.0 } else { 1.0 };
+            assert_eq!(b.1, want_rl, "bin {j} realized rate");
+        }
+    }
+
+    #[test]
+    fn calibration_bins_832_rows_make_ten_balanced_bins() {
+        // n = 832 (the archived main session's scored rows): the old
+        // chunks(n / 10) partition made 11 bins (ten of 83 rows plus
+        // a 2-row remainder). The rank partition must make exactly 10
+        // bins, conserve every row, and keep sizes within one row.
+        let probas: Vec<f64> = (0..832).rev().map(|i| i as f64 / 1000.0).collect();
+        let targets: Vec<u8> = (0..832).rev().map(|i| u8::from(i % 3 == 0)).collect();
+        let rows = calib_rows(&probas, &targets);
+        let bins = calibration_bins(&rows);
+        assert_eq!(bins.len(), 10);
+        let sizes: Vec<usize> = bins.iter().map(|b| b.2).collect();
+        assert_eq!(sizes, vec![83, 83, 83, 83, 84, 83, 83, 83, 83, 84]);
+        assert_eq!(sizes.iter().sum::<usize>(), 832);
+        // Conservation of outcomes: the count-weighted realized rates
+        // return the input's positive count (278 rows with i % 3 == 0).
+        let positives: f64 = bins.iter().map(|b| b.1 * b.2 as f64).sum();
+        assert!((positives - 278.0).abs() < 1e-9, "positives {positives}");
+        // Conservation of probability mass.
+        let mass: f64 = bins.iter().map(|b| b.0 * b.2 as f64).sum();
+        let want_mass: f64 = (0..832).map(|i| i as f64 / 1000.0).sum();
+        assert!(
+            (mass - want_mass).abs() < 1e-9,
+            "mass {mass} vs {want_mass}"
+        );
+    }
+
+    #[test]
+    fn calibration_bins_tied_probabilities_keep_ledger_order() {
+        // All probabilities equal: the stable sort must keep the
+        // input (ledger) order, so the bins walk the targets in
+        // order: five 1s then fifteen 0s, in pairs.
+        let rows = calib_rows(
+            &[0.5; 20],
+            &[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
+        let bins = calibration_bins(&rows);
+        assert_eq!(bins.len(), 10);
+        assert_eq!(bins[0], (0.5, 1.0, 2));
+        assert_eq!(bins[1], (0.5, 1.0, 2));
+        assert_eq!(bins[2], (0.5, 0.5, 2));
+        for b in &bins[3..] {
+            assert_eq!(*b, (0.5, 0.0, 2));
+        }
+    }
+
+    #[test]
+    fn calibration_bins_hand_calculated_rates() {
+        // n = 10: one row per bin. In sorted-proba order the targets
+        // are [0,0,1,0,1,1,0,1,1,1]; input is reversed.
+        let probas: Vec<f64> = (0..10).rev().map(|m| 0.05 + 0.1 * m as f64).collect();
+        let targets_sorted: [u8; 10] = [0, 0, 1, 0, 1, 1, 0, 1, 1, 1];
+        let targets: Vec<u8> = targets_sorted.iter().rev().copied().collect();
+        let rows = calib_rows(&probas, &targets);
+        let bins = calibration_bins(&rows);
+        assert_eq!(bins.len(), 10);
+        for (j, b) in bins.iter().enumerate() {
+            assert_eq!(b.2, 1);
+            assert!(
+                (b.0 - (0.05 + 0.1 * j as f64)).abs() < 1e-12,
+                "bin {j} mp {}",
+                b.0
+            );
+            assert_eq!(b.1, f64::from(targets_sorted[j]), "bin {j} rate");
+        }
+    }
+
+    #[test]
+    fn calibration_rank_partition_leaves_scores_and_predictions_unchanged() {
+        // End to end: 1040 bars, 4 splits, horizon 2 gives 4 folds of
+        // 208 = 832 OOS predictions, the archived main session's
+        // scored-row count. Accuracy, Brier and the prediction vector
+        // below were captured from the pre-fix code on this fixture;
+        // the partition change is reporting-only, so they must not
+        // move, while the calibration table goes from the old 11 bins
+        // (sizes 83 x10 plus a 2-row remainder) to 10 balanced bins.
+        let bars: Vec<Bar> = (0..1040)
+            .map(|i| Bar {
+                time_ms: i as i64 * 10_000,
+                ofi: ((i * 37 % 101) as f64 - 50.0) / 25.0,
+                ofi_z: ((i * 53 % 89) as f64 - 44.0) / 22.0,
+                imbalance: ((i * 29 % 41) as f64 - 20.0) / 20.0,
+                spread_z: 0.0,
+                spread_degenerate: false,
+                signed_vol: ((i * 17 % 31) as f64 - 15.0) / 15.0,
+                target: u8::from((i * 37 % 101) + (i * 11 % 7) > 55),
+            })
+            .collect();
+        let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        assert_eq!(detail.predictions.len(), 832);
+        assert!(
+            (detail.report.accuracy - 0.985_576_923_076_923_1).abs() < 1e-12,
+            "accuracy moved: {}",
+            detail.report.accuracy
+        );
+        assert!(
+            (detail.report.brier - 0.02152350977877481).abs() < 1e-12,
+            "brier moved: {}",
+            detail.report.brier
+        );
+        let fingerprint: f64 = detail
+            .predictions
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r.proba * (i as f64 + 1.0))
+            .sum();
+        assert!(
+            (fingerprint - 164_617.492_914_319_6).abs() < 1e-6,
+            "prediction vector moved: {fingerprint}"
+        );
+        let cal = &detail.report.calibration;
+        assert_eq!(cal.len(), 10);
+        let sizes: Vec<usize> = cal.iter().map(|c| c.2).collect();
+        assert_eq!(sizes, vec![83, 83, 83, 83, 84, 83, 83, 83, 83, 84]);
+        assert_eq!(sizes.iter().sum::<usize>(), 832);
     }
 }
