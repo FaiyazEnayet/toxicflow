@@ -20,7 +20,7 @@ pub const PROTOCOL_PATH: &str = "docs/direction_confirmation_protocol.md";
 /// document changes deliberately, update this constant in the same commit;
 /// the digest test in `tests/direction_confirmation.rs` fails otherwise.
 pub const PROTOCOL_DIGEST: &str =
-    "f9644bab289981b2f70529ee877ef600d29ea1b6b9f9118088fbfafde53411fa";
+    "27658d6ece73e3d3e6c34ff0aa1ecb760115933f9951c2f38a44ea8bc9f3e4d1";
 
 /// The six archive sessions, in the order they appear in
 /// `docs/info_speed_report.json`. The TF6 pilot covers only the first

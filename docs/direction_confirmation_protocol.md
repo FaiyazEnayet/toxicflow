@@ -171,7 +171,7 @@ pooled development score is defined.
 No cutoffs, feature additions, hyperparameters or horizons are
 searched beyond this paragraph. A failed fit or an undefined metric is
 fixed only by repairing a demonstrable implementation defect and
-re-running this same specification; weak scores alone never cancel
+re-running this same specification; low scores alone never cancel
 the test. Development results are descriptive and selection-biased;
 they are never reported as confirmatory evidence.
 
