@@ -6,12 +6,14 @@ self-contained HTML file (plotly.js is embedded, no server needed).
 
 Usage:
     ./target/debug/toxicflow export data/session_325h --out runs/dashboard_data
-    python3 scripts/dashboard.py --data runs/dashboard_data --out docs/dashboard.html
+    python3 scripts/dashboard.py --data runs/dashboard_data --out docs/dashboard.html --speed-report docs/info_speed_report.json
 """
 
 import argparse
 import json
+import math
 import os
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -28,6 +30,61 @@ def load(data_dir):
     for df in (vpin, kyle, ofi):
         df["time"] = pd.to_datetime(df["time_ms"], unit="ms")
     return vpin, kyle, ofi, cal, summary
+
+
+def information_speed(data_dir, report_path, *, required):
+    """Match the fresh export to the published, full-precision response curve."""
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    session = next(row for row in report["sessions"] if row["session"] == "session_325h")
+    with open(os.path.join(data_dir, "summary.json"), encoding="utf-8") as f:
+        exported = json.load(f).get("speed")
+    horizons = session["horizons_s"]
+    response = session["response_bps"]
+    lo, hi = map(list, zip(*session["response_ci_bps"]))
+    same_session = (
+        exported and exported["horizons_s"] == horizons
+        and len(exported["response_bps"]) == len(response)
+        and all(math.isclose(a, b, abs_tol=1e-10)
+                for a, b in zip(exported["response_bps"], response))
+    )
+    if not same_session:
+        if required:
+            raise ValueError("Export does not match the published session_325h response")
+        return None, None
+    csv = pd.read_csv(os.path.join(data_dir, "speed.csv"))
+    if (csv["horizon_s"].tolist() != horizons
+            or csv["n_origins"].tolist() != session["n_origins"]
+            or any(abs(a - b) > 0.00005000001
+                   for name, exact in (("response_bps", response), ("ci_lo_bps", lo), ("ci_hi_bps", hi))
+                   for a, b in zip(csv[name], exact, strict=True))):
+        raise ValueError("Export does not match the published session_325h information-speed curve")
+
+    summary = report["summary"]
+    best = max(report["sessions"], key=lambda row: row["fit_r_squared"])
+    threshold = 0.85  # Headline threshold documented in the report and SpeedConfig.
+    failed = summary["n_sessions"] - summary["n_fit_ok"]
+    verdict = (f"Exponential adjustment fit rejected in {failed} of {summary['n_sessions']} sessions. "
+               f"Best raw R² {best['fit_r_squared']:.3f} against a {threshold:.2f} threshold.")
+    if "tau is not bounded" in (best["fit_failure"] or ""):
+        verdict += " The best fit cleared the threshold, but its bootstrap did not bound tau."
+    if not summary["n_fit_ok"]:
+        verdict += " No tau or half-life is reported."
+    highlights = " · ".join(f"{h} s: {response[horizons.index(h)]:+.2f} bps" for h in (0, 60, 300))
+    fig = go.Figure([
+        go.Scatter(x=horizons, y=lo, mode="lines", line=dict(width=0),
+                   showlegend=False, hoverinfo="skip"),
+        go.Scatter(x=horizons, y=hi, mode="lines", line=dict(width=0),
+                   fill="tonexty", fillcolor="rgba(216,148,112,.24)",
+                   name="Pointwise bootstrap interval", hoverinfo="skip"),
+        go.Scatter(x=horizons, y=response, mode="lines+markers",
+                   name="Cumulative response", customdata=list(zip(lo, hi, session["n_origins"])),
+                   hovertemplate=("%{x} s: %{y:+.4f} bps<br>Bootstrap: "
+                                  "[%{customdata[0]:+.4f}, %{customdata[1]:+.4f}] bps"
+                                  "<br>%{customdata[2]} origins<extra></extra>")),
+    ])
+    fig.update_layout(xaxis_title="Horizon (seconds)", yaxis_title="Cumulative response (bps)",
+                      showlegend=True, meta=dict(verdict=verdict, highlights=highlights))
+    return fig, verdict
 
 
 def build(data_dir):
@@ -198,12 +255,28 @@ def build(data_dir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="runs/dashboard_data")
+    ap.add_argument("--speed-report", type=Path, help="Published report for the main session export")
     ap.add_argument("--out", default="docs/dashboard.html")
     args = ap.parse_args()
-    fig = build(args.data)
+    report = args.speed_report or Path(__file__).resolve().parents[1] / "docs/info_speed_report.json"
+    speed, verdict = information_speed(args.data, report, required=args.speed_report is not None)
+    if speed is None:
+        fig = build(args.data)
+    else:
+        # Preserve the previously published panels and their evaluation protocol.
+        # Only the response curve and its summary row use the new export.
+        panels_path = Path(__file__).resolve().parents[1] / "portfolio_ui/main_session_panels.json"
+        panels = json.loads(panels_path.read_text(encoding="utf-8"))
+        cells = next(trace["cells"]["values"] for trace in panels["data"] if trace["type"] == "table")
+        cells[0].append("Information speed")
+        cells[1].append(verdict)
+        fig = go.Figure(panels)
+    raw = fig.to_html(include_plotlyjs=True, full_html=True)
+    if speed is not None:
+        raw += speed.to_html(include_plotlyjs=False, full_html=False)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as fh:
-        fh.write(_portfolio_html(fig.to_html(include_plotlyjs=True, full_html=True)))
+        fh.write(_portfolio_html(raw))
     print(f"dashboard written -> {args.out}")
 
 
@@ -211,7 +284,6 @@ def main():
 def _portfolio_html(raw):
     """Presentation-only transform of this run’s freshly calculated figures."""
     import sys
-    from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "portfolio_ui"))
     from renderer import render_html
