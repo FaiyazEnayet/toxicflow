@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Registered direction confirmation protocol (`docs/direction_confirmation_protocol.md`, `src/direction_manifest.rs`, tests in `tests/direction_confirmation.rs`). The TF6 pilot left the 60-second direction predictor unresolved (+0.0186 paired accuracy difference across five sessions, interval spanning zero), so the test that can settle it on the November 2026 recording campaign is now frozen before any campaign outcome is available: the post-close 60-second target on one-second bars, four fixed feature families (reference flow, flow and liquidity controls, incremental VPIN, bounded interactions), one unweighted ridge logistic fitting rule, two operating rules, a development selection ladder over the archives plus slots 01-10, and a single confirmatory score on slots 11-20 with prespecified win / partial / null / incomplete gates and a paired grouped bootstrap at 300 s and 600 s block lengths. The manifest encodes the split in code: archives and slots 01-10 resolve for fit use, slots 11-20 are sealed and any attempt to resolve one, directly or through a derived or cache key, is an error; slot identities are fixed by chronological scheduled-start order and content hashes attach on arrival. The protocol document's SHA-256 is pinned in the manifest, with a test that fails if the document changes without the digest being updated deliberately. If campaign outcomes were seen before this registration, or holdout outcomes before the model freeze, the protocol declares the study exploratory and the confirmation does not run. No existing predictor, estimator or recorded result changes.
+
 ### Docs
 - Centered the README header: uniform dark badge labels and three action buttons in the dashboard palette (Open Demo, Explore Method, Run Locally).
 
