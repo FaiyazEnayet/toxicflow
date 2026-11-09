@@ -79,6 +79,10 @@ The predictor uses a purged walk-forward protocol, so future labels do not overl
 
 The recorded session contains no demonstrated predictive edge over the baseline. Toxicity gating also does not improve the toy PnL. Those results make the evaluation and diagnostic tooling the contribution, rather than an unsupported trading-profit claim.
 
+## Direction confirmation
+
+The pilot's open question gets one prespecified test on the November 2026 recording campaign. The protocol is registered in `docs/direction_confirmation_protocol.md` before any campaign outcome is available to the predictor work: a 60-second target on one-second bars, four fixed feature families, one ridge fitting rule, development on the six archive sessions plus the first ten campaign slots, and a single confirmatory score on the last ten slots. Those ten are sealed in `src/direction_manifest.rs`, so fit-side code cannot resolve them, directly or through a derived key, and the confirmation step must present the protocol's registered digest. Win, partial, null and incomplete outcomes are all published under the registered wording.
+
 ## OFI-price response
 
 Kyle's lambda and OFI measure how much prices move with order flow. This analysis measures how the move unfolds over time. The estimand is observational throughout: order flow and prices are measured from the same quote stream, and the recorded sessions carry no news timestamps, so nothing here identifies a news event or a causal effect. Across six recorded Binance BTCUSDT sessions, one-second order-flow imbalance was positively associated with contemporaneous midprice changes, but the subsequent response paths varied across sessions and did not support a reliably identifiable price-adjustment half-life over the measured 0-300-second horizons.
