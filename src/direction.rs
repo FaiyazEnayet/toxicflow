@@ -1932,9 +1932,7 @@ mod tests {
     fn mask_excludes_gap_neighbourhoods_and_session_edges() {
         let mut frame = synthetic_frame(300);
         // A three-bar outage in the middle.
-        for i in 140..143 {
-            frame.observed[i] = false;
-        }
+        frame.observed[140..143].fill(false);
         // Recompute segment starts the way build_frame does.
         let mut run_start = 0usize;
         for i in 0..frame.n_bars {
