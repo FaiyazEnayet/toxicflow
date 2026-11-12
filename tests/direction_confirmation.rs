@@ -8,30 +8,35 @@ use toxicflow::direction_manifest::{
     SessionClass, SlotRole, ARCHIVE_SESSION_IDS, PROTOCOL_DIGEST, PROTOCOL_PATH,
 };
 
-/// Twenty counted campaign slots in chronological scheduled-start order,
-/// at the rotation's cadence (4 h sessions, 10 s apart), beginning with
-/// the campaign's actual first counted slot start.
+/// Twenty counted campaign slots in chronological scheduled-start
+/// order, at the rotation's cadence (4 h sessions, 10 s apart),
+/// beginning with the campaign's actual first counted slot start.
+/// These are the slots that landed in the November 2026 recording
+/// campaign (B1 QC manifest); the pre-campaign planned schedule
+/// named earlier starts, and its first slot
+/// (session-20261109-021753-utc) was an interrupted attempt that was
+/// never counted, so it is not a slot here.
 const SLOT_IDS: [&str; 20] = [
-    "session-20261109-021753-utc",
-    "session-20261109-061803-utc",
-    "session-20261109-101813-utc",
-    "session-20261109-141823-utc",
-    "session-20261109-181833-utc",
-    "session-20261109-221843-utc",
-    "session-20261110-021853-utc",
-    "session-20261110-061903-utc",
-    "session-20261110-101913-utc",
-    "session-20261110-141923-utc",
-    "session-20261110-181933-utc",
-    "session-20261110-221943-utc",
-    "session-20261111-021953-utc",
-    "session-20261111-062003-utc",
-    "session-20261111-102013-utc",
-    "session-20261111-142023-utc",
-    "session-20261111-182033-utc",
-    "session-20261111-222043-utc",
-    "session-20261112-022053-utc",
-    "session-20261112-062103-utc",
+    "session-20261109-083238-utc",
+    "session-20261109-123248-utc",
+    "session-20261109-163259-utc",
+    "session-20261109-203309-utc",
+    "session-20261110-003319-utc",
+    "session-20261110-043329-utc",
+    "session-20261110-083339-utc",
+    "session-20261110-123349-utc",
+    "session-20261110-163359-utc",
+    "session-20261110-203410-utc",
+    "session-20261111-003420-utc",
+    "session-20261111-043430-utc",
+    "session-20261111-083440-utc",
+    "session-20261111-123450-utc",
+    "session-20261111-163501-utc",
+    "session-20261111-203511-utc",
+    "session-20261112-003521-utc",
+    "session-20261112-043531-utc",
+    "session-20261112-083541-utc",
+    "session-20261112-123552-utc",
 ];
 
 fn full_manifest() -> DirectionManifest {
