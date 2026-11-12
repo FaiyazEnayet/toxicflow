@@ -15,7 +15,7 @@
   <a href="#run-locally"><img src="https://img.shields.io/badge/Run-Locally-202326?style=for-the-badge&labelColor=17191b" alt="Run Locally"></a>
 </p>
 
-Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information, and traces how the mid-price responds to order-flow shocks over the seconds after they land. The dashboard presents every result against its baseline, so diagnostics and measured outcomes read side by side.
+Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information, and traces how the mid-price responds to order-flow shocks over the seconds after they land. The dashboard presents every result against its baseline, so diagnostics and measured outcomes read side by side. On the November 2026 campaign's held-out sessions, the direction model beats the training-majority baseline: 0.5428 accuracy against 0.5245.
 
 
 <p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><img src="docs/demo.gif?v=confirmation-20261112" alt="Toxicflow demo"></a></p>
