@@ -66,7 +66,8 @@ function flow(){
 }
 
 function directionConfirmation(){
-  const {pooled,sessions,bootstrap,lopo,validation,validation_slots,campaign_sessions}=D.direction_confirmation;
+  const {pooled,sessions,bootstrap,lopo,validation,validation_slots,campaign_sessions,
+    archive_sessions,campaign_dates,embargo_seconds}=D.direction_confirmation;
   const fixed=n=>n.toFixed(4);
   const signed=n=>(n>=0?'+':'')+fixed(n);
   const span=(bounds,format)=>'['+bounds.map(format).join(', ')+']';
@@ -75,6 +76,19 @@ function directionConfirmation(){
   section.id='direction-confirmation';
   section.setAttribute('aria-labelledby','confirmation-title');
   root.append(section);
+
+  const about=panel('About the experiment','','full');
+  const startDate=new Date(campaign_dates[0]+'T00:00:00Z');
+  const endDate=new Date(campaign_dates[1]+'T00:00:00Z');
+  const month=startDate.toLocaleDateString('en-US',{month:'long',timeZone:'UTC'});
+  const dates=`${month} ${startDate.getUTCDate()}–${endDate.getUTCDate()}, ${endDate.getUTCFullYear()}`;
+  about.append(
+    el('p','', 'Tested whether order-flow features predict which way the BTCUSDT price moves over the next 60 seconds.'),
+    el('p','', `${campaign_sessions} four-hour sessions recorded ${dates}, plus ${archive_sessions} historical sessions. Slots ${slots[0]}–${slots.at(-1)} were sealed for confirmation.`),
+    el('p','', `One unweighted ridge logistic model used family ${validation.family} and the ${validation.rule} rule. It was fit on the archives and slots 01–${slots[0]-1}, with a ${embargo_seconds} s embargo before confirmation.`),
+    el('p','', 'The model beat the training-majority baseline on the held-out sessions.')
+  );
+  section.append(about);
 
   const lead=panel('Direction confirmation','','full');
   const title=lead.querySelector('h3');
