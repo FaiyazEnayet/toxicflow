@@ -29,3 +29,14 @@ section[id]{scroll-margin-top:24px}.tabs button[aria-pressed=true]{border-color:
 @media(max-width:760px){.flow-lab-grid{grid-template-columns:1fr}.flow-readings{padding-left:0;border-left:0;border-top:1px solid var(--line);padding-top:20px}.flow-features{grid-template-columns:1fr;gap:20px}.sample-banks{gap:12px}.sample-bank button{padding:5px 7px;font-size:10px}.sample-context{font-size:11px}.flow-instrument-title{flex-direction:column;gap:4px}.flow-instrument-title h3{font-size:23px}.flow-clock label{font-size:11px}.evaluation-values{grid-template-columns:1fr 1fr;gap:20px}.evaluation-values strong{font-size:20px}.evaluation-values span{font-size:11px}body[data-repo=FlowForge] .observatory-lab{padding:16px}.risk-lab-grid{gap:12px}.strategy-readout{gap:12px}.strategy-row h3{font-size:17px}.strategy-row strong{font-size:26px}.strategy-row p{font-size:11px}.strategy-readout>p{font-size:11px}.game-panel iframe{height:1420px}}
 .heatmap-key{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px 16px;margin:14px 0 0;padding-top:12px;border-top:1px solid var(--line);font-size:12px;line-height:1.7;color:var(--muted)}.heatmap-key span{display:block;overflow-wrap:anywhere}.reset-view{font-family:var(--body),serif;font-size:11px;min-height:26px;white-space:nowrap;padding:3px 0;background:none;border:0;border-bottom:1px solid var(--line);border-radius:0;flex-shrink:0;color:var(--muted)}.reset-view:hover{color:var(--text);border-color:var(--accent)}.panel-head h3{min-width:0}.panel-head{align-items:baseline}.js-plotly-plot .modebar{display:none!important}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{animation:none!important;transition:none!important}}
+
+.confirmation-scoreboard {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(min(100%,11rem),1fr));
+  margin:1.25rem 0;
+  border-top:1px solid var(--line);
+  border-bottom:1px solid var(--line);
+}
+.confirmation-scoreboard div { padding:.85rem .75rem; }
+.confirmation-scoreboard dt { color:var(--muted);font-size:.8rem; }
+.confirmation-scoreboard dd { margin:.35rem 0 0;color:var(--accent);font-size:1.5rem; }
