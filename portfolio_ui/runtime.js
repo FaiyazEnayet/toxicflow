@@ -65,7 +65,80 @@ function flow(){
  const detail=panel('The evaluation register','Exact source summaries, retained for inspection.','full');g.append(detail);traceTable(F[2].data[0],detail);traceTable(F[3].data[0],detail);
 }
 
-function toxic(){const groups=splitSubplots(F[0]);const summary=groups.find(g=>g.key==='table');if(summary){const v=summary.data[0].cells.values;metric(v[0].slice(0,4).map((l,i)=>[v[1][i],l]))}const g=grid(),top=[];const titles=['BTCUSDT midprice','Signed volume','VPIN and the toxicity gate',"Kyle’s lambda",'OFI against the next 30-second return','Signal calibration','Market-making outcomes','Recorded session'];const cap=['10-second bars · recorded market observations','BTC per bar · positive buys, negative sells','Equal-volume buckets · native bucket timestamps','Rolling 60-bar OLS · price impact per BTC','Scatter and decile averages · forward return in basis points','Point size reflects observations per decile','Source simulation P&L, including disappointing outcomes','Baseline comparison and session denominators'];[0,2,1,3,4,5,6,7].forEach(i=>{if(!groups[i])return;const r=figure(g,groups[i],titles[i],cap[i],i===0||i===2?'primary':'',i===0?'session':i===4?'signals':i===6?'simulation':'');if(i<4)top.push(r)});ready.push(Promise.all(top.map(r=>r.promise)).then(()=>syncTime(top.map(r=>r.chart))));note('The four time-series views synchronize their hover to the nearest timestamp and share zoom ranges. VPIN buckets and 10-second bars retain their distinct observation times. A nearby timestamp is not an exact match.')
+function directionConfirmation(){
+  const {pooled,sessions,bootstrap,lopo,validation,validation_slots,campaign_sessions}=D.direction_confirmation;
+  const fixed=n=>n.toFixed(4);
+  const signed=n=>(n>=0?'+':'')+fixed(n);
+  const span=(bounds,format)=>'['+bounds.map(format).join(', ')+']';
+  const slots=sessions.map(row=>row.slot);
+  const section=el('section','grid');
+  section.id='direction-confirmation';
+  section.setAttribute('aria-labelledby','confirmation-title');
+  root.append(section);
+
+  const lead=panel('Direction confirmation','','full');
+  const title=lead.querySelector('h3');
+  title.id='confirmation-title';
+  lead.append(el('h2','','The model beats the training-majority baseline'),
+    el('p','caption',`${sessions.length} held-out sessions from the ${campaign_sessions}-session November BTCUSDT campaign.`));
+  const scoreboard=el('dl','confirmation-scoreboard');
+  for(const [label,value] of [
+    ['Model accuracy',fixed(pooled.accuracy)],['Training-majority accuracy',fixed(pooled.baseline_accuracy)],
+    ['Paired difference (Δ)',signed(pooled.delta)],['Balanced accuracy',fixed(pooled.balanced_accuracy)],
+    ['Above 0.50 (Γ)',signed(pooled.gamma)],['Scored rows',pooled.n_scored.toLocaleString('en-US')]
+  ]){
+    const item=el('div');
+    item.append(el('dt','',label),el('dd','',value));
+    scoreboard.append(item);
+  }
+  lead.append(scoreboard);
+  note('The balanced accuracy gate cleared at both block lengths. The paired difference interval spans zero at both, so the study did not establish a joint win under the registered rules.',lead);
+  section.append(lead);
+
+  function sessionChart(field,label,reference,referenceLabel,format){
+    const result=sessions.map(row=>row[field]);
+    const data=[
+      {x:slots,y:result,type:field==='delta'?'bar':'scatter',mode:field==='delta'?undefined:'lines+markers',
+        name:'Held-out session',hovertemplate:'Slot %{x}: %{y:.4f}<extra></extra>'},
+      {x:[slots[0],slots.at(-1)],y:[pooled[field],pooled[field]],mode:'lines',name:'Pooled '+format(pooled[field]),line:{dash:'dash'}},
+      {x:[slots[0],slots.at(-1)],y:[reference,reference],mode:'lines',name:referenceLabel,line:{dash:'dot'}}
+    ];
+    figure(section,{data,layout:{xaxis:{tickmode:'array',tickvals:slots,title:{text:'Campaign slot'}},yaxis:{tickformat:'.3f'}}},label);
+  }
+  sessionChart('delta','Paired accuracy difference (Δ)',0,'Equal accuracy',signed);
+  sessionChart('balanced_accuracy','Balanced accuracy',0.5,'Reference 0.50',fixed);
+
+  const lengths=Object.keys(bootstrap);
+  for(const [field,key,label] of [['delta','delta_ci','Paired accuracy difference (Δ)'],['gamma','gamma_ci','Balanced accuracy above 0.50 (Γ)']]){
+    const bounds=lengths.map(length=>bootstrap[length][key]);
+    const labels=lengths.map(length=>length+' s');
+    const data=[{x:lengths.map(()=>pooled[field]),y:labels,mode:'markers',marker:{size:9},
+      error_x:{type:'data',symmetric:false,array:bounds.map(b=>b[1]-pooled[field]),arrayminus:bounds.map(b=>pooled[field]-b[0])},
+      customdata:bounds,hovertemplate:'%{y}: [%{customdata[0]:.4f}, %{customdata[1]:.4f}]<extra></extra>'}];
+    const view=figure(section,{data,layout:{xaxis:{tickformat:'.3f',zeroline:true},yaxis:{autorange:'reversed'},showlegend:false}},
+      label+' · 95% intervals','Paired grouped bootstrap by block length.');
+    note(labels.map((l,i)=>l+' '+span(bounds[i],signed)).join(' · '),view.panel);
+  }
+
+  const details=panel('From validation to confirmation','','full');
+  const positive=sessions.filter(row=>row.delta>0).length;
+  const bySlot=slot=>sessions.find(row=>row.slot===slot);
+  const first=String(validation_slots[0]).padStart(2,'0');
+  const last=String(validation_slots.at(-1)).padStart(2,'0');
+  details.append(
+    el('p','',`B3 validation (slots ${first}–${last}) selected family ${validation.family} under the ${validation.rule} rule. Validation Δ was ${signed(validation.delta)} and balanced accuracy was ${fixed(validation.balanced_accuracy)}. The locked B4 confirmation scored slots ${slots[0]}–${slots.at(-1)}.`),
+    el('p','',`Δ was positive in ${positive} of ${sessions.length} sessions. Slot 15 was near zero (${signed(bySlot(15).delta)}), and slot 20 was negative (${signed(bySlot(20).delta)}).`),
+    el('p','',`Leave-one-pair-out ranges were ${span(lopo.delta,signed)} for Δ and ${span(lopo.gamma,signed)} for Γ.`)
+  );
+  for(const [label,href] of [['Confirmation report','direction_confirmation_report.json'],['Validation report','direction_b3_report.json'],['Campaign context','info_speed_report_20x4h.json']]){
+    const link=el('a','',label);
+    link.href=href;
+    details.append(link,document.createTextNode(' · '));
+  }
+  details.lastChild.remove();
+  section.append(details);
+}
+function toxic(){directionConfirmation();const groups=splitSubplots(F[0]);const summary=groups.find(g=>g.key==='table');if(summary){const v=summary.data[0].cells.values;metric(v[0].slice(0,4).map((l,i)=>[v[1][i],l]))}const g=grid(),top=[];const titles=['BTCUSDT midprice','Signed volume','VPIN and the toxicity gate',"Kyle’s lambda",'OFI against the next 30-second return','Signal calibration','Market-making outcomes','Recorded session'];const cap=['10-second bars · recorded market observations','BTC per bar · positive buys, negative sells','Equal-volume buckets · native bucket timestamps','Rolling 60-bar OLS · price impact per BTC','Scatter and decile averages · forward return in basis points','Point size reflects observations per decile','Source simulation P&L, including disappointing outcomes','Baseline comparison and session denominators'];[0,2,1,3,4,5,6,7].forEach(i=>{if(!groups[i])return;const r=figure(g,groups[i],titles[i],cap[i],i===0||i===2?'primary':'',i===0?'session':i===4?'signals':i===6?'simulation':'');if(i<4)top.push(r)});ready.push(Promise.all(top.map(r=>r.promise)).then(()=>syncTime(top.map(r=>r.chart))));note('The four time-series views synchronize their hover to the nearest timestamp and share zoom ranges. VPIN buckets and 10-second bars retain their distinct observation times. A nearby timestamp is not an exact match.')
   const speed=F[1];
   if(speed?.layout.meta?.verdict){
     const {verdict,highlights}=speed.layout.meta;
