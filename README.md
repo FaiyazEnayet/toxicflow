@@ -18,7 +18,7 @@
 Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information, and traces how the mid-price responds to order-flow shocks over the seconds after they land. The dashboard presents every result against its baseline, so diagnostics and measured outcomes read side by side.
 
 
-<p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><img src="docs/demo.gif?v=showcase-20261017b" alt="Toxicflow demo"></a></p>
+<p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><img src="docs/demo.gif?v=confirmation-20261112" alt="Toxicflow demo"></a></p>
 
 
 A toxicity signal earns its place when it arrives early enough to change an execution decision, so price, order flow and VPIN are read on the same clock, alongside calibration and baseline comparisons. The recorded experiment is reported in full, with predictive performance measured against its reference model on every session.
@@ -75,7 +75,7 @@ flowchart LR
 
 The predictor uses a purged walk-forward protocol, so future labels do not overlap the training window. Accuracy is compared with the majority-class rule and supplemented with calibration. The market-making example is a simplified simulation scoped to the gating question.
 
-![Walk-forward predictor accuracy against the majority-class baseline](docs/results.png)
+![Walk-forward predictor accuracy against the majority-class baseline](docs/results.png?v=confirmation-20261112)
 
 The recorded session's predictor result sits close to the baseline, and toxicity gating does not improve the toy PnL. The session's contribution is the evaluation and diagnostic tooling itself: purged walk-forward scoring, calibration and response estimation, each reported with its full measurement record.
 
