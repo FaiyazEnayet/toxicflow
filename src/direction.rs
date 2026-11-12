@@ -1,17 +1,26 @@
-//! B3 development fits for the registered 60-second direction
-//! confirmation study (`docs/direction_confirmation_protocol.md`).
+//! Direction confirmation for the registered 60-second direction
+//! confirmation study (`docs/direction_confirmation_protocol.md`):
+//! B3 development fits, the section 7 freeze, and the section 8
+//! confirmation.
 //!
-//! This module implements the protocol's sections 2-6 exactly as written:
+//! This module implements the protocol's sections 2-8 exactly as written:
 //! the one-second epoch-aligned frame and strictly post-close target, the
 //! four fixed feature families (R reference, F flow and liquidity
 //! controls, V incremental VPIN, I bounded interactions), the single
-//! unweighted ridge logistic fitting rule, the two operating rules, and
-//! the development selection ladder over the archives plus campaign
+//! unweighted ridge logistic fitting rule, the two operating rules, the
+//! development selection ladder over the archives plus campaign
 //! slots 01-06 predicting slot 07, with the fit pool growing by only
 //! the earlier campaign slots for slots 08-10, under the 660-second
-//! embargo. It never touches the sealed holdout: every session resolves
-//! through `direction_manifest`, and slots 11-20 are an error there.
-//!
+//! embargo, the section 7 freeze of the single selected family and rule
+//! on the archives plus slots 01-10, and the section 8 confirmation:
+//! one scoring of the frozen artifact on slots 11-20 with the
+//! prespecified win / partial / null / incomplete gates, paired grouped
+//! bootstrap intervals at 300 s and 600 s, fixed-cohort and per-session
+//! diagnostics at 300 s, and leave-one-pair-out ranges. It never touches
+//! the sealed holdout for fit use: every session resolves through
+//! `direction_manifest`, and slots 11-20 resolve only through the
+//! confirmation path, which requires the protocol's registered digest.
+//
 //! Two readings of the frozen text are fixed here rather than searched,
 //! and both are stated so a reader can check them against the protocol:
 //!
@@ -21,6 +30,25 @@
 //! * Trailing sums and means are inclusive of the origin bar (bars
 //!   t-k+1..=t). The five-second signed trade quantity and the total
 //!   trade quantity it is divided by cover the same five bars.
+//!
+//! Readings fixed for the confirmation (section 8) are likewise
+//! stated here:
+//!
+//! * "Fixed-cohort and per-session diagnostics at 300 seconds" are
+//!   bootstrap intervals that keep the cohort fixed: every session is
+//!   present in every replicate and bins are resampled within each
+//!   session, using the section 8 diagnostic seed. The per-session
+//!   diagnostic is the same procedure on one session alone.
+//! * "Flat counts" count origins whose 60-second mid is exactly
+//!   unchanged (mid[t+60] == mid[t]); those origins carry target 0
+//!   under the strict post-close rule.
+//! * Calibration diagnostics use ten fixed predicted-probability
+//!   decile bins, [0, 0.1) through [0.9, 1.0], each reporting its row
+//!   count, mean predicted probability and mean realized target.
+//! * The section 10 headline sentence carries one interval per
+//!   metric; with two prespecified block lengths the sentence names
+//!   both, 300 s and 600 s, and the report JSON carries each
+//!   separately.
 //!
 //! The AR(10) residual is an OLS fit with intercept on the training
 //! origins, as the protocol's "training-fitted" requires; the fit
@@ -36,8 +64,8 @@
 //! are descriptive only, never confirmatory evidence.
 
 use crate::direction_manifest::{
-    parse_session_start_unix, DirectionManifest, ManifestError, SessionClass, CAMPAIGN_SLOT_COUNT,
-    DEVELOPMENT_LAST_SLOT, FIT_LAST_SLOT,
+    parse_session_start_unix, sha256_hex, DirectionManifest, ManifestError, SessionClass,
+    CAMPAIGN_SLOT_COUNT, DEVELOPMENT_LAST_SLOT, FIT_LAST_SLOT, PROTOCOL_DIGEST,
 };
 use crate::metrics::{ofi_events, Quote, Trade};
 use crate::storage::{read_quotes, read_trades, StorageError};
@@ -98,6 +126,22 @@ pub const DEV_BOOTSTRAP_MAX_ATTEMPTS: usize = 20_200;
 /// Seed for the development bootstrap intervals: the section 8
 /// diagnostic seed, used at both block lengths.
 pub const DEV_BOOTSTRAP_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Confirmation bootstrap draws per block length (protocol section 8).
+pub const CONF_BOOTSTRAP_DRAWS: usize = 20_000;
+
+/// Confirmation bootstrap attempts before interval claims are
+/// suppressed and the study is incomplete (protocol section 8).
+pub const CONF_BOOTSTRAP_MAX_ATTEMPTS: usize = 20_200;
+
+/// Seed for the confirmation bootstrap intervals (protocol section 8).
+pub const CONF_BOOTSTRAP_SEED: u64 = 0xD1B5_4A32_D192_ED03;
+
+/// First sealed holdout slot (protocol section 1).
+pub const CONFIRMATION_FIRST_SLOT: usize = DEVELOPMENT_LAST_SLOT + 1;
+
+/// Last sealed holdout slot (protocol section 1).
+pub const CONFIRMATION_LAST_SLOT: usize = CAMPAIGN_SLOT_COUNT;
 
 /// Campaign admission: at least 13,680 quote-observed seconds
 /// (protocol section 1).
@@ -222,6 +266,8 @@ pub enum DirectionError {
     UndefinedMetric(String),
     /// A linear solve failed (singular system).
     SingularSystem(String),
+    /// A frozen artifact record is malformed or inconsistent.
+    InvalidArtifact(String),
 }
 
 impl std::fmt::Display for DirectionError {
@@ -245,6 +291,7 @@ impl std::fmt::Display for DirectionError {
             }
             DirectionError::UndefinedMetric(e) => write!(f, "undefined metric: {e}"),
             DirectionError::SingularSystem(e) => write!(f, "singular system: {e}"),
+            DirectionError::InvalidArtifact(e) => write!(f, "invalid artifact: {e}"),
         }
     }
 }
@@ -438,17 +485,46 @@ pub fn load_session(
     let trades = read_trades(&format!("{dir}/trades.parquet"))?;
     let frame = build_frame(session_id, &quotes, &trades);
     if let SessionClass::Campaign { .. } = class {
-        let origins = eligible_origins(&frame).len();
-        let observed = frame.n_observed_secs();
-        if observed < ADMISSION_MIN_OBSERVED_SECS || origins < ADMISSION_MIN_ORIGINS {
-            return Err(DirectionError::AdmissionFailed {
-                session: session_id.to_string(),
-                observed_secs: observed,
-                eligible_origins: origins,
-            });
-        }
+        admission_check(&frame)?;
     }
     Ok(frame)
+}
+
+/// Loads one sealed holdout session directory through the
+/// confirmation path (protocol sections 8-9): the caller must present
+/// this protocol's registered digest, and the slot must be a sealed
+/// holdout slot. Campaign slots face the section 1 admission counts,
+/// so a missing or inadmissible holdout input is an error here, not a
+/// result.
+pub fn load_session_for_confirmation(
+    manifest: &DirectionManifest,
+    session_id: &str,
+    dir: &str,
+    presented_digest: &str,
+) -> Result<SessionFrame, DirectionError> {
+    let class = manifest.resolve_for_confirmation(session_id, presented_digest)?;
+    let quotes = read_quotes(&format!("{dir}/quotes.parquet"))?;
+    let trades = read_trades(&format!("{dir}/trades.parquet"))?;
+    let frame = build_frame(session_id, &quotes, &trades);
+    if let SessionClass::Campaign { .. } = class {
+        admission_check(&frame)?;
+    }
+    Ok(frame)
+}
+
+/// Section 1 admission for a campaign slot: at least 13,680
+/// quote-observed seconds and at least 12,960 eligible origins.
+fn admission_check(frame: &SessionFrame) -> Result<(), DirectionError> {
+    let origins = eligible_origins(frame).len();
+    let observed = frame.n_observed_secs();
+    if observed < ADMISSION_MIN_OBSERVED_SECS || origins < ADMISSION_MIN_ORIGINS {
+        return Err(DirectionError::AdmissionFailed {
+            session: frame.session_id.clone(),
+            observed_secs: observed,
+            eligible_origins: origins,
+        });
+    }
+    Ok(())
 }
 
 /// Dense Cholesky solve for a symmetric positive-definite system
@@ -1509,19 +1585,10 @@ fn endpoints_from_instances(instances: &[BinAgg]) -> Option<(f64, f64)> {
     Some((delta, ba - 0.5))
 }
 
-/// Paired grouped bootstrap intervals for one development row, the
-/// section 8 analog for four development sessions: consecutive
-/// session pairs are drawn with replacement, and within each drawn
-/// session its original number of time bins is resampled with
-/// replacement. Model and baseline are scored on the same resampled
-/// rows (paired). Replicates missing a pooled class are redrawn;
-/// when 20,000 valid draws cannot be reached in 20,200 attempts the
-/// intervals are suppressed (`None`).
-pub fn paired_grouped_bootstrap(sessions: &[Vec<ScoredRow>], block_ms: i64) -> BootstrapIntervals {
-    if sessions.len() < 2 || !sessions.len().is_multiple_of(2) {
-        return None;
-    }
-    // Epoch-aligned bins per session, in chronological order.
+/// Epoch-aligned bins per session, in chronological order, for the
+/// bootstrap: each bin holds the aggregate counts of the scored rows
+/// whose decision time falls in it.
+fn bins_for_sessions(sessions: &[Vec<ScoredRow>], block_ms: i64) -> Vec<Vec<BinAgg>> {
     let mut bins: Vec<Vec<BinAgg>> = Vec::new();
     for rows in sessions {
         let mut by_bin: HashMap<i64, Vec<ScoredRow>> = HashMap::new();
@@ -1536,14 +1603,51 @@ pub fn paired_grouped_bootstrap(sessions: &[Vec<ScoredRow>], block_ms: i64) -> B
         order.sort_unstable();
         bins.push(order.iter().map(|b| bin_agg(&by_bin[b])).collect());
     }
-    let n_pairs = sessions.len() / 2;
-    let mut rng = XorShift64Star(DEV_BOOTSTRAP_SEED);
-    let mut deltas: Vec<f64> = Vec::with_capacity(DEV_BOOTSTRAP_DRAWS);
-    let mut gammas: Vec<f64> = Vec::with_capacity(DEV_BOOTSTRAP_DRAWS);
+    bins
+}
+
+/// Percentile interval from sorted bootstrap draws, ranks
+/// ceil(0.025 * B) and ceil(0.975 * B) (protocol section 8), or
+/// `None` when the draw budget was not reached (suppressed).
+fn intervals_from_draws(
+    mut deltas: Vec<f64>,
+    mut gammas: Vec<f64>,
+    draws: usize,
+) -> BootstrapIntervals {
+    if deltas.len() < draws {
+        return None;
+    }
+    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    gammas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let lo = (0.025 * draws as f64).ceil() as usize - 1;
+    let hi = (0.975 * draws as f64).ceil() as usize - 1;
+    Some(((deltas[lo], deltas[hi]), (gammas[lo], gammas[hi])))
+}
+
+/// Paired grouped bootstrap over precomputed bins: consecutive
+/// session pairs are drawn with replacement, and within each drawn
+/// session its original number of time bins is resampled with
+/// replacement. Model and baseline are scored on the same resampled
+/// rows (paired). Replicates missing a pooled class are redrawn;
+/// when the draw budget cannot be reached in the attempt budget the
+/// intervals are suppressed (`None`).
+fn bootstrap_paired(
+    bins: &[Vec<BinAgg>],
+    seed: u64,
+    draws: usize,
+    max_attempts: usize,
+) -> BootstrapIntervals {
+    if bins.len() < 2 || !bins.len().is_multiple_of(2) {
+        return None;
+    }
+    let n_pairs = bins.len() / 2;
+    let mut rng = XorShift64Star(seed);
+    let mut deltas: Vec<f64> = Vec::with_capacity(draws);
+    let mut gammas: Vec<f64> = Vec::with_capacity(draws);
     let mut attempts = 0usize;
-    while deltas.len() < DEV_BOOTSTRAP_DRAWS && attempts < DEV_BOOTSTRAP_MAX_ATTEMPTS {
+    while deltas.len() < draws && attempts < max_attempts {
         attempts += 1;
-        let mut instances: Vec<BinAgg> = Vec::with_capacity(sessions.len());
+        let mut instances: Vec<BinAgg> = Vec::with_capacity(bins.len());
         for _ in 0..n_pairs {
             let pair = rng.next_below(n_pairs);
             for s in [2 * pair, 2 * pair + 1] {
@@ -1561,14 +1665,97 @@ pub fn paired_grouped_bootstrap(sessions: &[Vec<ScoredRow>], block_ms: i64) -> B
             gammas.push(g);
         }
     }
-    if deltas.len() < DEV_BOOTSTRAP_DRAWS {
+    intervals_from_draws(deltas, gammas, draws)
+}
+
+/// Fixed-cohort bootstrap over precomputed bins: every session is
+/// present in every replicate, and within each session its original
+/// number of time bins is resampled with replacement. Used for the
+/// section 8 fixed-cohort and per-session diagnostics at 300 s.
+fn bootstrap_fixed(
+    bins: &[Vec<BinAgg>],
+    seed: u64,
+    draws: usize,
+    max_attempts: usize,
+) -> BootstrapIntervals {
+    if bins.is_empty() {
         return None;
     }
-    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    gammas.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let lo = (0.025 * DEV_BOOTSTRAP_DRAWS as f64).ceil() as usize - 1;
-    let hi = (0.975 * DEV_BOOTSTRAP_DRAWS as f64).ceil() as usize - 1;
-    Some(((deltas[lo], deltas[hi]), (gammas[lo], gammas[hi])))
+    let mut rng = XorShift64Star(seed);
+    let mut deltas: Vec<f64> = Vec::with_capacity(draws);
+    let mut gammas: Vec<f64> = Vec::with_capacity(draws);
+    let mut attempts = 0usize;
+    while deltas.len() < draws && attempts < max_attempts {
+        attempts += 1;
+        let mut instances: Vec<BinAgg> = Vec::with_capacity(bins.len());
+        for session_bins in bins {
+            let mut agg = BinAgg::default();
+            for _ in 0..session_bins.len() {
+                let b = rng.next_below(session_bins.len());
+                agg.add(&session_bins[b]);
+            }
+            instances.push(agg);
+        }
+        if let Some((d, g)) = endpoints_from_instances(&instances) {
+            deltas.push(d);
+            gammas.push(g);
+        }
+    }
+    intervals_from_draws(deltas, gammas, draws)
+}
+
+/// Paired grouped bootstrap intervals for one development row, the
+/// section 8 analog for four development sessions: consecutive
+/// session pairs are drawn with replacement, and within each drawn
+/// session its original number of time bins is resampled with
+/// replacement. Model and baseline are scored on the same resampled
+/// rows (paired). Replicates missing a pooled class are redrawn;
+/// when 20,000 valid draws cannot be reached in 20,200 attempts the
+/// intervals are suppressed (`None`).
+pub fn paired_grouped_bootstrap(sessions: &[Vec<ScoredRow>], block_ms: i64) -> BootstrapIntervals {
+    let bins = bins_for_sessions(sessions, block_ms);
+    bootstrap_paired(
+        &bins,
+        DEV_BOOTSTRAP_SEED,
+        DEV_BOOTSTRAP_DRAWS,
+        DEV_BOOTSTRAP_MAX_ATTEMPTS,
+    )
+}
+
+/// Paired grouped bootstrap intervals for the section 8
+/// confirmation: five consecutive session pairs drawn with
+/// replacement from (11,12), (13,14), (15,16), (17,18), (19,20),
+/// within each drawn session its original number of time bins
+/// resampled with replacement, 20,000 valid draws per block length
+/// from the xorshift generator seeded 0xD1B54A32D192ED03. Replicates
+/// missing a pooled class are redrawn; when 20,000 valid draws
+/// cannot be reached in 20,200 attempts the intervals are suppressed
+/// (`None`) and the study is incomplete.
+pub fn paired_grouped_bootstrap_confirmation(
+    sessions: &[Vec<ScoredRow>],
+    block_ms: i64,
+) -> BootstrapIntervals {
+    let bins = bins_for_sessions(sessions, block_ms);
+    bootstrap_paired(
+        &bins,
+        CONF_BOOTSTRAP_SEED,
+        CONF_BOOTSTRAP_DRAWS,
+        CONF_BOOTSTRAP_MAX_ATTEMPTS,
+    )
+}
+
+/// Fixed-cohort and per-session diagnostic intervals at 300 s
+/// (protocol section 8): the cohort is fixed, bins are resampled
+/// within each session, and the section 8 diagnostic seed is used.
+/// Descriptive only, never confirmatory evidence.
+pub fn diagnostic_bootstrap(sessions: &[Vec<ScoredRow>], block_ms: i64) -> BootstrapIntervals {
+    let bins = bins_for_sessions(sessions, block_ms);
+    bootstrap_fixed(
+        &bins,
+        DEV_BOOTSTRAP_SEED,
+        DEV_BOOTSTRAP_DRAWS,
+        DEV_BOOTSTRAP_MAX_ATTEMPTS,
+    )
 }
 
 /// One development boundary's detail for the report.
@@ -1598,6 +1785,40 @@ pub struct DevelopmentOutcome {
     pub selection: SelectionOutcome,
 }
 
+/// Scores one evaluation session's origins under one family and one
+/// operating rule, returning the scored rows and the model's predicted
+/// probabilities (kept alongside the rows so a deterministic replay
+/// can compare probabilities, not just decisions).
+fn score_session_rule(
+    calc: &FrameCalc,
+    origins: &[OriginData],
+    ctx: &FitContext,
+    fit: &RidgeFit,
+    family: Family,
+    rule: Rule,
+) -> (Vec<ScoredRow>, Vec<f64>) {
+    let standard = &ctx.standard[&family];
+    let mut rows = Vec::with_capacity(origins.len());
+    let mut probs = Vec::with_capacity(origins.len());
+    for o in origins {
+        let raw = raw_columns(calc, o, ctx, family);
+        let x = standardize(&raw, standard);
+        let p = predict_proba(fit, &x);
+        let model_pred = match rule {
+            Rule::P50 => u8::from(p > 0.50),
+            Rule::Prevalence => u8::from(p > ctx.prevalence),
+        };
+        probs.push(p);
+        rows.push(ScoredRow {
+            time_ms: o.decision_ms,
+            target: o.target,
+            model_pred,
+            baseline_pred: ctx.majority_label,
+        });
+    }
+    (rows, probs)
+}
+
 /// Scores one evaluation session's origins under one family and
 /// both operating rules.
 fn score_session(
@@ -1607,28 +1828,8 @@ fn score_session(
     fit: &RidgeFit,
     family: Family,
 ) -> (Vec<ScoredRow>, Vec<ScoredRow>) {
-    let standard = &ctx.standard[&family];
-    let mut p50 = Vec::with_capacity(origins.len());
-    let mut prev = Vec::with_capacity(origins.len());
-    for o in origins {
-        let raw = raw_columns(calc, o, ctx, family);
-        let x = standardize(&raw, standard);
-        let p = predict_proba(fit, &x);
-        let model_p50 = u8::from(p > 0.50);
-        let model_prev = u8::from(p > ctx.prevalence);
-        p50.push(ScoredRow {
-            time_ms: o.decision_ms,
-            target: o.target,
-            model_pred: model_p50,
-            baseline_pred: ctx.majority_label,
-        });
-        prev.push(ScoredRow {
-            time_ms: o.decision_ms,
-            target: o.target,
-            model_pred: model_prev,
-            baseline_pred: ctx.majority_label,
-        });
-    }
+    let (p50, _) = score_session_rule(calc, origins, ctx, fit, family, Rule::P50);
+    let (prev, _) = score_session_rule(calc, origins, ctx, fit, family, Rule::Prevalence);
     (p50, prev)
 }
 
@@ -1776,6 +1977,782 @@ pub fn run_development(
         boundaries,
         rows,
         selection,
+    })
+}
+
+/// The section 7 frozen artifact: the single selected family and
+/// rule refit on the six archives plus slots 01-10 under the frozen
+/// embargo, with everything the confirmation step needs to score
+/// without refitting: the fitted transforms, the fitted ridge
+/// parameters, the split memberships, the code, data and feature
+/// hashes, the exact version and the timestamp.
+#[derive(Debug, Clone)]
+pub struct FrozenArtifact {
+    pub family: Family,
+    pub rule: Rule,
+    pub protocol_digest: String,
+    pub code_hash: String,
+    pub data_hash: String,
+    pub feature_hash: String,
+    pub version: String,
+    pub timestamp_unix: i64,
+    pub fit_sessions: Vec<String>,
+    pub fit_session_hashes: Vec<(String, String)>,
+    pub embargo_cutoff_ms: i64,
+    pub n_fit_origins: usize,
+    pub prevalence: f64,
+    pub majority_label: u8,
+    pub ar_intercept: f64,
+    pub ar_coefs: [f64; AR_ORDER],
+    pub burst_threshold: f64,
+    /// (mean, population sd) per final column of the frozen family.
+    pub standard: Vec<(f64, f64)>,
+    pub slopes: Vec<f64>,
+    pub intercept: f64,
+    pub n_accepted: usize,
+    pub grad_inf_norm: f64,
+}
+
+fn json_f64(value: &serde_json::Value, field: &str) -> Result<f64, DirectionError> {
+    value
+        .get(field)
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| DirectionError::InvalidArtifact(format!("missing or non-numeric {field}")))
+}
+
+fn json_f64_array(
+    value: &serde_json::Value,
+    field: &str,
+    len: usize,
+) -> Result<Vec<f64>, DirectionError> {
+    let arr = value
+        .get(field)
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| DirectionError::InvalidArtifact(format!("missing or non-array {field}")))?;
+    if arr.len() != len {
+        return Err(DirectionError::InvalidArtifact(format!(
+            "{field} has {} entries, expected {len}",
+            arr.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(len);
+    for v in arr {
+        out.push(
+            v.as_f64()
+                .ok_or_else(|| DirectionError::InvalidArtifact(format!("non-numeric {field}")))?,
+        );
+    }
+    Ok(out)
+}
+
+impl FrozenArtifact {
+    /// Serializes the artifact for the confirmation report. Floats
+    /// serialize with serde_json's exact round-trip representation,
+    /// so a deserialized artifact replays the original decisions
+    /// exactly and probabilities to within 1e-12.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "toxicflow.direction-frozen-artifact/v1",
+            "family": self.family.name(),
+            "rule": self.rule.name(),
+            "protocol_digest": self.protocol_digest,
+            "code_hash": self.code_hash,
+            "data_hash": self.data_hash,
+            "feature_hash": self.feature_hash,
+            "version": self.version,
+            "timestamp_unix": self.timestamp_unix,
+            "fit_sessions": self.fit_sessions,
+            "fit_session_hashes": self.fit_session_hashes.iter().map(|(id, h)| {
+                serde_json::json!({"session": id, "content_hash": h})
+            }).collect::<Vec<_>>(),
+            "embargo_cutoff_ms": self.embargo_cutoff_ms,
+            "n_fit_origins": self.n_fit_origins,
+            "prevalence": self.prevalence,
+            "majority_label": self.majority_label,
+            "ar_intercept": self.ar_intercept,
+            "ar_coefs": self.ar_coefs,
+            "burst_threshold": self.burst_threshold,
+            "standard": self.standard.iter().map(|(m, s)| serde_json::json!([m, s])).collect::<Vec<_>>(),
+            "slopes": self.slopes,
+            "intercept": self.intercept,
+            "n_accepted": self.n_accepted,
+            "grad_inf_norm": self.grad_inf_norm,
+        })
+    }
+
+    /// Rebuilds an artifact from its serialized form, validating the
+    /// family, rule, digest and array lengths. A malformed record is
+    /// an error, not a result.
+    pub fn from_json(value: &serde_json::Value) -> Result<FrozenArtifact, DirectionError> {
+        let bad =
+            |field: &str| DirectionError::InvalidArtifact(format!("missing or invalid {field}"));
+        let family = match value.get("family").and_then(|v| v.as_str()) {
+            Some("R") => Family::R,
+            Some("F") => Family::F,
+            Some("V") => Family::V,
+            Some("I") => Family::I,
+            _ => return Err(bad("family")),
+        };
+        let rule = match value.get("rule").and_then(|v| v.as_str()) {
+            Some("p>0.50") => Rule::P50,
+            Some("p>prevalence") => Rule::Prevalence,
+            _ => return Err(bad("rule")),
+        };
+        let protocol_digest = value
+            .get("protocol_digest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| bad("protocol_digest"))?;
+        if protocol_digest != PROTOCOL_DIGEST {
+            return Err(DirectionError::InvalidArtifact(
+                "protocol digest does not match the registered protocol".to_string(),
+            ));
+        }
+        let ar_coefs = json_f64_array(value, "ar_coefs", AR_ORDER)?;
+        let slopes = json_f64_array(value, "slopes", family.n_columns())?;
+        let standard_raw = value
+            .get("standard")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| bad("standard"))?;
+        if standard_raw.len() != family.n_columns() {
+            return Err(DirectionError::InvalidArtifact(format!(
+                "standard has {} entries, expected {}",
+                standard_raw.len(),
+                family.n_columns()
+            )));
+        }
+        let mut standard = Vec::with_capacity(family.n_columns());
+        for pair in standard_raw {
+            let pair = pair.as_array().ok_or_else(|| bad("standard"))?;
+            if pair.len() != 2 {
+                return Err(bad("standard"));
+            }
+            let mean = pair[0].as_f64().ok_or_else(|| bad("standard"))?;
+            let sd = pair[1].as_f64().ok_or_else(|| bad("standard"))?;
+            standard.push((mean, sd));
+        }
+        let fit_sessions = value
+            .get("fit_sessions")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| bad("fit_sessions"))?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| bad("fit_sessions"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let hashes_raw = value
+            .get("fit_session_hashes")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| bad("fit_session_hashes"))?;
+        let mut fit_session_hashes = Vec::with_capacity(hashes_raw.len());
+        for entry in hashes_raw {
+            let id = entry
+                .get("session")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bad("fit_session_hashes"))?;
+            let hash = entry
+                .get("content_hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bad("fit_session_hashes"))?;
+            fit_session_hashes.push((id.to_string(), hash.to_string()));
+        }
+        let mut ar = [0.0f64; AR_ORDER];
+        ar.copy_from_slice(&ar_coefs);
+        Ok(FrozenArtifact {
+            family,
+            rule,
+            protocol_digest: protocol_digest.to_string(),
+            code_hash: value
+                .get("code_hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bad("code_hash"))?
+                .to_string(),
+            data_hash: value
+                .get("data_hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bad("data_hash"))?
+                .to_string(),
+            feature_hash: value
+                .get("feature_hash")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bad("feature_hash"))?
+                .to_string(),
+            version: value
+                .get("version")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bad("version"))?
+                .to_string(),
+            timestamp_unix: value
+                .get("timestamp_unix")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| bad("timestamp_unix"))?,
+            fit_sessions,
+            fit_session_hashes,
+            embargo_cutoff_ms: value
+                .get("embargo_cutoff_ms")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| bad("embargo_cutoff_ms"))?,
+            n_fit_origins: value
+                .get("n_fit_origins")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| bad("n_fit_origins"))? as usize,
+            prevalence: json_f64(value, "prevalence")?,
+            majority_label: value
+                .get("majority_label")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| bad("majority_label"))? as u8,
+            ar_intercept: json_f64(value, "ar_intercept")?,
+            ar_coefs: ar,
+            burst_threshold: json_f64(value, "burst_threshold")?,
+            standard,
+            slopes,
+            intercept: json_f64(value, "intercept")?,
+            n_accepted: value
+                .get("n_accepted")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| bad("n_accepted"))? as usize,
+            grad_inf_norm: json_f64(value, "grad_inf_norm")?,
+        })
+    }
+}
+
+/// Canonical serialization of the fitted feature transforms, for the
+/// artifact's feature hash. Floats use a fixed 17-significant-digit
+/// exponent form, so the hash is stable across runs.
+fn canonical_feature_string(family: Family, rule: Rule, ctx: &FitContext) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("family={}\nrule={}\n", family.name(), rule.name()));
+    s.push_str(&format!("ar_intercept={:.17e}\n", ctx.ar_intercept));
+    for (k, c) in ctx.ar_coefs.iter().enumerate() {
+        s.push_str(&format!("ar_coef[{k}]={c:.17e}\n"));
+    }
+    s.push_str(&format!("burst_threshold={:.17e}\n", ctx.burst_threshold));
+    s.push_str(&format!("prevalence={:.17e}\n", ctx.prevalence));
+    s.push_str(&format!("majority_label={}\n", ctx.majority_label));
+    for (j, (mean, sd)) in ctx.standard[&family].iter().enumerate() {
+        s.push_str(&format!("standard[{j}]={mean:.17e},{sd:.17e}\n"));
+    }
+    s
+}
+
+/// The section 7 freeze: refit the single selected family and rule
+/// on the archives plus slots 01-10 under the frozen embargo,
+/// recomputing its transforms, majority rule and threshold as
+/// registered. The fit pool must already be embargoed: every origin
+/// must decide at or before `embargo_cutoff_ms`, and an origin past
+/// the cutoff is an error, not a result. The artifact records the
+/// code hash supplied by the caller, the data hash over the fit
+/// sessions' content hashes, the feature hash over the fitted
+/// transforms, the exact crate version and the timestamp.
+#[allow(clippy::too_many_arguments)]
+pub fn freeze_artifact(
+    train: &[(FrameCalc<'_>, Vec<OriginData>)],
+    fit_ids: &[String],
+    fit_hashes: &[(String, String)],
+    embargo_cutoff_ms: i64,
+    family: Family,
+    rule: Rule,
+    protocol_digest: &str,
+    code_hash: &str,
+    timestamp_unix: i64,
+) -> Result<FrozenArtifact, DirectionError> {
+    if protocol_digest != PROTOCOL_DIGEST {
+        return Err(DirectionError::InvalidArtifact(
+            "protocol digest does not match the registered protocol".to_string(),
+        ));
+    }
+    if train.len() != fit_ids.len() || train.len() != fit_hashes.len() {
+        return Err(DirectionError::UnexpectedSession(format!(
+            "freeze fit pool has {} sessions, {} ids and {} hashes",
+            train.len(),
+            fit_ids.len(),
+            fit_hashes.len()
+        )));
+    }
+    for (i, (id, _)) in fit_hashes.iter().enumerate() {
+        if *id != fit_ids[i] {
+            return Err(DirectionError::UnexpectedSession(
+                "fit session hash order does not match the fit session list".to_string(),
+            ));
+        }
+    }
+    for (_, origins) in train {
+        for o in origins {
+            if o.decision_ms > embargo_cutoff_ms {
+                return Err(DirectionError::InvalidArtifact(format!(
+                    "fit pool holds an origin at {} past the embargo cutoff {embargo_cutoff_ms}",
+                    o.decision_ms
+                )));
+            }
+        }
+    }
+    let ctx = build_fit_context(train)?;
+    let n_fit: usize = train.iter().map(|(_, o)| o.len()).sum();
+    let standard = ctx.standard[&family].clone();
+    let mut xs: Vec<Vec<f64>> = Vec::with_capacity(n_fit);
+    let mut y: Vec<u8> = Vec::with_capacity(n_fit);
+    for (calc, origins) in train {
+        for o in origins {
+            let raw = raw_columns(calc, o, &ctx, family);
+            xs.push(standardize(&raw, &standard));
+            y.push(o.target);
+        }
+    }
+    let fit = fit_ridge_logistic(&xs, &y, ctx.prevalence)?;
+    let mut data_lines = String::new();
+    for (id, hash) in fit_hashes {
+        data_lines.push_str(&format!("{id}:{hash}\n"));
+    }
+    let data_hash = sha256_hex(data_lines.as_bytes());
+    let feature_hash = sha256_hex(canonical_feature_string(family, rule, &ctx).as_bytes());
+    Ok(FrozenArtifact {
+        family,
+        rule,
+        protocol_digest: protocol_digest.to_string(),
+        code_hash: code_hash.to_string(),
+        data_hash,
+        feature_hash,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        timestamp_unix,
+        fit_sessions: fit_ids.to_vec(),
+        fit_session_hashes: fit_hashes.to_vec(),
+        embargo_cutoff_ms,
+        n_fit_origins: n_fit,
+        prevalence: ctx.prevalence,
+        majority_label: ctx.majority_label,
+        ar_intercept: ctx.ar_intercept,
+        ar_coefs: ctx.ar_coefs,
+        burst_threshold: ctx.burst_threshold,
+        standard,
+        slopes: fit.slopes,
+        intercept: fit.intercept,
+        n_accepted: fit.n_accepted,
+        grad_inf_norm: fit.grad_inf_norm,
+    })
+}
+
+/// Scores origins with a frozen artifact only: no refitting, no
+/// tuning, no change to the model. The context and ridge fit are
+/// rebuilt from the artifact's recorded values, so a deserialized
+/// artifact scores identically to the frozen one.
+pub fn score_with_artifact(
+    artifact: &FrozenArtifact,
+    calc: &FrameCalc,
+    origins: &[OriginData],
+) -> (Vec<ScoredRow>, Vec<f64>) {
+    let mut standard = HashMap::new();
+    standard.insert(artifact.family, artifact.standard.clone());
+    let ctx = FitContext {
+        ar_intercept: artifact.ar_intercept,
+        ar_coefs: artifact.ar_coefs,
+        burst_threshold: artifact.burst_threshold,
+        prevalence: artifact.prevalence,
+        majority_label: artifact.majority_label,
+        standard,
+    };
+    let fit = RidgeFit {
+        slopes: artifact.slopes.clone(),
+        intercept: artifact.intercept,
+        n_accepted: artifact.n_accepted,
+        grad_inf_norm: artifact.grad_inf_norm,
+    };
+    score_session_rule(calc, origins, &ctx, &fit, artifact.family, artifact.rule)
+}
+
+/// One calibration bin: a fixed predicted-probability decile with its
+/// row count, mean predicted probability and mean realized target.
+#[derive(Debug, Clone, Copy)]
+pub struct CalibrationBin {
+    pub lo: f64,
+    pub hi: f64,
+    pub n: usize,
+    pub mean_p: Option<f64>,
+    pub mean_y: Option<f64>,
+}
+
+/// Per-session confirmation diagnostics (protocol section 8):
+/// scores, recalls, prevalence, flat counts, coverage, Brier and
+/// calibration diagnostics, plus the per-session 300 s diagnostic
+/// bootstrap interval.
+#[derive(Debug, Clone)]
+pub struct ConfirmationSession {
+    pub slot: usize,
+    pub session: String,
+    pub n_scored: usize,
+    pub n_eligible: usize,
+    pub coverage: f64,
+    pub accuracy: f64,
+    pub baseline_accuracy: f64,
+    pub balanced_accuracy: Option<f64>,
+    pub delta: f64,
+    pub gamma: Option<f64>,
+    pub s: Option<f64>,
+    pub recall_pos: Option<f64>,
+    pub recall_neg: Option<f64>,
+    pub prevalence: f64,
+    pub flat_count: usize,
+    pub brier: f64,
+    pub calibration: Vec<CalibrationBin>,
+    pub boot_300s: BootstrapIntervals,
+}
+
+/// One leave-one-pair-out recomputation: the pooled endpoints over
+/// the eight sessions that remain after dropping one adjacent pair.
+#[derive(Debug, Clone, Copy)]
+pub struct LeaveOnePairOut {
+    pub dropped_pair: (usize, usize),
+    pub delta: f64,
+    pub gamma: f64,
+}
+
+/// One audit-ledger bin: the aggregate counts of the scored rows in
+/// one epoch-aligned time bin of one session, at one block length
+/// (protocol section 10).
+#[derive(Debug, Clone)]
+pub struct AuditBin {
+    pub session: String,
+    pub block_ms: i64,
+    pub bin: i64,
+    pub n: usize,
+    pub n1: usize,
+    pub tp: usize,
+    pub tn: usize,
+    pub fp: usize,
+    pub fn_: usize,
+    pub base_correct: usize,
+}
+
+/// The section 8 confirmation outcome kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmationOutcomeKind {
+    Win,
+    Partial,
+    Null,
+}
+
+impl ConfirmationOutcomeKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ConfirmationOutcomeKind::Win => "win",
+            ConfirmationOutcomeKind::Partial => "partial",
+            ConfirmationOutcomeKind::Null => "null",
+        }
+    }
+}
+
+/// The full section 8 confirmation outcome.
+#[derive(Debug)]
+pub struct ConfirmationOutcome {
+    pub pooled: PooledMetrics,
+    pub per_session: Vec<ConfirmationSession>,
+    /// Predicted probabilities per session, parallel to the scored
+    /// rows, for the deterministic replay.
+    pub probabilities: Vec<Vec<f64>>,
+    /// Paired confirmation intervals (section 8 seed).
+    pub boot_300s: BootstrapIntervals,
+    /// Paired confirmation intervals (section 8 seed).
+    pub boot_600s: BootstrapIntervals,
+    /// Fixed-cohort diagnostic intervals at 300 s (diagnostic seed).
+    pub fixed_cohort_300s: BootstrapIntervals,
+    pub leave_one_pair_out: Vec<LeaveOnePairOut>,
+    pub lopo_delta_range: (f64, f64),
+    pub lopo_gamma_range: (f64, f64),
+    pub audit_300s: Vec<AuditBin>,
+    pub audit_600s: Vec<AuditBin>,
+    pub outcome: ConfirmationOutcomeKind,
+    /// Which endpoint cleared, for the partial wording ("Delta" or
+    /// "Balanced accuracy"); `None` for a win or a null.
+    pub cleared_endpoint: Option<&'static str>,
+}
+
+/// A holdout slot's frame together with its identity, for the run.
+pub struct HoldoutInput<'a> {
+    pub slot: usize,
+    pub session_id: String,
+    pub frame: &'a SessionFrame,
+}
+
+/// Fixed decile calibration table over predicted probabilities:
+/// ten bins [0, 0.1) through [0.9, 1.0], each with its row count,
+/// mean predicted probability and mean realized target.
+fn calibration_table(probs: &[f64], rows: &[ScoredRow]) -> Vec<CalibrationBin> {
+    let mut bins: Vec<CalibrationBin> = (0..10)
+        .map(|j| CalibrationBin {
+            lo: j as f64 / 10.0,
+            hi: (j + 1) as f64 / 10.0,
+            n: 0,
+            mean_p: None,
+            mean_y: None,
+        })
+        .collect();
+    let mut sums: Vec<(f64, f64)> = vec![(0.0, 0.0); 10];
+    for (p, r) in probs.iter().zip(rows.iter()) {
+        let j = (*p * 10.0).floor() as usize;
+        let j = j.min(9);
+        bins[j].n += 1;
+        sums[j].0 += *p;
+        sums[j].1 += f64::from(r.target);
+    }
+    for (j, b) in bins.iter_mut().enumerate() {
+        if b.n > 0 {
+            b.mean_p = Some(sums[j].0 / b.n as f64);
+            b.mean_y = Some(sums[j].1 / b.n as f64);
+        }
+    }
+    bins
+}
+
+/// Audit ledger for one block length: per session, per
+/// epoch-aligned bin, the aggregate counts of the scored rows in it,
+/// in chronological bin order (protocol section 10).
+fn audit_ledger(sessions: &[(String, Vec<ScoredRow>)], block_ms: i64) -> Vec<AuditBin> {
+    let mut out = Vec::new();
+    for (session, rows) in sessions {
+        let mut by_bin: HashMap<i64, Vec<&ScoredRow>> = HashMap::new();
+        let mut order: Vec<i64> = Vec::new();
+        for r in rows {
+            let b = r.time_ms / block_ms;
+            if !by_bin.contains_key(&b) {
+                order.push(b);
+            }
+            by_bin.entry(b).or_default().push(r);
+        }
+        order.sort_unstable();
+        for b in order {
+            let mut a = AuditBin {
+                session: session.clone(),
+                block_ms,
+                bin: b,
+                n: 0,
+                n1: 0,
+                tp: 0,
+                tn: 0,
+                fp: 0,
+                fn_: 0,
+                base_correct: 0,
+            };
+            for r in &by_bin[&b] {
+                a.n += 1;
+                a.n1 += usize::from(r.target);
+                match (r.target, r.model_pred) {
+                    (1, 1) => a.tp += 1,
+                    (0, 0) => a.tn += 1,
+                    (0, 1) => a.fp += 1,
+                    (1, 0) => a.fn_ += 1,
+                    _ => unreachable!(),
+                }
+                if r.baseline_pred == r.target {
+                    a.base_correct += 1;
+                }
+            }
+            out.push(a);
+        }
+    }
+    out
+}
+
+/// Applies the section 8 outcome gates exactly as written. The win
+/// gate needs all ten assigned sessions present, Delta at least
+/// +0.010, balanced accuracy at least 0.520, and the 95% lower bounds
+/// for both Delta and Gamma strictly positive at both block lengths.
+/// A partial outcome is exactly one endpoint clearing its point
+/// margin and both of its interval checks while the win gate does
+/// not hold. Neither endpoint clearing, on a valid complete run, is
+/// a null. Suppressed intervals or a missing session are not a
+/// result: they are an error, and the study is incomplete.
+pub fn classify_confirmation(
+    pooled: &PooledMetrics,
+    boot_300s: BootstrapIntervals,
+    boot_600s: BootstrapIntervals,
+    n_sessions: usize,
+) -> Result<(ConfirmationOutcomeKind, Option<&'static str>), DirectionError> {
+    let expected = CONFIRMATION_LAST_SLOT - CONFIRMATION_FIRST_SLOT + 1;
+    if n_sessions != expected {
+        return Err(DirectionError::MissingSession(format!(
+            "expected {expected} holdout sessions, found {n_sessions}"
+        )));
+    }
+    let (d300, g300) = boot_300s.ok_or_else(|| {
+        DirectionError::UndefinedMetric("300 s confirmation intervals suppressed".to_string())
+    })?;
+    let (d600, g600) = boot_600s.ok_or_else(|| {
+        DirectionError::UndefinedMetric("600 s confirmation intervals suppressed".to_string())
+    })?;
+    let delta_clears = pooled.delta >= 0.010 && d300.0 > 0.0 && d600.0 > 0.0;
+    let gamma_clears = pooled.balanced_accuracy >= 0.520 && g300.0 > 0.0 && g600.0 > 0.0;
+    match (delta_clears, gamma_clears) {
+        (true, true) => Ok((ConfirmationOutcomeKind::Win, None)),
+        (true, false) => Ok((ConfirmationOutcomeKind::Partial, Some("Delta"))),
+        (false, true) => Ok((ConfirmationOutcomeKind::Partial, Some("Balanced accuracy"))),
+        (false, false) => Ok((ConfirmationOutcomeKind::Null, None)),
+    }
+}
+
+/// Runs the section 8 confirmation: scores slots 11-20 exactly once
+/// with the single frozen artifact and the frozen majority rule. No
+/// other variant is scored on the holdout, not even as a diagnostic.
+/// Endpoints come from the equal-session averaged confusion tables,
+/// as in section 6, with per-session scores, recalls, prevalence,
+/// flat counts, coverage, and Brier and calibration diagnostics
+/// reported alongside. Intervals are the paired bootstrap intervals
+/// at 300 s and 600 s under the section 8 seed; the fixed-cohort
+/// diagnostic at 300 s uses the diagnostic seed, as do the
+/// per-session diagnostic intervals. Leave-one-pair-out ranges are
+/// reported over the five adjacent pairs. A suppressed confirmatory
+/// interval, a missing or misidentified holdout session, or an
+/// undefined pooled metric is an error, and the study is incomplete.
+pub fn run_confirmation(
+    artifact: &FrozenArtifact,
+    holdout: &[HoldoutInput],
+) -> Result<ConfirmationOutcome, DirectionError> {
+    let expected = CONFIRMATION_LAST_SLOT - CONFIRMATION_FIRST_SLOT + 1;
+    if holdout.len() != expected {
+        return Err(DirectionError::MissingSession(format!(
+            "expected {expected} holdout sessions, found {}",
+            holdout.len()
+        )));
+    }
+    let mut sorted: Vec<&HoldoutInput> = holdout.iter().collect();
+    sorted.sort_by_key(|h| h.slot);
+    for (k, h) in sorted.iter().enumerate() {
+        let slot = CONFIRMATION_FIRST_SLOT + k;
+        if h.slot != slot {
+            return Err(DirectionError::MissingSession(format!(
+                "expected holdout slot {slot}, found slot {}",
+                h.slot
+            )));
+        }
+        if h.session_id != CAMPAIGN_SLOT_IDS[slot - 1] {
+            return Err(DirectionError::UnexpectedSession(format!(
+                "holdout slot {slot} is {}, expected {}",
+                h.session_id,
+                CAMPAIGN_SLOT_IDS[slot - 1]
+            )));
+        }
+    }
+    let mut per_session: Vec<ConfirmationSession> = Vec::new();
+    let mut all_rows: Vec<Vec<ScoredRow>> = Vec::new();
+    let mut probabilities: Vec<Vec<f64>> = Vec::new();
+    for h in &sorted {
+        let calc = FrameCalc::new(h.frame);
+        let origins = calc.origins();
+        let n_eligible = origins.len();
+        let (rows, probs) = score_with_artifact(artifact, &calc, &origins);
+        let sm = session_metrics(&h.session_id, &rows);
+        let table = Confusion::from_rows(&rows);
+        let recall_pos = if table.tp + table.fn_ > 0.0 {
+            Some(table.tp / (table.tp + table.fn_))
+        } else {
+            None
+        };
+        let recall_neg = if table.tn + table.fp > 0.0 {
+            Some(table.tn / (table.tn + table.fp))
+        } else {
+            None
+        };
+        let prevalence =
+            rows.iter().map(|r| f64::from(r.target)).sum::<f64>() / rows.len().max(1) as f64;
+        let flat_count = origins
+            .iter()
+            .filter(|o| h.frame.mid[o.bar + TARGET_HORIZON_BARS] == h.frame.mid[o.bar])
+            .count();
+        let brier = probs
+            .iter()
+            .zip(rows.iter())
+            .map(|(p, r)| (p - f64::from(r.target)).powi(2))
+            .sum::<f64>()
+            / rows.len().max(1) as f64;
+        let calibration = calibration_table(&probs, &rows);
+        let boot_300s = diagnostic_bootstrap(std::slice::from_ref(&rows), 300_000);
+        per_session.push(ConfirmationSession {
+            slot: h.slot,
+            session: h.session_id.clone(),
+            n_scored: rows.len(),
+            n_eligible,
+            coverage: rows.len() as f64 / n_eligible.max(1) as f64,
+            accuracy: sm.accuracy,
+            baseline_accuracy: sm.baseline_accuracy,
+            balanced_accuracy: sm.balanced_accuracy,
+            delta: sm.delta,
+            gamma: sm.gamma,
+            s: sm.s,
+            recall_pos,
+            recall_neg,
+            prevalence,
+            flat_count,
+            brier,
+            calibration,
+            boot_300s,
+        });
+        all_rows.push(rows);
+        probabilities.push(probs);
+    }
+    let pooled = pool_metrics(&all_rows)?;
+    let boot_300s = paired_grouped_bootstrap_confirmation(&all_rows, 300_000);
+    let boot_600s = paired_grouped_bootstrap_confirmation(&all_rows, 600_000);
+    let fixed_cohort_300s = diagnostic_bootstrap(&all_rows, 300_000);
+    let mut leave_one_pair_out: Vec<LeaveOnePairOut> = Vec::new();
+    for p in 0..5 {
+        let keep: Vec<Vec<ScoredRow>> = all_rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i / 2 != p)
+            .map(|(_, r)| r.clone())
+            .collect();
+        let m = pool_metrics(&keep)?;
+        leave_one_pair_out.push(LeaveOnePairOut {
+            dropped_pair: (
+                CONFIRMATION_FIRST_SLOT + 2 * p,
+                CONFIRMATION_FIRST_SLOT + 2 * p + 1,
+            ),
+            delta: m.delta,
+            gamma: m.gamma,
+        });
+    }
+    let lopo_delta_range = (
+        leave_one_pair_out
+            .iter()
+            .map(|l| l.delta)
+            .fold(f64::INFINITY, f64::min),
+        leave_one_pair_out
+            .iter()
+            .map(|l| l.delta)
+            .fold(f64::NEG_INFINITY, f64::max),
+    );
+    let lopo_gamma_range = (
+        leave_one_pair_out
+            .iter()
+            .map(|l| l.gamma)
+            .fold(f64::INFINITY, f64::min),
+        leave_one_pair_out
+            .iter()
+            .map(|l| l.gamma)
+            .fold(f64::NEG_INFINITY, f64::max),
+    );
+    let named: Vec<(String, Vec<ScoredRow>)> = sorted
+        .iter()
+        .zip(all_rows.iter())
+        .map(|(h, r)| (h.session_id.clone(), r.clone()))
+        .collect();
+    let audit_300s = audit_ledger(&named, 300_000);
+    let audit_600s = audit_ledger(&named, 600_000);
+    let (outcome, cleared_endpoint) =
+        classify_confirmation(&pooled, boot_300s, boot_600s, sorted.len())?;
+    Ok(ConfirmationOutcome {
+        pooled,
+        per_session,
+        probabilities,
+        boot_300s,
+        boot_600s,
+        fixed_cohort_300s,
+        leave_one_pair_out,
+        lopo_delta_range,
+        lopo_gamma_range,
+        audit_300s,
+        audit_600s,
+        outcome,
+        cleared_endpoint,
     })
 }
 
@@ -2223,5 +3200,177 @@ mod tests {
         let ci = paired_grouped_bootstrap(&sessions, 300_000).unwrap();
         assert_eq!(ci.0, (1.0, 1.0));
         assert_eq!(ci.1, (0.5, 0.5));
+    }
+
+    /// A synthetic frame whose mid oscillates in 100-bar phases, so
+    /// both target classes occur, and whose order-flow series is
+    /// pseudo-random, so the AR(10) design is full rank.
+    fn oscillating_frame(id: &str, n: usize, seed: u64) -> SessionFrame {
+        let mut lcg = Lcg(seed);
+        let mut mid = Vec::with_capacity(n);
+        let mut v = 100_000.0;
+        for i in 0..n {
+            let phase = (i / 100) % 2;
+            v += if phase == 0 { 0.05 } else { -0.05 };
+            mid.push(v);
+        }
+        let ofi: Vec<f64> = (0..n).map(|_| lcg.uniform() * 2.0 - 1.0).collect();
+        SessionFrame {
+            session_id: id.to_string(),
+            t0_ms: 1_700_000_000_000,
+            n_bars: n,
+            observed: vec![true; n],
+            mid,
+            depth: vec![2.0; n],
+            imbalance: vec![0.1; n],
+            ofi,
+            quote_count: vec![10; n],
+            signed_qty: vec![0.5; n],
+            total_qty: vec![1.0; n],
+            trades: Vec::new(),
+            seg_start: vec![0; n],
+            first_observed: 0,
+            last_observed: n - 1,
+        }
+    }
+
+    fn pooled(delta: f64, ba: f64) -> PooledMetrics {
+        PooledMetrics {
+            n_scored: 1000,
+            accuracy: 0.5 + delta,
+            baseline_accuracy: 0.5,
+            balanced_accuracy: ba,
+            delta,
+            gamma: ba - 0.5,
+            s: 0.0,
+        }
+    }
+
+    #[test]
+    fn confirmation_gates_apply_exactly_as_written() {
+        let both = Some(((0.005, 0.030), (0.010, 0.050)));
+        // Both endpoints clear at both block lengths: win.
+        let (kind, cleared) = classify_confirmation(&pooled(0.020, 0.550), both, both, 10).unwrap();
+        assert_eq!(kind, ConfirmationOutcomeKind::Win);
+        assert_eq!(cleared, None);
+        // Delta clears, Gamma does not (BA below 0.520): partial.
+        let (kind, cleared) = classify_confirmation(&pooled(0.020, 0.510), both, both, 10).unwrap();
+        assert_eq!(kind, ConfirmationOutcomeKind::Partial);
+        assert_eq!(cleared, Some("Delta"));
+        // Gamma clears, Delta does not: partial.
+        let (kind, cleared) = classify_confirmation(&pooled(0.005, 0.550), both, both, 10).unwrap();
+        assert_eq!(kind, ConfirmationOutcomeKind::Partial);
+        assert_eq!(cleared, Some("Balanced accuracy"));
+        // Neither clears: null.
+        let (kind, cleared) = classify_confirmation(&pooled(0.005, 0.510), both, both, 10).unwrap();
+        assert_eq!(kind, ConfirmationOutcomeKind::Null);
+        assert_eq!(cleared, None);
+        // A zero lower bound is not strictly positive: no win.
+        let edge = Some(((0.0, 0.030), (0.010, 0.050)));
+        let (kind, _) = classify_confirmation(&pooled(0.020, 0.550), edge, both, 10).unwrap();
+        assert_eq!(kind, ConfirmationOutcomeKind::Partial);
+        // Suppressed intervals and a missing session are errors,
+        // not results: the study is incomplete.
+        assert!(classify_confirmation(&pooled(0.020, 0.550), None, both, 10).is_err());
+        assert!(classify_confirmation(&pooled(0.020, 0.550), both, both, 9).is_err());
+    }
+
+    fn frozen_test_artifact() -> FrozenArtifact {
+        let fa = oscillating_frame("fit-a", 600, 7);
+        let fb = oscillating_frame("fit-b", 600, 8);
+        let ca = FrameCalc::new(&fa);
+        let cb = FrameCalc::new(&fb);
+        let oa = ca.origins();
+        let ob = cb.origins();
+        assert!(!oa.is_empty() && !ob.is_empty());
+        let train = vec![(ca, oa), (cb, ob)];
+        let fit_ids = vec!["fit-a".to_string(), "fit-b".to_string()];
+        let fit_hashes = vec![
+            ("fit-a".to_string(), "hash-a".to_string()),
+            ("fit-b".to_string(), "hash-b".to_string()),
+        ];
+        freeze_artifact(
+            &train,
+            &fit_ids,
+            &fit_hashes,
+            i64::MAX,
+            Family::F,
+            Rule::P50,
+            PROTOCOL_DIGEST,
+            "test-code-hash",
+            1_700_000_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn freeze_round_trip_replays_decisions_and_probabilities() {
+        let artifact = frozen_test_artifact();
+        assert_eq!(artifact.family, Family::F);
+        assert_eq!(artifact.rule, Rule::P50);
+        assert_eq!(artifact.protocol_digest, PROTOCOL_DIGEST);
+        assert_eq!(artifact.code_hash, "test-code-hash");
+        assert_eq!(artifact.fit_sessions, vec!["fit-a", "fit-b"]);
+        let json = artifact.to_json();
+        let replay = FrozenArtifact::from_json(&json).unwrap();
+        assert_eq!(replay.slopes, artifact.slopes);
+        assert_eq!(replay.intercept, artifact.intercept);
+        // Score one fresh frame with both artifacts: identical
+        // decisions and probabilities to within 1e-12.
+        let frame = oscillating_frame("score-c", 600, 9);
+        let calc = FrameCalc::new(&frame);
+        let origins = calc.origins();
+        let (rows_a, probs_a) = score_with_artifact(&artifact, &calc, &origins);
+        let (rows_b, probs_b) = score_with_artifact(&replay, &calc, &origins);
+        assert_eq!(rows_a.len(), rows_b.len());
+        assert!(!rows_a.is_empty());
+        for (ra, rb) in rows_a.iter().zip(rows_b.iter()) {
+            assert_eq!(ra.time_ms, rb.time_ms);
+            assert_eq!(ra.target, rb.target);
+            assert_eq!(ra.model_pred, rb.model_pred);
+            assert_eq!(ra.baseline_pred, rb.baseline_pred);
+        }
+        for (pa, pb) in probs_a.iter().zip(probs_b.iter()) {
+            assert!((pa - pb).abs() <= 1e-12, "{pa} vs {pb}");
+        }
+        // A tampered digest does not deserialize.
+        let mut bad = json.clone();
+        bad["protocol_digest"] = serde_json::json!("0".repeat(64));
+        assert!(FrozenArtifact::from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn run_confirmation_scores_ten_synthetic_holdout_sessions() {
+        let artifact = frozen_test_artifact();
+        let mut frames: Vec<SessionFrame> = Vec::new();
+        for (k, id) in CAMPAIGN_SLOT_IDS[10..].iter().enumerate() {
+            frames.push(oscillating_frame(id, 600, 100 + k as u64));
+        }
+        let inputs: Vec<HoldoutInput> = frames
+            .iter()
+            .enumerate()
+            .map(|(k, f)| HoldoutInput {
+                slot: CONFIRMATION_FIRST_SLOT + k,
+                session_id: CAMPAIGN_SLOT_IDS[10 + k].to_string(),
+                frame: f,
+            })
+            .collect();
+        let outcome = run_confirmation(&artifact, &inputs).unwrap();
+        assert_eq!(outcome.per_session.len(), 10);
+        assert_eq!(outcome.probabilities.len(), 10);
+        assert!(outcome.boot_300s.is_some());
+        assert!(outcome.boot_600s.is_some());
+        assert!(outcome.fixed_cohort_300s.is_some());
+        assert_eq!(outcome.leave_one_pair_out.len(), 5);
+        assert!(!outcome.audit_300s.is_empty());
+        assert!(!outcome.audit_600s.is_empty());
+        assert!(matches!(
+            outcome.outcome,
+            ConfirmationOutcomeKind::Win
+                | ConfirmationOutcomeKind::Partial
+                | ConfirmationOutcomeKind::Null
+        ));
+        // Nine sessions is an error, not a result.
+        assert!(run_confirmation(&artifact, &inputs[..9]).is_err());
     }
 }
