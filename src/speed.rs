@@ -1113,8 +1113,8 @@ fn two_component_stable(fit: &TwoCompFit) -> bool {
 // Cross-check 1: the reduced-form VAR.
 //
 // Specification, stated once and followed for every session:
-// - Per-session estimation. The six sessions are heterogeneous
-//   (their OFI standard deviations differ about fivefold, and the
+// - Per-session estimation. Sessions are heterogeneous
+//   (their OFI standard deviations differ across sessions, and the
 //   local projections are per-session for the same reason), so no
 //   pooled VAR is fit; a pooled fit with session effects would
 //   average dynamics the report elsewhere refuses to average.
@@ -5219,7 +5219,7 @@ fn compute_variants(
 /// Pooled description over the sessions in the report: a
 /// precision-weighted and an equal-weight mean curve, plus a
 /// session-demeaned shape. This is a description of these
-/// sessions only (six clusters); it carries no pooled tau, no
+/// sessions only (one cluster per session); it carries no pooled tau, no
 /// half-life, and no market-wide claim.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PooledDescription {
@@ -5306,7 +5306,11 @@ pub fn pooled_description(sessions: &[SessionSpeed]) -> PooledDescription {
         session_demeaned_shape_bps: demeaned,
         response_range_bps: range,
         pooled_tau_reported: false,
-        label: "description of these six recorded sessions only (six clusters): a pooled summary of this sample, not a population or market-wide estimate, and no pooled tau or half-life is reported".to_string(),
+        label: format!(
+            "description of these {} recorded sessions only ({} clusters): a pooled summary of this sample, not a population or market-wide estimate, and no pooled tau or half-life is reported",
+            sessions.len(),
+            sessions.len()
+        ),
     }
 }
 
@@ -5330,7 +5334,7 @@ pub fn report_variants(sessions: &[SessionSpeed]) -> ReportVariants {
         ],
         notes: vec![
             "Variants are published alongside the headline curves under the same frozen protocol (same sessions, horizons, timing conventions and censoring rule); variant intervals use the same segment-respecting bootstrap design at the sensitivity resample count with seeds derived from the published seed.".to_string(),
-            "The burst event study is a conditional result for extreme events only. The volume-clock and event-time curves are separate estimands whose horizons are buckets and event bars, not seconds. The pooled block describes these six sessions only and reports no pooled tau or half-life.".to_string(),
+            format!("The burst event study is a conditional result for extreme events only. The volume-clock and event-time curves are separate estimands whose horizons are buckets and event bars, not seconds. The pooled block describes these {} sessions only and reports no pooled tau or half-life.", sessions.len()),
         ],
     }
 }
@@ -6454,6 +6458,73 @@ mod tests {
         assert_eq!(
             j["sessions"][0]["variants"]["bursts"]["threshold_quantile"],
             0.95
+        );
+    }
+
+    fn synth_session_for_pooled_label(seed: u64) -> SessionSpeed {
+        // 1,799 one-second quotes with wandering sizes, as in the
+        // variants end-to-end test: enough bars for the full analysis
+        // to report a session.
+        let mut s: u64 = seed;
+        let n = 1799;
+        let mut price = 100_000.0f64;
+        let mut quotes = Vec::with_capacity(n);
+        let mut trades = Vec::with_capacity(n);
+        for i in 0..n {
+            let u = xorshift(&mut s) * 2.0 - 1.0;
+            price *= 1.0 + u * 0.0002;
+            quotes.push(Quote {
+                time_ms: i as i64 * 1_000,
+                bid_px: price - 0.05,
+                bid_sz: 1.0 + (xorshift(&mut s) + 1.0) * 2.0,
+                ask_px: price + 0.05,
+                ask_sz: 1.0 + (xorshift(&mut s) + 1.0) * 2.0,
+            });
+            trades.push(Trade {
+                time_ms: i as i64 * 1_000 + 500,
+                price,
+                qty: 0.01,
+                is_buyer_maker: i % 2 == 0,
+            });
+        }
+        analyze_session_speed_with_trades(
+            "synth-pooled-label",
+            &quotes,
+            Some(&trades),
+            &small_cfg(),
+        )
+        .expect("analysis")
+    }
+
+    #[test]
+    fn pooled_label_names_the_session_count() {
+        // The pooled label and the variants pooled note must name the
+        // sessions actually in the report: a hardcoded "six recorded
+        // sessions" stayed in the label when the report carried
+        // twenty.
+        let sessions: Vec<SessionSpeed> = (0..2)
+            .map(|i| synth_session_for_pooled_label(0xC0FFEE + i))
+            .collect();
+        let pooled = pooled_description(&sessions);
+        assert_eq!(pooled.n_sessions, 2);
+        assert!(
+            pooled.label.contains("2 recorded sessions"),
+            "label: {}",
+            pooled.label
+        );
+        assert!(
+            pooled.label.contains("(2 clusters)"),
+            "label: {}",
+            pooled.label
+        );
+        let variants = report_variants(&sessions);
+        assert!(
+            variants
+                .notes
+                .iter()
+                .any(|n| n.contains("these 2 sessions")),
+            "notes: {:?}",
+            variants.notes
         );
     }
 
