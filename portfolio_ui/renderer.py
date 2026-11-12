@@ -47,7 +47,15 @@ def enrich(d,soup,root):
   family=report['selection']['selected_family']
   rule=report['selection']['selected_rule']
   validation=next(row for row in development['rows'] if (row['family'],row['rule'])==(family,rule))
+  parse_session=lambda row:datetime.datetime.strptime(row['session'],'session-%Y%m%d-%H%M%S-utc').replace(tzinfo=datetime.timezone.utc)
+  campaign_starts=sorted(map(parse_session,campaign['sessions']))
+  first_sealed=min(report['per_session'],key=lambda row:row['slot'])
+  embargo_cutoff=report['frozen_artifact']['embargo_cutoff_ms']
+  embargo_seconds=int(parse_session(first_sealed).timestamp())-embargo_cutoff//1000
   d['direction_confirmation']={
+   'archive_sessions':len(development['archives']),
+   'campaign_dates':[date.date().isoformat() for date in (campaign_starts[0],campaign_starts[-1])],
+   'embargo_seconds':embargo_seconds,
    'pooled':report['pooled'],
    'sessions':[{key:row[key] for key in ('slot','delta','balanced_accuracy')} for row in report['per_session']],
    'bootstrap':{length:report[f'bootstrap_{length}s'] for length in (300,600)},
