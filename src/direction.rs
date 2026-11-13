@@ -1961,14 +1961,8 @@ pub fn run_development_rows(
             fits.insert(*family, fit);
         }
         for (family, rule) in pairs {
-            let (rows, _) = score_session_rule(
-                eval_calc,
-                eval_origins,
-                &ctx,
-                &fits[family],
-                *family,
-                *rule,
-            );
+            let (rows, _) =
+                score_session_rule(eval_calc, eval_origins, &ctx, &fits[family], *family, *rule);
             scored.get_mut(&(*family, *rule)).unwrap().push(rows);
         }
     }
@@ -3534,10 +3528,7 @@ mod tests {
         assert_eq!(row.boot_300s, full_row.boot_300s);
         assert_eq!(row.boot_600s, full_row.boot_600s);
         assert_eq!(
-            boundaries
-                .iter()
-                .map(|b| b.eval_slot)
-                .collect::<Vec<_>>(),
+            boundaries.iter().map(|b| b.eval_slot).collect::<Vec<_>>(),
             full.boundaries
                 .iter()
                 .map(|b| b.eval_slot)

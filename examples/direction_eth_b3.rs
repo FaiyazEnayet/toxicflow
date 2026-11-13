@@ -130,12 +130,8 @@ fn run(out: &str, dirs: &[String]) -> Result<(), DirectionError> {
     }
     // No archives on the ETH side: the six archives were BTC-only.
     let empty_archives: Vec<&toxicflow::direction::SessionFrame> = Vec::new();
-    let (boundaries, row) = run_transfer_validation(
-        &empty_archives,
-        &slot_inputs,
-        Family::F,
-        Rule::P50,
-    )?;
+    let (boundaries, row) =
+        run_transfer_validation(&empty_archives, &slot_inputs, Family::F, Rule::P50)?;
     println!("\ntransfer validation row, family F under p>0.50 (pooled over slots 07-10):");
     println!(
         "  accuracy {:.5} | baseline {:.5} | Delta {:+.5} | BA {:.5} | Gamma {:+.5}",
