@@ -1061,7 +1061,11 @@ fn ridge_objective(xs: &[Vec<f64>], y: &[u8], w: &[f64], b: f64) -> (f64, Vec<f6
 /// and halves up to 40 times under Armijo coefficient 0.0001; the
 /// fit must reach gradient infinity norm at most 1e-8 within 100
 /// accepted updates. A nonfinite fit or a single-class training set
-/// is a failure, not a result.
+/// is a failure, not a result. A step that leaves every parameter
+/// bit-identical is a numerical-stagnation failure, not an accepted
+/// update: near the optimum the Armijo decrease term can underflow
+/// to zero at the loss scale, so an unchanged point passes the
+/// sufficient-decrease check while the optimizer makes no progress.
 pub fn fit_ridge_logistic(
     xs: &[Vec<f64>],
     y: &[u8],
@@ -1115,6 +1119,26 @@ pub fn fit_ridge_logistic(
             {
                 let (loss_try, _, _) = ridge_objective(xs, y, &w_try, b_try);
                 if loss_try.is_finite() && loss_try <= loss + ARMIJO_C * alpha * dir_deriv {
+                    // Zero-progress guard: a step that leaves every
+                    // parameter bit-identical is not an accepted
+                    // update. Near the optimum the Armijo decrease
+                    // term can underflow to zero at the loss scale,
+                    // so an unchanged point passes the
+                    // sufficient-decrease check and the optimizer
+                    // would otherwise burn the whole update budget
+                    // counting motionless steps, then report a
+                    // misleading "gradient after 100 accepted
+                    // updates" failure.
+                    if w_try
+                        .iter()
+                        .zip(w.iter())
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                        && b_try.to_bits() == b.to_bits()
+                    {
+                        return Err(DirectionError::FitFailed(format!(
+                            "numerical stagnation: Newton step left all parameters unchanged at gradient infinity norm {ginf:.3e} after {accepted} accepted updates"
+                        )));
+                    }
                     w = w_try;
                     b = b_try;
                     loss = loss_try;
@@ -2842,6 +2866,43 @@ mod tests {
             let p_gd = sigmoid(z);
             assert!((p_newton - p_gd).abs() < 1e-3, "{p_newton} vs {p_gd}");
         }
+    }
+
+    #[test]
+    fn ridge_logistic_reports_numerical_stagnation_instead_of_counting_motionless_steps() {
+        // One column at 1e6 scale makes the Newton step underflow
+        // the parameter scale near the optimum: the line search
+        // keeps accepting steps that leave every parameter
+        // bit-identical. The fit must fail fast with the explicit
+        // stagnation diagnostic, not burn 100 accepted updates and
+        // report a misleading gradient message. (Observed on the
+        // ETH boundary-2 family R fit: gradient 1.615e-8, weights
+        // frozen from iteration 10, 89 motionless steps counted as
+        // accepted before the 100-update failure.)
+        let mut rng = Lcg(0x888);
+        let normal = |rng: &mut Lcg| {
+            let u1 = rng.uniform().max(1e-12);
+            let u2 = rng.uniform();
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        };
+        let n = 20_000usize;
+        let mut xs: Vec<Vec<f64>> = Vec::with_capacity(n);
+        let mut y: Vec<u8> = Vec::with_capacity(n);
+        let mut n1 = 0usize;
+        for _ in 0..n {
+            let row = vec![normal(&mut rng), 1e6 * normal(&mut rng), normal(&mut rng)];
+            let z = 0.5 * row[0] + 0.1;
+            let yi = u8::from(rng.uniform() < sigmoid(z));
+            n1 += usize::from(yi);
+            xs.push(row);
+            y.push(yi);
+        }
+        let err = fit_ridge_logistic(&xs, &y, n1 as f64 / n as f64).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("numerical stagnation"),
+            "expected the stagnation diagnostic, got: {msg}"
+        );
     }
 
     #[test]
