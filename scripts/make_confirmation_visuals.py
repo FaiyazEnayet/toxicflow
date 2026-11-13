@@ -59,7 +59,7 @@ def session_figure(report, shown):
         ax.text(1, 1.055, "Pooled " + format(pooled[field], fmt), color=accent,
                 transform=ax.transAxes, ha="right", fontsize=10)
     positive = sum(row["delta"] > 0 for row in rows)
-    footer = f"Δ positive in {positive} of {len(rows)} sessions   ·   Paired bootstrap intervals span zero at both block lengths."
+    footer = f"Δ positive in {positive} of {len(rows)} sealed sessions   ·   Dashed lines mark the pooled results."
     fig.text(.064, .065, footer, color=MUTED, fontsize=10)
     return fig
 
@@ -107,7 +107,7 @@ def main():
     frames = [frame(session_figure(report, index)) for index in range(1, count)]
     frames.extend([frame(final), frame(interval_figure(report))])
     frames[0].save(DOCS / "demo.gif", save_all=True, append_images=frames[1:],
-                   duration=[180] * (count - 1) + [2400, 3000], loop=0, optimize=True)
+                   duration=[200] * (count - 1) + [2600, 3200], loop=0, optimize=True)
 
 
 if __name__ == "__main__":
