@@ -4,8 +4,9 @@
 //! protocol digest pin.
 
 use toxicflow::direction_manifest::{
-    parse_session_start_unix, role_for_slot, sha256_hex, DirectionManifest, ManifestError,
-    SessionClass, SlotRole, ARCHIVE_SESSION_IDS, PROTOCOL_DIGEST, PROTOCOL_PATH,
+    parse_session_start_unix, role_for_slot, sha256_hex, DirectionManifest, EthDirectionManifest,
+    ManifestError, SessionClass, SlotRole, ARCHIVE_SESSION_IDS, ETH_FIT_DEV_SLOT_IDS,
+    ETH_PROTOCOL_DIGEST, ETH_PROTOCOL_PATH, ETH_SEALED_SLOT_IDS, PROTOCOL_DIGEST, PROTOCOL_PATH,
 };
 
 /// Twenty counted campaign slots in chronological scheduled-start
@@ -304,5 +305,77 @@ fn protocol_document_matches_the_registered_digest() {
         sha256_hex(&bytes),
         PROTOCOL_DIGEST,
         "the protocol document changed; update PROTOCOL_DIGEST deliberately in the same commit"
+    );
+}
+
+#[test]
+fn eth_protocol_document_matches_the_registered_digest() {
+    let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), ETH_PROTOCOL_PATH);
+    let bytes = std::fs::read(&path).expect("the ETH transfer protocol document must exist");
+    assert_eq!(
+        sha256_hex(&bytes),
+        ETH_PROTOCOL_DIGEST,
+        "the ETH transfer protocol document changed; update ETH_PROTOCOL_DIGEST deliberately in the same commit"
+    );
+}
+
+#[test]
+fn eth_manifest_fit_allowlist_opens_slots_01_to_10_only() {
+    let mut all: Vec<&str> = Vec::new();
+    all.extend_from_slice(&ETH_FIT_DEV_SLOT_IDS);
+    all.extend_from_slice(&ETH_SEALED_SLOT_IDS);
+    let m = EthDirectionManifest::new(&all).expect("the twenty ETH slots are valid");
+    assert_eq!(m.slot_count(), 20);
+    // Fit and validation slots resolve.
+    for id in ETH_FIT_DEV_SLOT_IDS {
+        assert!(m.resolve_for_fit(id).is_ok(), "{id} must resolve for fit");
+    }
+    // Sealed holdout slots are an error, not a result.
+    for id in ETH_SEALED_SLOT_IDS {
+        assert_eq!(
+            m.resolve_for_fit(id),
+            Err(ManifestError::SealedHoldout(id.to_string())),
+            "{id} must not resolve for fit"
+        );
+    }
+    // BTC sessions and unknown IDs are not part of this study.
+    assert_eq!(
+        m.resolve_for_fit("session-20261109-083238-utc"),
+        Err(ManifestError::UnknownSession(
+            "session-20261109-083238-utc".to_string()
+        ))
+    );
+    assert_eq!(
+        m.resolve_for_fit("session_325h"),
+        Err(ManifestError::UnknownSession("session_325h".to_string()))
+    );
+    // A manifest without all twenty slots is an error.
+    assert!(matches!(
+        EthDirectionManifest::new(&ETH_FIT_DEV_SLOT_IDS),
+        Err(ManifestError::TooFewSlots(10))
+    ));
+}
+
+#[test]
+fn eth_confirmation_requires_the_registered_digest_and_a_sealed_slot() {
+    let mut all: Vec<&str> = Vec::new();
+    all.extend_from_slice(&ETH_FIT_DEV_SLOT_IDS);
+    all.extend_from_slice(&ETH_SEALED_SLOT_IDS);
+    let m = EthDirectionManifest::new(&all).expect("the twenty ETH slots are valid");
+    // A sealed slot resolves under the registered digest.
+    assert!(m
+        .resolve_for_confirmation(ETH_SEALED_SLOT_IDS[0], ETH_PROTOCOL_DIGEST)
+        .is_ok());
+    // A wrong digest is rejected even for a sealed slot.
+    assert_eq!(
+        m.resolve_for_confirmation(ETH_SEALED_SLOT_IDS[0], "0".repeat(64).as_str()),
+        Err(ManifestError::DigestMismatch)
+    );
+    // A fit or validation session is not sealed.
+    assert_eq!(
+        m.resolve_for_confirmation(ETH_FIT_DEV_SLOT_IDS[6], ETH_PROTOCOL_DIGEST),
+        Err(ManifestError::NotSealed(
+            ETH_FIT_DEV_SLOT_IDS[6].to_string()
+        ))
     );
 }

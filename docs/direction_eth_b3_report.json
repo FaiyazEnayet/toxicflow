@@ -1,0 +1,242 @@
+{
+  "archives": [],
+  "archives_note": "No archive sessions on the ETH side: the six archives were BTC-only. The ETH fit pool starts with six four-hour recordings.",
+  "assessment": {
+    "ba_vs_bar_0.520": false,
+    "delta_vs_bar_0.010": true,
+    "note": "B3 has no confidence-interval gate; it is a screening step and B4 provides the confirmation. If either bar fails, the outcome is a failed cross-asset validation, published as such, and ETH slots 11-20 are not opened for this experiment. There is no fallback family or threshold.",
+    "passes_b3": false
+  },
+  "boundaries": [
+    {
+      "embargo_cutoff_ms": 1794299642000,
+      "eval_session": "session-20261110-084502-utc",
+      "eval_slot": 7,
+      "fit_sessions": [
+        "session-20261109-084401-utc",
+        "session-20261109-124411-utc",
+        "session-20261109-164421-utc",
+        "session-20261109-204431-utc",
+        "session-20261110-004441-utc",
+        "session-20261110-044452-utc"
+      ],
+      "majority_label": 0,
+      "n_fit_origins": 85085,
+      "prevalence": 0.49019216078039607
+    },
+    {
+      "embargo_cutoff_ms": 1794314052000,
+      "eval_session": "session-20261110-124512-utc",
+      "eval_slot": 8,
+      "fit_sessions": [
+        "session-20261109-084401-utc",
+        "session-20261109-124411-utc",
+        "session-20261109-164421-utc",
+        "session-20261109-204431-utc",
+        "session-20261110-004441-utc",
+        "session-20261110-044452-utc",
+        "session-20261110-084502-utc"
+      ],
+      "majority_label": 0,
+      "n_fit_origins": 99364,
+      "prevalence": 0.4937502516001771
+    },
+    {
+      "embargo_cutoff_ms": 1794328462000,
+      "eval_session": "session-20261110-164522-utc",
+      "eval_slot": 9,
+      "fit_sessions": [
+        "session-20261109-084401-utc",
+        "session-20261109-124411-utc",
+        "session-20261109-164421-utc",
+        "session-20261109-204431-utc",
+        "session-20261110-004441-utc",
+        "session-20261110-044452-utc",
+        "session-20261110-084502-utc",
+        "session-20261110-124512-utc"
+      ],
+      "majority_label": 0,
+      "n_fit_origins": 113643,
+      "prevalence": 0.49171528382742447
+    },
+    {
+      "embargo_cutoff_ms": 1794342872000,
+      "eval_session": "session-20261110-204532-utc",
+      "eval_slot": 10,
+      "fit_sessions": [
+        "session-20261109-084401-utc",
+        "session-20261109-124411-utc",
+        "session-20261109-164421-utc",
+        "session-20261109-204431-utc",
+        "session-20261110-004441-utc",
+        "session-20261110-044452-utc",
+        "session-20261110-084502-utc",
+        "session-20261110-124512-utc",
+        "session-20261110-164522-utc"
+      ],
+      "majority_label": 0,
+      "n_fit_origins": 127922,
+      "prevalence": 0.494434108284736
+    }
+  ],
+  "design": {
+    "asset": "ETHUSDT",
+    "frozen_configuration": {
+      "embargo_s": 660,
+      "family": "F",
+      "ridge_lambda": 0.01,
+      "rule": "p>0.50",
+      "target": "60-second post-close direction on 1-second bars"
+    },
+    "kind": "cross-asset transfer validation (option b): the BTC-selected configuration validated on ETH, no family selection, no threshold tuning",
+    "note": "Only family F under p>0.50 is evaluated. Coefficients, scalers, AR coefficients, thresholds and the training-majority rule are refit on ETH training data at each boundary; no BTC fitted value is carried over. Validation results are descriptive; they are never confirmatory evidence. Slots 11-20 are sealed for fit use and were not scored."
+  },
+  "observations": {
+    "unused_family_r_fit": "While the earlier all-family harness was being built, family R stalled at one boundary (eval slot 08, fit pool slots 01-07): the ridge fit reached gradient inf-norm 1.615e-8 against the 1e-8 tolerance and then stopped improving. Family R is not evaluated in this study, so this is not a competitor result and nothing was dropped from a tournament; no threshold was changed. The numerical investigation is a separate workstream."
+  },
+  "protocol": "docs/direction_eth_transfer_protocol.md",
+  "protocol_digest": "5909410b37785cff2ac27278bc2fbd38552c92a6e97260899c86237a68f48a89",
+  "qualification": "BTC and ETH were recorded during the same November 9-12, 2026 campaign. An ETH success demonstrates cross-asset generalization under substantially shared market conditions, not fully independent replication across different market regimes.",
+  "row": {
+    "accuracy": 0.5186369934555515,
+    "balanced_accuracy": 0.5183311974422374,
+    "baseline_accuracy": 0.5062770580604257,
+    "bootstrap_300s": {
+      "delta_ci": [
+        -0.017897658320700227,
+        0.04379917667742672
+      ],
+      "gamma_ci": [
+        0.003079956895751579,
+        0.03494150688283737
+      ]
+    },
+    "bootstrap_600s": {
+      "delta_ci": [
+        -0.017780603515593296,
+        0.043760352784198486
+      ],
+      "gamma_ci": [
+        0.0026298449123598466,
+        0.03535842559112945
+      ]
+    },
+    "delta": 0.01235993539512581,
+    "family": "F",
+    "gamma": 0.018331197442237435,
+    "n_scored": 57117,
+    "per_session": [
+      {
+        "accuracy": 0.5127810070733245,
+        "balanced_accuracy": 0.5133061351842204,
+        "baseline_accuracy": 0.49198123117865394,
+        "delta": 0.02079977589467058,
+        "gamma": 0.013306135184220413,
+        "n_scored": 14279,
+        "s": 0.6653067592110207,
+        "session": "session-20261110-084502-utc"
+      },
+      {
+        "accuracy": 0.5055676167798866,
+        "balanced_accuracy": 0.5047313966273462,
+        "baseline_accuracy": 0.5197142657048813,
+        "delta": -0.014146648924994731,
+        "gamma": 0.004731396627346229,
+        "n_scored": 14279,
+        "s": -1.4146648924994731,
+        "session": "session-20261110-124512-utc"
+      },
+      {
+        "accuracy": 0.5294817927170868,
+        "balanced_accuracy": 0.5340895301198153,
+        "baseline_accuracy": 0.47955182072829133,
+        "delta": 0.04992997198879551,
+        "gamma": 0.0340895301198153,
+        "n_scored": 14280,
+        "s": 1.7044765059907652,
+        "session": "session-20261110-164522-utc"
+      },
+      {
+        "accuracy": 0.5267175572519084,
+        "balanced_accuracy": 0.5313884742151788,
+        "baseline_accuracy": 0.5338609146298761,
+        "delta": -0.007143357377967674,
+        "gamma": 0.03138847421517876,
+        "n_scored": 14279,
+        "s": -0.7143357377967674,
+        "session": "session-20261110-204532-utc"
+      }
+    ],
+    "rule": "p>0.50",
+    "s": 0.9165598721118717
+  },
+  "schema": "toxicflow.direction-eth-b3/v1",
+  "slot_content_hashes": [
+    {
+      "content_hash": "13f95ea0517c76ddf21bb9b2d918e47454961bc5a30abd26af099732ca9b9310",
+      "session": "session-20261109-084401-utc"
+    },
+    {
+      "content_hash": "ac8fe6bf0013b6b40dea51c3743262b353ad44f33032714c20691fcde804c234",
+      "session": "session-20261109-124411-utc"
+    },
+    {
+      "content_hash": "59f04ad86a3227e64a21734373dd81d7eb15b165f258915b033ac4da1a5e3044",
+      "session": "session-20261109-164421-utc"
+    },
+    {
+      "content_hash": "28d8e180a061b3a07d81a55d47a948878b0c2c3a851cc813abeb01e2e38ff69e",
+      "session": "session-20261109-204431-utc"
+    },
+    {
+      "content_hash": "37fa0bdd29266fa064c7985f46dee96d109095c5e3ecb39901a064136cd30709",
+      "session": "session-20261110-004441-utc"
+    },
+    {
+      "content_hash": "d4331fb7bd1310c0db3104cbf1bfa9d94765f440b69079058623e96e9e660d7b",
+      "session": "session-20261110-044452-utc"
+    },
+    {
+      "content_hash": "b27a4198aa38ee1e2f601c0a9dfc068ac00f2deb7243285f710a076e532d44ba",
+      "session": "session-20261110-084502-utc"
+    },
+    {
+      "content_hash": "77e49e5fcbf83f9ce60bfec760b2264f822b4e8737e470014f09f9b6c41c2217",
+      "session": "session-20261110-124512-utc"
+    },
+    {
+      "content_hash": "a0d090d11f61ae7274559a871949f17b7aff3b06ae24ecc6547a3a742b36c3ac",
+      "session": "session-20261110-164522-utc"
+    },
+    {
+      "content_hash": "6cd9b0dec65e06cb2b75f08354adcd20169d8da792fb3550af7e7246dd5f35bc",
+      "session": "session-20261110-204532-utc"
+    }
+  ],
+  "slots_fit": [
+    "session-20261109-084401-utc",
+    "session-20261109-124411-utc",
+    "session-20261109-164421-utc",
+    "session-20261109-204431-utc",
+    "session-20261110-004441-utc",
+    "session-20261110-044452-utc"
+  ],
+  "slots_sealed": [
+    "session-20261111-004543-utc",
+    "session-20261111-044553-utc",
+    "session-20261111-084603-utc",
+    "session-20261111-124613-utc",
+    "session-20261111-164623-utc",
+    "session-20261111-204633-utc",
+    "session-20261112-004644-utc",
+    "session-20261112-044654-utc",
+    "session-20261112-084704-utc",
+    "session-20261112-124714-utc"
+  ],
+  "slots_validation": [
+    "session-20261110-084502-utc",
+    "session-20261110-124512-utc",
+    "session-20261110-164522-utc",
+    "session-20261110-204532-utc"
+  ]
+}
