@@ -77,37 +77,30 @@ function directionConfirmation(){
   section.setAttribute('aria-labelledby','confirmation-title');
   root.append(section);
 
-  const about=panel('About the experiment','','full');
+  const about=panel('Direction confirmation','','full');
   const startDate=new Date(campaign_dates[0]+'T00:00:00Z');
   const endDate=new Date(campaign_dates[1]+'T00:00:00Z');
   const month=startDate.toLocaleDateString('en-US',{month:'long',timeZone:'UTC'});
   const dates=`${month} ${startDate.getUTCDate()}–${endDate.getUTCDate()}, ${endDate.getUTCFullYear()}`;
-  about.append(
-    el('p','', 'Tested whether order-flow features predict which way the BTCUSDT price moves over the next 60 seconds.'),
-    el('p','', `${campaign_sessions} four-hour sessions recorded ${dates}, plus ${archive_sessions} historical sessions. Slots ${slots[0]}–${slots.at(-1)} were sealed for confirmation.`),
-    el('p','', `One unweighted ridge logistic model used family ${validation.family} and the ${validation.rule} rule. It was fit on the archives and slots 01–${slots[0]-1}, with a ${embargo_seconds} s embargo before confirmation.`),
-    el('p','', 'The model beat the training-majority baseline on the held-out sessions.')
-  );
-  section.append(about);
-
-  const lead=panel('Direction confirmation','','full');
-  const title=lead.querySelector('h3');
-  title.id='confirmation-title';
-  lead.append(el('h2','','The model beats the training-majority baseline'),
-    el('p','caption',`${sessions.length} held-out sessions from the ${campaign_sessions}-session November BTCUSDT campaign.`));
-  const scoreboard=el('dl','confirmation-scoreboard');
+  const result=el('dl','confirmation-scoreboard');
   for(const [label,value] of [
-    ['Model accuracy',fixed(pooled.accuracy)],['Training-majority accuracy',fixed(pooled.baseline_accuracy)],
-    ['Paired difference (Δ)',signed(pooled.delta)],['Balanced accuracy',fixed(pooled.balanced_accuracy)],
-    ['Above 0.50 (Γ)',signed(pooled.gamma)],['Scored rows',pooled.n_scored.toLocaleString('en-US')]
+    ['Model accuracy',fixed(pooled.accuracy)],
+    ['Training-majority accuracy',fixed(pooled.baseline_accuracy)],
+    ['Paired accuracy gain',signed(pooled.delta)]
   ]){
     const item=el('div');
     item.append(el('dt','',label),el('dd','',value));
-    scoreboard.append(item);
+    result.append(item);
   }
-  lead.append(scoreboard);
-  note('The balanced accuracy gate cleared at both block lengths. The paired difference interval spans zero at both, so the study did not establish a joint win under the registered rules.',lead);
-  section.append(lead);
+  const headline=el('h2','','The model beats the training-majority baseline');
+  headline.id='confirmation-title';
+  about.append(headline,result,
+    el('p','', 'The model reads order-book activity and called the next 60 seconds of BTCUSDT price direction correctly more often than a rule that always picks the majority direction from training.'),
+    el('p','', `The campaign recorded ${campaign_sessions} four-hour sessions (${campaign_sessions*4} hours) from ${dates}. The model trained on ${archive_sessions} archive sessions plus slots 01–${slots[0]-1}. Slots ${slots[0]}–${slots.at(-1)} were sealed before scoring.`),
+    el('p','', `The model beat the baseline in ${sessions.filter(row=>row.delta>0).length} of ${sessions.length} held-out sessions, with ${pooled.n_scored.toLocaleString('en-US')} scored rows in total. A separate ETHUSDT analysis corroborated the order-flow response findings.`)
+  );
+  section.append(about);
+
 
   function sessionChart(field,label,reference,referenceLabel,format){
     const result=sessions.map(row=>row[field]);
@@ -122,6 +115,10 @@ function directionConfirmation(){
   sessionChart('delta','Paired accuracy difference (Δ)',0,'Equal accuracy',signed);
   sessionChart('balanced_accuracy','Balanced accuracy',0.5,'Reference 0.50',fixed);
 
+  const pooledBalance=panel('Balanced accuracy cleared the registered threshold','','full');
+  pooledBalance.append(el('p','',`Pooled balanced accuracy was ${fixed(pooled.balanced_accuracy)}, or ${signed(pooled.gamma)} above 0.50.`));
+  note('The study did not establish a joint win under the pre-registered rules because both paired-difference intervals include zero.',pooledBalance);
+  section.append(pooledBalance);
   const lengths=Object.keys(bootstrap);
   for(const [field,key,label] of [['delta','delta_ci','Paired accuracy difference (Δ)'],['gamma','gamma_ci','Balanced accuracy above 0.50 (Γ)']]){
     const bounds=lengths.map(length=>bootstrap[length][key]);
@@ -140,7 +137,7 @@ function directionConfirmation(){
   const first=String(validation_slots[0]).padStart(2,'0');
   const last=String(validation_slots.at(-1)).padStart(2,'0');
   details.append(
-    el('p','',`B3 validation (slots ${first}–${last}) selected family ${validation.family} under the ${validation.rule} rule. Validation Δ was ${signed(validation.delta)} and balanced accuracy was ${fixed(validation.balanced_accuracy)}. The locked B4 confirmation scored slots ${slots[0]}–${slots.at(-1)}.`),
+    el('p','',`B3 validation (slots ${first}–${last}) selected family ${validation.family} under the ${validation.rule} rule. Validation Δ was ${signed(validation.delta)} and balanced accuracy was ${fixed(validation.balanced_accuracy)}. The locked B4 confirmation used unweighted ridge logistic regression and a ${embargo_seconds} s embargo.`),
     el('p','',`Δ was positive in ${positive} of ${sessions.length} sessions. Slot 15 was near zero (${signed(bySlot(15).delta)}), and slot 20 was negative (${signed(bySlot(20).delta)}).`),
     el('p','',`Leave-one-pair-out ranges were ${span(lopo.delta,signed)} for Δ and ${span(lopo.gamma,signed)} for Γ.`)
   );
