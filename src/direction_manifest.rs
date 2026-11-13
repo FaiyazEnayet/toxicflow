@@ -90,6 +90,8 @@ pub enum ManifestError {
     OverlappingSlots,
     /// More session IDs were supplied than the campaign has slots.
     TooManySlots(usize),
+    /// Fewer session IDs were supplied than the study requires.
+    TooFewSlots(usize),
     /// The session is well-formed but not part of this study.
     UnknownSession(String),
     /// Fit-side resolution was attempted for a sealed holdout slot.
@@ -121,6 +123,12 @@ impl fmt::Display for ManifestError {
                 write!(
                     f,
                     "{n} session ids exceed the {CAMPAIGN_SLOT_COUNT} campaign slots"
+                )
+            }
+            ManifestError::TooFewSlots(n) => {
+                write!(
+                    f,
+                    "{n} session ids are fewer than the {CAMPAIGN_SLOT_COUNT} campaign slots"
                 )
             }
             ManifestError::UnknownSession(id) => {
@@ -479,4 +487,189 @@ pub fn sha256_hex(data: &[u8]) -> String {
         out.push_str(&format!("{word:08x}"));
     }
     out
+}
+
+/// Repository-relative path of the ETH transfer protocol document.
+pub const ETH_PROTOCOL_PATH: &str = "docs/direction_eth_transfer_protocol.md";
+
+/// SHA-256 of the ETH transfer protocol document as registered on
+/// 2026-11-12. If the document changes deliberately, update this
+/// constant in the same commit; the digest test in
+/// `tests/direction_confirmation.rs` fails otherwise.
+pub const ETH_PROTOCOL_DIGEST: &str =
+    "5909410b37785cff2ac27278bc2fbd38552c92a6e97260899c86237a68f48a89";
+
+/// The ten ETH campaign slots used for fit and validation, in
+/// chronological scheduled-start order, as landed in the November
+/// 2026 recording campaign (B1 QC manifest). Roles follow position:
+/// 01-06 fit, 07-10 validation. There are no archive sessions on
+/// the ETH side: the six archives were BTC-only.
+pub const ETH_FIT_DEV_SLOT_IDS: [&str; 10] = [
+    "session-20261109-084401-utc",
+    "session-20261109-124411-utc",
+    "session-20261109-164421-utc",
+    "session-20261109-204431-utc",
+    "session-20261110-004441-utc",
+    "session-20261110-044452-utc",
+    "session-20261110-084502-utc",
+    "session-20261110-124512-utc",
+    "session-20261110-164522-utc",
+    "session-20261110-204532-utc",
+];
+
+/// ETH campaign slots 11-20: sealed for fit use, never scored
+/// before the freeze and the B4 confirmation gate.
+pub const ETH_SEALED_SLOT_IDS: [&str; 10] = [
+    "session-20261111-004543-utc",
+    "session-20261111-044553-utc",
+    "session-20261111-084603-utc",
+    "session-20261111-124613-utc",
+    "session-20261111-164623-utc",
+    "session-20261111-204633-utc",
+    "session-20261112-004644-utc",
+    "session-20261112-044654-utc",
+    "session-20261112-084704-utc",
+    "session-20261112-124714-utc",
+];
+
+/// The registered ETH transfer manifest: the twenty counted ETH
+/// campaign slots in chronological scheduled-start order, with the
+/// same role layout as the BTC study (slots 01-06 fit, 07-10
+/// validation, 11-20 sealed holdout) and no archives. This is the
+/// only resolution path ETH fit and validation code may use: slots
+/// 01-10 resolve, slots 11-20 are an error, directly or through a
+/// derived key. The confirmation step must additionally present the
+/// registered ETH protocol digest pinned above.
+#[derive(Debug, Clone)]
+pub struct EthDirectionManifest {
+    slots: Vec<SlotRecord>,
+}
+
+impl EthDirectionManifest {
+    /// Builds a manifest from the twenty counted ETH campaign
+    /// session IDs in chronological scheduled-start order. Rejects
+    /// duplicates, malformed IDs, out-of-order starts and
+    /// overlapping scheduled windows. The caller supplies all
+    /// twenty IDs even though only the first ten resolve for fit
+    /// use, so the sealed set is named in the manifest itself.
+    pub fn new(campaign_session_ids: &[&str]) -> Result<Self, ManifestError> {
+        if campaign_session_ids.len() > CAMPAIGN_SLOT_COUNT {
+            return Err(ManifestError::TooManySlots(campaign_session_ids.len()));
+        }
+        if campaign_session_ids.len() < CAMPAIGN_SLOT_COUNT {
+            return Err(ManifestError::TooFewSlots(campaign_session_ids.len()));
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut slots: Vec<SlotRecord> = Vec::with_capacity(campaign_session_ids.len());
+        for id in campaign_session_ids {
+            if !seen.insert(id) {
+                return Err(ManifestError::DuplicateSession((*id).to_string()));
+            }
+            let start_unix = parse_session_start_unix(id)
+                .ok_or_else(|| ManifestError::MalformedSessionId((*id).to_string()))?;
+            if let Some(prev) = slots.last() {
+                let prev: &SlotRecord = prev;
+                if start_unix <= prev.start_unix {
+                    return Err(ManifestError::ChronologyViolation);
+                }
+                if start_unix < prev.start_unix + SLOT_DURATION_SECS {
+                    return Err(ManifestError::OverlappingSlots);
+                }
+            }
+            slots.push(SlotRecord {
+                session_id: (*id).to_string(),
+                start_unix,
+                content_sha256: None,
+            });
+        }
+        Ok(Self { slots })
+    }
+
+    /// Number of counted campaign slots registered.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Classifies a session ID without granting any access: a
+    /// campaign slot with its role, or `None` when the manifest
+    /// does not know the session. There are no ETH archives.
+    pub fn classify(&self, session_id: &str) -> Option<SessionClass> {
+        self.slots
+            .iter()
+            .position(|s| s.session_id == session_id)
+            .map(|idx| SessionClass::Campaign {
+                slot: idx + 1,
+                role: role_for_slot(idx + 1).expect("a registered slot always has a role"),
+            })
+    }
+
+    /// Attaches a capture's content hash to its slot identity, as
+    /// the protocol requires when a capture lands. The hash must be
+    /// 64 lowercase hex characters; the session must belong to the
+    /// study.
+    pub fn attach_hash(
+        &mut self,
+        session_id: &str,
+        content_sha256: &str,
+    ) -> Result<(), ManifestError> {
+        if !is_valid_content_hash(content_sha256) {
+            return Err(ManifestError::InvalidHash(content_sha256.to_string()));
+        }
+        match self.classify(session_id) {
+            Some(SessionClass::Campaign { slot, .. }) => {
+                self.slots[slot - 1].content_sha256 = Some(content_sha256.to_string());
+                Ok(())
+            }
+            _ => Err(ManifestError::UnknownSession(session_id.to_string())),
+        }
+    }
+
+    /// The content hash attached to a campaign slot, if one has landed.
+    pub fn content_hash(&self, session_id: &str) -> Option<&str> {
+        self.slots
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .and_then(|s| s.content_sha256.as_deref())
+    }
+
+    /// The fit-side allowlist. Campaign slots 01-10 resolve; sealed
+    /// holdout slots and unknown sessions are errors. Fit and
+    /// validation code must resolve every session through here, so
+    /// the holdout cannot be opened by a path the manifest controls.
+    pub fn resolve_for_fit(&self, session_id: &str) -> Result<SessionClass, ManifestError> {
+        match self.classify(session_id) {
+            Some(class @ SessionClass::Campaign { role, .. }) => match role {
+                SlotRole::Fit | SlotRole::Development => Ok(class),
+                SlotRole::SealedHoldout => {
+                    Err(ManifestError::SealedHoldout(session_id.to_string()))
+                }
+            },
+            // There are no ETH archives; anything else is unknown.
+            _ => Err(ManifestError::UnknownSession(session_id.to_string())),
+        }
+    }
+
+    /// The confirmation gate. The caller must present the registered
+    /// ETH protocol digest, and the session must be a sealed holdout
+    /// slot. Anything else, including a fit or validation session
+    /// scored under the correct digest, is rejected.
+    pub fn resolve_for_confirmation(
+        &self,
+        session_id: &str,
+        presented_digest: &str,
+    ) -> Result<SessionClass, ManifestError> {
+        if presented_digest != ETH_PROTOCOL_DIGEST {
+            return Err(ManifestError::DigestMismatch);
+        }
+        match self.classify(session_id) {
+            Some(
+                class @ SessionClass::Campaign {
+                    role: SlotRole::SealedHoldout,
+                    ..
+                },
+            ) => Ok(class),
+            Some(_) => Err(ManifestError::NotSealed(session_id.to_string())),
+            None => Err(ManifestError::UnknownSession(session_id.to_string())),
+        }
+    }
 }

@@ -512,6 +512,20 @@ pub fn load_session_for_confirmation(
     Ok(frame)
 }
 
+/// Loads one session directory (quotes.parquet + trades.parquet)
+/// without the manifest allowlist, for the exploratory ETH work
+/// only: the ETH campaign has no registered manifest, so every
+/// session faces the section 1 admission counts. This path never
+/// resolves a sealed BTC holdout slot and must not be used for the
+/// registered confirmation.
+pub fn load_session_unsealed(session_id: &str, dir: &str) -> Result<SessionFrame, DirectionError> {
+    let quotes = read_quotes(&format!("{dir}/quotes.parquet"))?;
+    let trades = read_trades(&format!("{dir}/trades.parquet"))?;
+    let frame = build_frame(session_id, &quotes, &trades);
+    admission_check(&frame)?;
+    Ok(frame)
+}
+
 /// Section 1 admission for a campaign slot: at least 13,680
 /// quote-observed seconds and at least 12,960 eligible origins.
 fn admission_check(frame: &SessionFrame) -> Result<(), DirectionError> {
@@ -1819,30 +1833,26 @@ fn score_session_rule(
     (rows, probs)
 }
 
-/// Scores one evaluation session's origins under one family and
-/// both operating rules.
-fn score_session(
-    calc: &FrameCalc,
-    origins: &[OriginData],
-    ctx: &FitContext,
-    fit: &RidgeFit,
-    family: Family,
-) -> (Vec<ScoredRow>, Vec<ScoredRow>) {
-    let (p50, _) = score_session_rule(calc, origins, ctx, fit, family, Rule::P50);
-    let (prev, _) = score_session_rule(calc, origins, ctx, fit, family, Rule::Prevalence);
-    (p50, prev)
+/// The rows of a development run without the selection step: the
+/// per-boundary details and one pooled, bootstrapped row per
+/// requested (family, rule) pair.
+#[derive(Debug)]
+pub struct DevelopmentRows {
+    pub boundaries: Vec<BoundaryDetail>,
+    pub rows: Vec<DevRow>,
 }
 
-/// Runs the section 6 development ladder: archives plus slots 01-06
-/// predict slot 07, then the fit pool grows by only the earlier
-/// campaign slots for slots 08-10, under the 660-second embargo at
-/// each boundary. Returns the eight development rows, the selection,
-/// and the per-boundary details. Bootstrap intervals are computed
-/// for every row at both block lengths.
-pub fn run_development(
+/// Runs the section 6 development ladder for exactly the requested
+/// (family, rule) pairs: archives plus slots 01-06 predict slot 07,
+/// then the fit pool grows by only the earlier campaign slots for
+/// slots 08-10, under the 660-second embargo at each boundary.
+/// Returns one pooled, bootstrapped row per requested pair and the
+/// per-boundary details. No selection is made here.
+pub fn run_development_rows(
     archives: &[&SessionFrame],
     slots: &[SlotInput],
-) -> Result<DevelopmentOutcome, DirectionError> {
+    pairs: &[(Family, Rule)],
+) -> Result<DevelopmentRows, DirectionError> {
     // Dev slots 07-10, in order, with their frames.
     let mut dev: Vec<&SlotInput> = slots
         .iter()
@@ -1876,11 +1886,17 @@ pub fn run_development(
         let origins = calc.origins();
         slot_calcs.insert(s.slot, (calc, origins));
     }
-    // Per (family, rule): scored rows per dev session, in slot order.
+    // Per requested (family, rule) pair: scored rows per dev session,
+    // in slot order.
     let mut scored: HashMap<(Family, Rule), Vec<Vec<ScoredRow>>> = HashMap::new();
-    for family in Family::all() {
-        for rule in Rule::all() {
-            scored.insert((family, rule), Vec::new());
+    for pair in pairs {
+        scored.insert(*pair, Vec::new());
+    }
+    // Each requested family is fit once per boundary.
+    let mut families: Vec<Family> = Vec::new();
+    for (family, _) in pairs {
+        if !families.contains(family) {
+            families.push(*family);
         }
     }
     let mut boundaries: Vec<BoundaryDetail> = Vec::new();
@@ -1926,58 +1942,106 @@ pub fn run_development(
             prevalence: ctx.prevalence,
             majority_label: ctx.majority_label,
         });
-        // Fit each family on the standardized fit rows, then score
-        // the evaluation session.
+        // Fit each requested family once on the standardized fit rows,
+        // then score the evaluation session under each requested rule.
         let (eval_calc, eval_origins) = &slot_calcs[&eval.slot];
-        for family in Family::all() {
-            let standard = &ctx.standard[&family];
+        let mut fits: HashMap<Family, RidgeFit> = HashMap::new();
+        for family in &families {
+            let standard = &ctx.standard[family];
             let mut xs: Vec<Vec<f64>> = Vec::with_capacity(n_fit);
             let mut y: Vec<u8> = Vec::with_capacity(n_fit);
             for (calc, origins) in &fit_pool {
                 for o in origins {
-                    let raw = raw_columns(calc, o, &ctx, family);
+                    let raw = raw_columns(calc, o, &ctx, *family);
                     xs.push(standardize(&raw, standard));
                     y.push(o.target);
                 }
             }
             let fit = fit_ridge_logistic(&xs, &y, ctx.prevalence)?;
-            let (p50, prev) = score_session(eval_calc, eval_origins, &ctx, &fit, family);
-            scored.get_mut(&(family, Rule::P50)).unwrap().push(p50);
-            scored
-                .get_mut(&(family, Rule::Prevalence))
-                .unwrap()
-                .push(prev);
+            fits.insert(*family, fit);
+        }
+        for (family, rule) in pairs {
+            let (rows, _) = score_session_rule(
+                eval_calc,
+                eval_origins,
+                &ctx,
+                &fits[family],
+                *family,
+                *rule,
+            );
+            scored.get_mut(&(*family, *rule)).unwrap().push(rows);
         }
     }
-    // Pool the eight rows and attach bootstrap intervals.
+    // Pool the requested rows and attach bootstrap intervals.
     let mut rows: Vec<DevRow> = Vec::new();
+    for (family, rule) in pairs {
+        let (family, rule) = (*family, *rule);
+        let sessions = scored.remove(&(family, rule)).unwrap();
+        let pooled = pool_metrics(&sessions)?;
+        let per_session: Vec<SessionMetrics> = sessions
+            .iter()
+            .zip(dev.iter())
+            .map(|(rows, d)| session_metrics(&d.session_id, rows))
+            .collect();
+        let boot_300s = paired_grouped_bootstrap(&sessions, 300_000);
+        let boot_600s = paired_grouped_bootstrap(&sessions, 600_000);
+        rows.push(DevRow {
+            family,
+            rule,
+            pooled,
+            per_session,
+            boot_300s,
+            boot_600s,
+        });
+    }
+    Ok(DevelopmentRows { boundaries, rows })
+}
+
+/// Runs the section 6 development ladder over all eight registered
+/// variants (four families times two operating rules) and applies
+/// the section 6 selection. See `run_development_rows` for the
+/// ladder itself.
+pub fn run_development(
+    archives: &[&SessionFrame],
+    slots: &[SlotInput],
+) -> Result<DevelopmentOutcome, DirectionError> {
+    let mut pairs: Vec<(Family, Rule)> = Vec::new();
     for family in Family::all() {
         for rule in Rule::all() {
-            let sessions = scored.remove(&(family, rule)).unwrap();
-            let pooled = pool_metrics(&sessions)?;
-            let per_session: Vec<SessionMetrics> = sessions
-                .iter()
-                .zip(dev.iter())
-                .map(|(rows, d)| session_metrics(&d.session_id, rows))
-                .collect();
-            let boot_300s = paired_grouped_bootstrap(&sessions, 300_000);
-            let boot_600s = paired_grouped_bootstrap(&sessions, 600_000);
-            rows.push(DevRow {
-                family,
-                rule,
-                pooled,
-                per_session,
-                boot_300s,
-                boot_600s,
-            });
+            pairs.push((family, rule));
         }
     }
-    let selection = select_family(&rows)?;
+    let outcome = run_development_rows(archives, slots, &pairs)?;
+    let selection = select_family(&outcome.rows)?;
     Ok(DevelopmentOutcome {
-        boundaries,
-        rows,
+        boundaries: outcome.boundaries,
+        rows: outcome.rows,
         selection,
     })
+}
+
+/// Scores one frozen (family, rule) configuration on the
+/// development ladder, without selecting among families or rules.
+/// This is the cross-asset transfer path: the configuration arrives
+/// frozen (for the ETH transfer, family F under p>0.50, selected on
+/// BTC) and only its coefficients are refit, on the supplied
+/// training data, at each boundary. The arithmetic is identical to
+/// `run_development` — same boundaries, embargo, pooling and
+/// bootstrap — because it runs through the same function; only the
+/// pair list holds a single frozen pair.
+pub fn run_transfer_validation(
+    archives: &[&SessionFrame],
+    slots: &[SlotInput],
+    family: Family,
+    rule: Rule,
+) -> Result<(Vec<BoundaryDetail>, DevRow), DirectionError> {
+    let outcome = run_development_rows(archives, slots, &[(family, rule)])?;
+    let row = outcome
+        .rows
+        .into_iter()
+        .next()
+        .expect("one requested pair yields one row");
+    Ok((outcome.boundaries, row))
 }
 
 /// The section 7 frozen artifact: the single selected family and
@@ -3372,5 +3436,119 @@ mod tests {
         ));
         // Nine sessions is an error, not a result.
         assert!(run_confirmation(&artifact, &inputs[..9]).is_err());
+    }
+
+    #[test]
+    fn run_development_with_no_archives_selects_a_family() {
+        // The ETH B3 shape: no archive sessions, ten synthetic
+        // slots, fit pool growing from 01-06 through 09.
+        let ids: [&str; 10] = [
+            "session-20261109-084401-utc",
+            "session-20261109-124411-utc",
+            "session-20261109-164421-utc",
+            "session-20261109-204431-utc",
+            "session-20261110-004441-utc",
+            "session-20261110-044452-utc",
+            "session-20261110-084502-utc",
+            "session-20261110-124512-utc",
+            "session-20261110-164522-utc",
+            "session-20261110-204532-utc",
+        ];
+        let mut frames: Vec<SessionFrame> = Vec::new();
+        for (k, id) in ids.iter().enumerate() {
+            frames.push(oscillating_frame(id, 600, 200 + k as u64));
+        }
+        let inputs: Vec<SlotInput> = frames
+            .iter()
+            .enumerate()
+            .map(|(k, f)| SlotInput {
+                slot: k + 1,
+                session_id: ids[k].to_string(),
+                frame: f,
+            })
+            .collect();
+        let outcome = run_development(&[], &inputs).unwrap();
+        assert_eq!(outcome.rows.len(), 8);
+        assert_eq!(outcome.boundaries.len(), 4);
+        assert!(outcome.rows.iter().any(|r| r.family == Family::F));
+        // Nine slots is an error, not a result.
+        assert!(run_development(&[], &inputs[..9]).is_err());
+    }
+
+    #[test]
+    fn transfer_validation_matches_full_development_row() {
+        // The frozen-configuration path must reproduce the
+        // corresponding full-development row exactly: same
+        // boundaries, embargo, pooling and bootstrap, because it
+        // runs through the same function with a single pair.
+        let ids: [&str; 10] = [
+            "session-20261109-084401-utc",
+            "session-20261109-124411-utc",
+            "session-20261109-164421-utc",
+            "session-20261109-204431-utc",
+            "session-20261110-004441-utc",
+            "session-20261110-044452-utc",
+            "session-20261110-084502-utc",
+            "session-20261110-124512-utc",
+            "session-20261110-164522-utc",
+            "session-20261110-204532-utc",
+        ];
+        let mut frames: Vec<SessionFrame> = Vec::new();
+        for (k, id) in ids.iter().enumerate() {
+            frames.push(oscillating_frame(id, 600, 200 + k as u64));
+        }
+        let inputs: Vec<SlotInput> = frames
+            .iter()
+            .enumerate()
+            .map(|(k, f)| SlotInput {
+                slot: k + 1,
+                session_id: ids[k].to_string(),
+                frame: f,
+            })
+            .collect();
+        let (boundaries, row) =
+            run_transfer_validation(&[], &inputs, Family::F, Rule::P50).unwrap();
+        assert_eq!(boundaries.len(), 4);
+        assert_eq!(row.family, Family::F);
+        assert_eq!(row.rule, Rule::P50);
+        assert_eq!(row.per_session.len(), 4);
+        let full = run_development(&[], &inputs).unwrap();
+        let full_row = full
+            .rows
+            .iter()
+            .find(|r| r.family == Family::F && r.rule == Rule::P50)
+            .unwrap();
+        assert_eq!(row.pooled.n_scored, full_row.pooled.n_scored);
+        assert_eq!(row.pooled.accuracy, full_row.pooled.accuracy);
+        assert_eq!(
+            row.pooled.baseline_accuracy,
+            full_row.pooled.baseline_accuracy
+        );
+        assert_eq!(
+            row.pooled.balanced_accuracy,
+            full_row.pooled.balanced_accuracy
+        );
+        assert_eq!(row.pooled.delta, full_row.pooled.delta);
+        assert_eq!(row.pooled.gamma, full_row.pooled.gamma);
+        assert_eq!(row.pooled.s, full_row.pooled.s);
+        assert_eq!(row.boot_300s, full_row.boot_300s);
+        assert_eq!(row.boot_600s, full_row.boot_600s);
+        assert_eq!(
+            boundaries
+                .iter()
+                .map(|b| b.eval_slot)
+                .collect::<Vec<_>>(),
+            full.boundaries
+                .iter()
+                .map(|b| b.eval_slot)
+                .collect::<Vec<_>>()
+        );
+        // Nine slots is an error, not a result.
+        assert!(run_transfer_validation(&[], &inputs[..9], Family::F, Rule::P50).is_err());
+    }
+
+    #[test]
+    fn load_session_unsealed_rejects_missing_directory() {
+        assert!(load_session_unsealed("session-20261111-004543-utc", "/nonexistent-dir").is_err());
     }
 }
