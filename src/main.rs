@@ -40,6 +40,10 @@ enum Cmd {
         #[arg(long)]
         bucket_btc: Option<f64>,
     },
+    /// Rebuild a session directory (trades and quotes) from a journal
+    /// fixture in JSON-lines form, so the existing export command can
+    /// regenerate the report offline from raw recorded events.
+    JournalToSession { journal: String, out: String },
     /// Terminal dashboard: rolling VPIN and book imbalance, live.
     Live {
         #[arg(long, default_value = "BTCUSDT")]
@@ -90,6 +94,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             window,
             bucket_btc,
         } => export_session(&dir, &out, buckets, window, bucket_btc)?,
+        Cmd::JournalToSession { journal, out } => journal_to_session(&journal, &out)?,
         Cmd::Live { symbol } => live_dashboard(&symbol).await?,
     }
     Ok(())
@@ -249,6 +254,46 @@ fn write_csv(path: &str, header: &str, rows: &[String]) -> Result<(), Box<dyn Er
 /// Export analyzer intermediates as CSV + JSON for the dashboard script.
 /// Reuses the exact same metric functions as `analyze`; it only changes
 /// the output format, not the computation.
+/// Rebuild a recorded session directory from a journal fixture: replay
+/// the journal into trades and quotes and write the same parquet files
+/// a live recording writes, plus a meta file naming the journal the
+/// session came from. The rebuilt directory feeds `export` unchanged.
+fn journal_to_session(journal: &str, out: &str) -> Result<(), Box<dyn Error>> {
+    let records = storage::load_journal_jsonl(std::path::Path::new(journal))?;
+    let digest = storage::journal_digest(&records);
+    let symbol = records
+        .iter()
+        .find_map(|r| match r {
+            storage::JournalRecord::SessionStart { symbol } => Some(symbol.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "BTCUSDT".to_string());
+    let (trades, quotes) = storage::reconstruct_session(&records)?;
+    if trades.is_empty() || quotes.is_empty() {
+        return Err("empty session".into());
+    }
+    std::fs::create_dir_all(out)?;
+    storage::write_trades(&format!("{out}/trades.parquet"), &trades)?;
+    storage::write_quotes(&format!("{out}/quotes.parquet"), &quotes)?;
+    let meta = serde_json::json!({
+        "symbol": symbol,
+        "n_trades": trades.len(),
+        "n_quotes": quotes.len(),
+        "journal": journal,
+        "journal_digest": digest,
+    });
+    std::fs::write(
+        format!("{out}/meta.json"),
+        serde_json::to_string_pretty(&meta)?,
+    )?;
+    println!(
+        "rebuilt session -> {out} ({} trades, {} quotes, journal digest {digest})",
+        trades.len(),
+        quotes.len()
+    );
+    Ok(())
+}
+
 fn export_session(
     dir: &str,
     out: &str,

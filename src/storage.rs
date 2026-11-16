@@ -896,6 +896,195 @@ pub fn replay_journal(dir: &Path) -> Result<JournalReplay, StorageError> {
     })
 }
 
+/// One row of a journal stored as text (JSON lines), the format the
+/// raw-to-report fixture ships in. The payload is the same canonical
+/// JSON the parquet journal stores, so the checksum rule is shared.
+#[derive(Debug, Deserialize)]
+struct JournalJsonlRow {
+    seq: i64,
+    session_id: String,
+    kind: String,
+    time_ms: i64,
+    checksum: i64,
+    payload: String,
+}
+
+/// Read a journal fixture in JSON-lines form, with the same validation
+/// `replay_journal` applies to parquet segments: sequence numbers
+/// contiguous from zero, one session id throughout, the kind column
+/// matching each payload, and every payload matching its stored
+/// checksum. A row that fails any of these is an error, never a
+/// skipped line.
+pub fn load_journal_jsonl(path: &Path) -> Result<Vec<JournalRecord>, StorageError> {
+    let text = std::fs::read_to_string(path).map_err(|e| StorageError::Io(e.to_string()))?;
+    let mut records = Vec::new();
+    let mut session_id: Option<String> = None;
+    for (line_no, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: JournalJsonlRow =
+            serde_json::from_str(line).map_err(|e| StorageError::InvalidValue {
+                column: "payload".to_string(),
+                row: line_no,
+                reason: format!("journal line does not decode: {e}"),
+            })?;
+        if row.seq < 0 || row.seq as u64 != records.len() as u64 {
+            return Err(StorageError::InvalidValue {
+                column: "seq".to_string(),
+                row: line_no,
+                reason: format!("expected sequence {}, found {}", records.len(), row.seq),
+            });
+        }
+        match &session_id {
+            None => session_id = Some(row.session_id.clone()),
+            Some(s) if *s != row.session_id => {
+                return Err(StorageError::InvalidValue {
+                    column: "session_id".to_string(),
+                    row: line_no,
+                    reason: "session id changes mid-journal".to_string(),
+                });
+            }
+            _ => {}
+        }
+        if record_checksum(&row.payload) != row.checksum as u64 {
+            return Err(StorageError::InvalidValue {
+                column: "checksum".to_string(),
+                row: line_no,
+                reason: "payload checksum mismatch".to_string(),
+            });
+        }
+        let record: JournalRecord =
+            serde_json::from_str(&row.payload).map_err(|e| StorageError::InvalidValue {
+                column: "payload".to_string(),
+                row: line_no,
+                reason: format!("payload does not decode: {e}"),
+            })?;
+        if record.kind_str() != row.kind {
+            return Err(StorageError::InvalidValue {
+                column: "kind".to_string(),
+                row: line_no,
+                reason: "kind column does not match payload".to_string(),
+            });
+        }
+        if record.time_ms() != row.time_ms {
+            return Err(StorageError::InvalidValue {
+                column: "time_ms".to_string(),
+                row: line_no,
+                reason: "time column does not match payload".to_string(),
+            });
+        }
+        records.push(record);
+    }
+    if records.is_empty() {
+        return Err(StorageError::Io(format!(
+            "no journal records in {}",
+            path.display()
+        )));
+    }
+    Ok(records)
+}
+
+/// Rebuild the recorded trades and touch quotes from a journal, folding
+/// the records in sequence order exactly as the recorder committed
+/// them: a snapshot loads the book, an applied depth update emits a
+/// touch quote at the update time, a trade appends a trade. The first
+/// depth update after a snapshot is accepted as the new baseline (see
+/// `OrderBook::apply_diff_baseline`); any later gap, stale update, or
+/// depth before the first snapshot means the journal is corrupt and
+/// fails here instead of producing a silently wrong session.
+pub fn reconstruct_session(
+    records: &[JournalRecord],
+) -> Result<(Vec<Trade>, Vec<Quote>), StorageError> {
+    use crate::orderbook::{OrderBook, SyncResult};
+    let mut book = OrderBook::new();
+    let mut synced = false;
+    let mut after_snapshot = false;
+    let mut trades = Vec::new();
+    let mut quotes = Vec::new();
+    for (i, record) in records.iter().enumerate() {
+        match record {
+            JournalRecord::SessionStart { .. } => {
+                book = OrderBook::new();
+                synced = false;
+                after_snapshot = false;
+            }
+            JournalRecord::Snapshot {
+                last_update_id,
+                bids,
+                asks,
+            } => {
+                book.from_snapshot(bids, asks, *last_update_id);
+                synced = true;
+                after_snapshot = true;
+            }
+            JournalRecord::Depth {
+                time_ms,
+                u_first,
+                u_last,
+                bids,
+                asks,
+            } => {
+                if !synced {
+                    return Err(StorageError::InvalidValue {
+                        column: "kind".to_string(),
+                        row: i,
+                        reason: "depth update before the first snapshot".to_string(),
+                    });
+                }
+                let outcome = book.apply_diff(*u_first, *u_last, bids, asks);
+                let outcome = match outcome {
+                    SyncResult::Gap if after_snapshot => {
+                        book.apply_diff_baseline(*u_first, *u_last, bids, asks)
+                    }
+                    other => other,
+                };
+                after_snapshot = false;
+                match outcome {
+                    SyncResult::Applied => {
+                        if let Some((bp, bq, ap, aq)) = book.touch() {
+                            quotes.push(Quote {
+                                time_ms: *time_ms,
+                                bid_px: bp,
+                                bid_sz: bq,
+                                ask_px: ap,
+                                ask_sz: aq,
+                            });
+                        }
+                    }
+                    SyncResult::Stale => {
+                        return Err(StorageError::InvalidValue {
+                            column: "u_last".to_string(),
+                            row: i,
+                            reason: "depth update is older than the book".to_string(),
+                        });
+                    }
+                    SyncResult::Gap => {
+                        return Err(StorageError::InvalidValue {
+                            column: "u_first".to_string(),
+                            row: i,
+                            reason: "depth update skips past the book".to_string(),
+                        });
+                    }
+                }
+            }
+            JournalRecord::Trade {
+                time_ms,
+                price,
+                qty,
+                is_buyer_maker,
+            } => trades.push(Trade {
+                time_ms: *time_ms,
+                price: *price,
+                qty: *qty,
+                is_buyer_maker: *is_buyer_maker,
+            }),
+            JournalRecord::Overflow { .. } | JournalRecord::SessionEnd { .. } => {}
+        }
+    }
+    Ok((trades, quotes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
