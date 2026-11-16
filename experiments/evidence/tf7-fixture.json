@@ -1,0 +1,206 @@
+{
+  "capture": {
+    "chunk_edges": [
+      {
+        "label": "first_trade",
+        "time_ms": 1794153897401,
+        "utc": "2026-11-08T16:04:57.401Z"
+      },
+      {
+        "label": "last_trade",
+        "time_ms": 1794154628272,
+        "utc": "2026-11-08T16:17:08.272Z"
+      },
+      {
+        "label": "first_quote",
+        "time_ms": 1794153897314,
+        "utc": "2026-11-08T16:04:57.314Z"
+      },
+      {
+        "label": "last_quote",
+        "time_ms": 1794154628414,
+        "utc": "2026-11-08T16:17:08.414Z"
+      }
+    ],
+    "n_records": 10240,
+    "record_kinds": {
+      "depth": 7263,
+      "session_start": 1,
+      "snapshot": 1,
+      "trade": 2975
+    },
+    "rest_endpoint": "https://data-api.binance.vision/api/v3/depth",
+    "source_session": "session-20261108-160454-utc",
+    "source_session_id": "btcusdt-1794153894158",
+    "symbol": "BTCUSDT",
+    "utc_end": "2026-11-08T16:17:08.414Z",
+    "utc_start": "2026-11-08T16:04:57.314Z",
+    "ws_endpoint": "wss://data-stream.binance.vision/stream?streams=btcusdt@aggTrade/btcusdt@depth@100ms"
+  },
+  "expected": {
+    "buy_share": 0.4286163810176582,
+    "first_mid": 76093.745,
+    "first_quote": {
+      "ask_px": 76093.75,
+      "ask_sz": 10.47833,
+      "bid_px": 76093.74,
+      "bid_sz": 2.06188,
+      "time_ms": 1794153897314
+    },
+    "first_trade": {
+      "is_buyer_maker": false,
+      "price": 76093.75,
+      "qty": 0.00081,
+      "time_ms": 1794153897401
+    },
+    "gaps_n_bars": 74,
+    "gaps_n_dataset_rows": 67,
+    "kyle_lambda_mean": 3.9324976046600537,
+    "last_mid": 76046.845,
+    "last_quote": {
+      "ask_px": 76046.85,
+      "ask_sz": 2.10176,
+      "bid_px": 76046.84,
+      "bid_sz": 5.52962,
+      "time_ms": 1794154628414
+    },
+    "last_trade": {
+      "is_buyer_maker": false,
+      "price": 76046.85,
+      "qty": 0.00041,
+      "time_ms": 1794154628272
+    },
+    "mm_pnl_gated": -0.06490059999759978,
+    "mm_pnl_open": 0.054796100003841275,
+    "n_quotes": 7263,
+    "n_trades": 2975,
+    "ofi_mean": -1.7005655405405404,
+    "ofi_std": 13.833142914657568,
+    "predict_accuracy": 0.7692307692307693,
+    "predict_baseline": 0.7692307692307693,
+    "price_hi": 76093.75,
+    "price_lo": 76032.94,
+    "span_s": 730.871,
+    "speed_fit_ok": false,
+    "speed_fit_r_squared": -0.1653174129978814,
+    "speed_response_bps_60s": 0.1877827294076455,
+    "tolerance": 1e-9,
+    "volume_btc": 47.03383000000034,
+    "vpin_max": 0.9580514706116856,
+    "vpin_mean": 0.721788459085419
+  },
+  "experiment_id": "tf7-fixture",
+  "fetch": {
+    "method": "Clone the repo and run the three commands in experiments/manifest.json; no download is needed.",
+    "note": "The fixture is the only session data in the repo. Full recorded sessions stay out of the repo and ship with their own checksums."
+  },
+  "inputs": [
+    {
+      "bytes": 4126120,
+      "kind": "journal",
+      "path": "experiments/tf7_fixture/journal.jsonl",
+      "sha256": "43bbbdc3bfd4df09fc8d18ed7673ca36b8cbfecba59be07aa541d7cd0ac44364"
+    },
+    {
+      "bytes": 72253,
+      "kind": "dependency-lock",
+      "path": "Cargo.lock",
+      "sha256": "ed36b1e78254ffaf7fb13b00cbfdeb0809bfbaf6e7bfb8e15b3663775793c73b"
+    }
+  ],
+  "kind": "evidence-manifest",
+  "labels": {
+    "calibration": "Direction predictor calibration by predicted-probability decile",
+    "kyle_lambda": "Kyle's lambda, rolling 60-bar OLS of midprice change on signed volume",
+    "ofi": "OFI per 10 s bar with midprice, spread, imbalance, signed volume, and 30 s forward mid return",
+    "speed": "Observational OFI-price response (local projections, inclusive baseline)",
+    "summary": "Session summary: counts, span, volume, price range, VPIN, Kyle lambda, OFI, speed fit, prediction, and market-making PnL",
+    "vpin": "VPIN over time, equal-volume buckets"
+  },
+  "outputs": {
+    "dir": "runs/tf7_dashboard_data",
+    "files": [
+      {
+        "bytes": 1163,
+        "name": "vpin.csv",
+        "sha256": "eec1c720e292ee08efb8b56ab7c387f430db5ce2f6cbbf2cf78670edbcbb0e8b"
+      },
+      {
+        "bytes": 2089,
+        "name": "kyle.csv",
+        "sha256": "7316bd66f18ab13c0f6e0ac6beba373f8ec00a8121681487a4aedad037e5e728"
+      },
+      {
+        "bytes": 5087,
+        "name": "ofi.csv",
+        "sha256": "d27ca947df36f1faace5e418593878a2a8ae405c1e796add36c6b6124af11703"
+      },
+      {
+        "bytes": 502,
+        "name": "speed.csv",
+        "sha256": "ede9d5c0895dc354c53d006d5a5dde0edd1279fec984c067cef1e71ba80720fe"
+      },
+      {
+        "bytes": 181,
+        "name": "calibration.csv",
+        "sha256": "fd07d418b0ec68ee6f8f548250999cfb64c558eb4b9062ffdbfd3cd0ccc926cc"
+      },
+      {
+        "bytes": 2831,
+        "name": "summary.json",
+        "sha256": "07c16d576a54b9eea072689d35c283f964df0085399757d7db97527e01401218"
+      }
+    ],
+    "note": "The prediction ledger under experiments/<run>/ is excluded from the output hashes: it carries a wall-clock creation timestamp, so its bytes differ across runs while its numbers do not."
+  },
+  "parameters": {
+    "kyle_window_bars": 60,
+    "mm": "toy market-making simulation with the default MmConfig",
+    "ofi_bar_ms": 10000,
+    "predict_folds": 4,
+    "predict_horizon_bars": 3,
+    "speed_bar_ms": 10000,
+    "speed_shock": "one standard deviation of per-bar OFI; an observational regressor measured from the same quote stream as the price, no news timestamps",
+    "vpin_bucket_volume": "50 equal-volume buckets (default export)",
+    "vpin_buckets": 50,
+    "vpin_window": 20
+  },
+  "resync_gap": {
+    "bar_ms": 10000,
+    "n_bars": 74,
+    "n_dataset_rows": 67,
+    "n_unobserved_bars": 0,
+    "note": "One initial snapshot loads the book; a resync is a snapshot after the first, and this slice has none.",
+    "resyncs": 0,
+    "snapshots": 1
+  },
+  "schema_version": "toxicflow.evidence/v1",
+  "session": {
+    "dir": "runs/tf7_session",
+    "files": [
+      {
+        "bytes": 41621,
+        "name": "trades.parquet",
+        "sha256": "5de1a0b757f4258d51b2520aaf3344603f791fd57f321f69b0059b99b546bf11"
+      },
+      {
+        "bytes": 130151,
+        "name": "quotes.parquet",
+        "sha256": "495b7fad604bf1d6132fcbbf8e72f94eae220d7ac4430ff6d5fc7e80106ba831"
+      },
+      {
+        "bytes": 159,
+        "name": "meta.json",
+        "sha256": "4d7415a5b83536bf95af7eab295541db265a5472972abb6a304360d8db39d108"
+      }
+    ],
+    "note": "Rebuilt from the fixture journal by journal-to-session; the rebuilt directory is not committed, so verification rebuilds it."
+  },
+  "software": {
+    "cargo_lock_sha256": "ed36b1e78254ffaf7fb13b00cbfdeb0809bfbaf6e7bfb8e15b3663775793c73b",
+    "git_sha": "46eae8076c7b48fbf6f9657a488f41f032b06c8a",
+    "rustc_version": "rustc 1.100.0 (0ef1bc386 2026-11-09)"
+  },
+  "status": "reproducible",
+  "title": "Reproducible raw-to-report experiment from a real recorded session slice"
+}

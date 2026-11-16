@@ -1,0 +1,183 @@
+{
+ "schema_version": "toxicflow.evidence/v1",
+ "kind": "experiment-index",
+ "note": "Every README claim, dashboard figure, and chart artifact maps to one experiment ID and its status. Reproducible experiments point at their evidence manifest; archived experiments point at the archive registry.",
+ "experiments": [
+  {
+   "experiment_id": "tf7-fixture",
+   "status": "reproducible",
+   "manifest": "experiments/evidence/tf7-fixture.json",
+   "claims": [
+    {
+     "kind": "readme-section",
+     "target": "Code and data"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "Information speed"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "Kyle's lambda, rolling 60-bar OLS"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "Midprice, 10s bars"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "OFI vs next 30s mid return"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "Predictor calibration (deciles)"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "Session summary"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "Signed trade volume per bar"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "Toxicity-gated market-making demo"
+    },
+    {
+     "kind": "dashboard-figure",
+     "target": "VPIN over time (equal-volume buckets)"
+    },
+    {
+     "kind": "report",
+     "target": "experiments/manifest.json"
+    }
+   ]
+  },
+  {
+   "experiment_id": "main-session-325h",
+   "status": "archived-not-reproducible",
+   "archive": "experiments/evidence/archive.json",
+   "claims": [
+    {
+     "kind": "readme-section",
+     "target": "Evidence at a glance"
+    },
+    {
+     "kind": "readme-section",
+     "target": "OFI-price response"
+    },
+    {
+     "kind": "report",
+     "target": "docs/info_speed_report.json"
+    },
+    {
+     "kind": "report",
+     "target": "docs/tf6_pilot_report.json"
+    },
+    {
+     "kind": "dashboard",
+     "target": "docs/dashboard.html"
+    },
+    {
+     "kind": "animation",
+     "target": "portfolio_ui/animation-data.json"
+    }
+   ]
+  },
+  {
+   "experiment_id": "info-speed-historical-captures",
+   "status": "archived-not-reproducible",
+   "archive": "experiments/evidence/archive.json",
+   "claims": [
+    {
+     "kind": "readme-section",
+     "target": "OFI-price response"
+    },
+    {
+     "kind": "report",
+     "target": "docs/info_speed_report.json"
+    }
+   ]
+  },
+  {
+   "experiment_id": "closing-btc-80h",
+   "status": "archived-not-reproducible",
+   "archive": "experiments/evidence/archive.json",
+   "claims": [
+    {
+     "kind": "readme-section",
+     "target": "November 2026 campaign"
+    },
+    {
+     "kind": "readme-section",
+     "target": "Limitations"
+    },
+    {
+     "kind": "report",
+     "target": "docs/info_speed_report_20x4h.json"
+    }
+   ]
+  },
+  {
+   "experiment_id": "closing-eth-80h",
+   "status": "archived-not-reproducible",
+   "archive": "experiments/evidence/archive.json",
+   "claims": [
+    {
+     "kind": "readme-section",
+     "target": "November 2026 campaign"
+    },
+    {
+     "kind": "report",
+     "target": "docs/info_speed_report_20x4h_eth.json"
+    }
+   ]
+  },
+  {
+   "experiment_id": "direction-confirmation",
+   "status": "archived-not-reproducible",
+   "archive": "experiments/evidence/archive.json",
+   "claims": [
+    {
+     "kind": "readme-section",
+     "target": "Direction confirmation"
+    },
+    {
+     "kind": "report",
+     "target": "docs/direction_confirmation_report.json"
+    }
+   ]
+  },
+  {
+   "experiment_id": "direction-b3-btc",
+   "status": "archived-not-reproducible",
+   "archive": "experiments/evidence/archive.json",
+   "claims": [
+    {
+     "kind": "readme-section",
+     "target": "Direction confirmation"
+    },
+    {
+     "kind": "report",
+     "target": "docs/direction_b3_report.json"
+    }
+   ]
+  },
+  {
+   "experiment_id": "direction-b3-eth",
+   "status": "archived-not-reproducible",
+   "archive": "experiments/evidence/archive.json",
+   "claims": [
+    {
+     "kind": "readme-section",
+     "target": "Direction confirmation"
+    },
+    {
+     "kind": "report",
+     "target": "docs/direction_eth_b3_report.json"
+    }
+   ]
+  }
+ ]
+}

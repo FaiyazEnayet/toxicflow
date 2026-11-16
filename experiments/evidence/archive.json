@@ -1,0 +1,261 @@
+{
+ "schema_version": "toxicflow.evidence/v1",
+ "kind": "archive-registry",
+ "note": "Results whose raw level 2 input is not in the repo. Each entry states the reason, names its sessions, and pins the retained reports by SHA256. An archived result is published as measured; it is not reproducible from the repo, and no entry here claims otherwise.",
+ "entries": [
+  {
+   "experiment_id": "main-session-325h",
+   "status": "archived-not-reproducible",
+   "title": "Main recorded session: about 3.25 hours of BTCUSDT level 2 data",
+   "symbol": "BTCUSDT",
+   "sessions": [
+    "session_325h"
+   ],
+   "summary": "28,224 trades; 106,735 quotes; about 3.25 hours, recorded 2026-10-10. VPIN mean 0.523. The dashboard and the evidence-at-a-glance table report this session.",
+   "reports": [
+    {
+     "path": "docs/info_speed_report.json",
+     "sha256": "bac1381d5aefbcb7e01f2f34d8fc401b45bc3cbb266ba10e5a3ec1ad2a4eb721",
+     "bytes": 498236
+    },
+    {
+     "path": "docs/tf6_pilot_report.json",
+     "sha256": "25fd0f0e6cc482a1166f5338d6f785f5aaa3c5cba9e5f2e0507ca424d0a3f949",
+     "bytes": 4661
+    },
+    {
+     "path": "docs/dashboard.html",
+     "sha256": "45ea025e03b14bdddfab1d1e14bf3db0ef5c6bb4486552258cdbe69d5598533d",
+     "bytes": 5620920
+    },
+    {
+     "path": "portfolio_ui/animation-data.json",
+     "sha256": "76413f25ee50c3a80c5cc4339928bab9b13061880a88a55ab581431dc556e16d",
+     "bytes": 161874
+    }
+   ],
+   "reason": "The raw level 2 input (journal and parquet session files) is not in the repo: only the export arrays, report JSON, and dashboard figures were committed. Live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of this recording exists, so the result stands as published and is archived as not reproducible from the repo.",
+   "retained": "Report JSON with full response curves and intervals, the pilot report, the dashboard HTML, and the animation data. The export arrays behind the dashboard figures are not committed separately.",
+   "fetch": "No public immutable snapshot exists. A fresh recording of the same venue and symbol would produce different bytes and is a new experiment, not a reproduction."
+  },
+  {
+   "experiment_id": "info-speed-historical-captures",
+   "status": "archived-not-reproducible",
+   "title": "Five 30-minute BTCUSDT captures, 2026-10-30 to 2026-11-06",
+   "symbol": "BTCUSDT",
+   "sessions": [
+    "session-20261030-143624-utc",
+    "session-20261101-203631-utc",
+    "session-20261102-013620-utc",
+    "session-20261104-073619-utc",
+    "session-20261106-143623-utc"
+   ],
+   "summary": "Five 30-minute captures alongside the main session in the six-session information-speed report.",
+   "reports": [
+    {
+     "path": "docs/info_speed_report.json",
+     "sha256": "bac1381d5aefbcb7e01f2f34d8fc401b45bc3cbb266ba10e5a3ec1ad2a4eb721",
+     "bytes": 498236
+    }
+   ],
+   "reason": "The raw level 2 input (journal and parquet session files) is not in the repo: only the export arrays, report JSON, and dashboard figures were committed. Live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of this recording exists, so the result stands as published and is archived as not reproducible from the repo.",
+   "retained": "Report JSON with full response curves and intervals for all six sessions.",
+   "fetch": "No public immutable snapshot exists. A fresh recording of the same venue and symbol would produce different bytes and is a new experiment, not a reproduction."
+  },
+  {
+   "experiment_id": "closing-btc-80h",
+   "status": "archived-not-reproducible",
+   "title": "November 2026 campaign: twenty 4-hour BTCUSDT sessions, 80 hours",
+   "symbol": "BTCUSDT",
+   "sessions": [
+    "session-20261109-083238-utc",
+    "session-20261109-123248-utc",
+    "session-20261109-163259-utc",
+    "session-20261109-203309-utc",
+    "session-20261110-003319-utc",
+    "session-20261110-043329-utc",
+    "session-20261110-083339-utc",
+    "session-20261110-123349-utc",
+    "session-20261110-163359-utc",
+    "session-20261110-203410-utc",
+    "session-20261111-003420-utc",
+    "session-20261111-043430-utc",
+    "session-20261111-083440-utc",
+    "session-20261111-123450-utc",
+    "session-20261111-163501-utc",
+    "session-20261111-203511-utc",
+    "session-20261112-003521-utc",
+    "session-20261112-043531-utc",
+    "session-20261112-083541-utc",
+    "session-20261112-123552-utc"
+   ],
+   "summary": "20 sessions, 2,928,046 trades and 2,873,202 quotes. 60-second response mean +0.299 bps, simultaneous band excluding zero in 18 of 20 sessions; shape from 60 to 300 seconds flat on average (mean D -0.014 bps).",
+   "reports": [
+    {
+     "path": "docs/info_speed_report_20x4h.json",
+     "sha256": "af93c2265a55952402db20921c23c9b26b5a01a60f47ed0c25cbc81f10bdbfdf",
+     "bytes": 1711750
+    }
+   ],
+   "reason": "The raw level 2 input (journal and parquet session files) is not in the repo: only the export arrays, report JSON, and dashboard figures were committed. Live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of this recording exists, so the result stands as published and is archived as not reproducible from the repo.",
+   "retained": "Report JSON with full curves, intervals, and per-session quality-control counts.",
+   "fetch": "No public immutable snapshot exists. A fresh recording of the same venue and symbol would produce different bytes and is a new experiment, not a reproduction."
+  },
+  {
+   "experiment_id": "closing-eth-80h",
+   "status": "archived-not-reproducible",
+   "title": "November 2026 campaign: twenty 4-hour ETHUSDT sessions, 80 hours",
+   "symbol": "ETHUSDT",
+   "sessions": [
+    "session-20261109-084401-utc",
+    "session-20261109-124411-utc",
+    "session-20261109-164421-utc",
+    "session-20261109-204431-utc",
+    "session-20261110-004441-utc",
+    "session-20261110-044452-utc",
+    "session-20261110-084502-utc",
+    "session-20261110-124512-utc",
+    "session-20261110-164522-utc",
+    "session-20261110-204532-utc",
+    "session-20261111-004543-utc",
+    "session-20261111-044553-utc",
+    "session-20261111-084603-utc",
+    "session-20261111-124613-utc",
+    "session-20261111-164623-utc",
+    "session-20261111-204633-utc",
+    "session-20261112-004644-utc",
+    "session-20261112-044654-utc",
+    "session-20261112-084704-utc",
+    "session-20261112-124714-utc"
+   ],
+   "summary": "20 parallel ETHUSDT sessions. 60-second response mean +0.352 bps, D mean +0.070 bps.",
+   "reports": [
+    {
+     "path": "docs/info_speed_report_20x4h_eth.json",
+     "sha256": "e417992c7f9c6abed92c5dff83407c79427d9e22f715910f2f7471d2851d9b7a",
+     "bytes": 1708398
+    }
+   ],
+   "reason": "The raw level 2 input (journal and parquet session files) is not in the repo: only the export arrays, report JSON, and dashboard figures were committed. Live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of this recording exists, so the result stands as published and is archived as not reproducible from the repo.",
+   "retained": "Report JSON with full curves, intervals, and per-session quality-control counts.",
+   "fetch": "No public immutable snapshot exists. A fresh recording of the same venue and symbol would produce different bytes and is a new experiment, not a reproduction."
+  },
+  {
+   "experiment_id": "direction-confirmation",
+   "status": "archived-not-reproducible",
+   "title": "Registered direction confirmation study on the BTC campaign slots",
+   "symbol": "BTCUSDT",
+   "sessions": [
+    "session-20261109-083238-utc",
+    "session-20261109-123248-utc",
+    "session-20261109-163259-utc",
+    "session-20261109-203309-utc",
+    "session-20261110-003319-utc",
+    "session-20261110-043329-utc",
+    "session-20261110-083339-utc",
+    "session-20261110-123349-utc",
+    "session-20261110-163359-utc",
+    "session-20261110-203410-utc",
+    "session-20261111-003420-utc",
+    "session-20261111-043430-utc",
+    "session-20261111-083440-utc",
+    "session-20261111-123450-utc",
+    "session-20261111-163501-utc",
+    "session-20261111-203511-utc",
+    "session-20261112-003521-utc",
+    "session-20261112-043531-utc",
+    "session-20261112-083541-utc",
+    "session-20261112-123552-utc"
+   ],
+   "summary": "Frozen artifact (family F under the p > 0.50 rule, refit on six archive sessions plus campaign slots 01-10) scored once on sealed slots 11-20. Outcome: partial.",
+   "reports": [
+    {
+     "path": "docs/direction_confirmation_report.json",
+     "sha256": "e590efddbb7a515f0ee094d2863ddc6a6ad5cfcb296421722f83942f64bf812b",
+     "bytes": 202223
+    }
+   ],
+   "reason": "The raw level 2 input (journal and parquet session files) is not in the repo: only the export arrays, report JSON, and dashboard figures were committed. Live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of this recording exists, so the result stands as published and is archived as not reproducible from the repo. This study reuses archived campaign sessions as its input, so it inherits their status.",
+   "retained": "Confirmation report JSON with the frozen artifact digest, protocol digest, and per-slot replay verification.",
+   "fetch": "No public immutable snapshot exists. A fresh recording of the same venue and symbol would produce different bytes and is a new experiment, not a reproduction."
+  },
+  {
+   "experiment_id": "direction-b3-btc",
+   "status": "archived-not-reproducible",
+   "title": "Direction B3 study on BTC campaign slots",
+   "symbol": "BTCUSDT",
+   "sessions": [
+    "session-20261109-083238-utc",
+    "session-20261109-123248-utc",
+    "session-20261109-163259-utc",
+    "session-20261109-203309-utc",
+    "session-20261110-003319-utc",
+    "session-20261110-043329-utc",
+    "session-20261110-083339-utc",
+    "session-20261110-123349-utc",
+    "session-20261110-163359-utc",
+    "session-20261110-203410-utc",
+    "session-20261111-003420-utc",
+    "session-20261111-043430-utc",
+    "session-20261111-083440-utc",
+    "session-20261111-123450-utc",
+    "session-20261111-163501-utc",
+    "session-20261111-203511-utc",
+    "session-20261112-003521-utc",
+    "session-20261112-043531-utc",
+    "session-20261112-083541-utc",
+    "session-20261112-123552-utc"
+   ],
+   "summary": "Selected family F under p > 0.50. Delta +0.0385, balanced accuracy 0.5395, all four validation slots positive.",
+   "reports": [
+    {
+     "path": "docs/direction_b3_report.json",
+     "sha256": "0e10d26fc67db1560c779d5fc444aac0eef03b5fe668fec2ec64a337c882fa02",
+     "bytes": 23866
+    }
+   ],
+   "reason": "The raw level 2 input (journal and parquet session files) is not in the repo: only the export arrays, report JSON, and dashboard figures were committed. Live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of this recording exists, so the result stands as published and is archived as not reproducible from the repo. This study reuses archived campaign sessions as its input, so it inherits their status.",
+   "retained": "B3 report JSON with selection, slots, and protocol digest.",
+   "fetch": "No public immutable snapshot exists. A fresh recording of the same venue and symbol would produce different bytes and is a new experiment, not a reproduction."
+  },
+  {
+   "experiment_id": "direction-b3-eth",
+   "status": "archived-not-reproducible",
+   "title": "Direction B3 transfer study on ETH campaign slots",
+   "symbol": "ETHUSDT",
+   "sessions": [
+    "session-20261109-084401-utc",
+    "session-20261109-124411-utc",
+    "session-20261109-164421-utc",
+    "session-20261109-204431-utc",
+    "session-20261110-004441-utc",
+    "session-20261110-044452-utc",
+    "session-20261110-084502-utc",
+    "session-20261110-124512-utc",
+    "session-20261110-164522-utc",
+    "session-20261110-204532-utc",
+    "session-20261111-004543-utc",
+    "session-20261111-044553-utc",
+    "session-20261111-084603-utc",
+    "session-20261111-124613-utc",
+    "session-20261111-164623-utc",
+    "session-20261111-204633-utc",
+    "session-20261112-004644-utc",
+    "session-20261112-044654-utc",
+    "session-20261112-084704-utc",
+    "session-20261112-124714-utc"
+   ],
+   "summary": "BTC-selected model refit on ETH training data and validated on ETH sessions 07-10. Delta +0.0124 clears its bar; balanced accuracy 0.5183 misses 0.520 by 0.0017, so the validation did not pass.",
+   "reports": [
+    {
+     "path": "docs/direction_eth_b3_report.json",
+     "sha256": "73b05ce531b50263e82be3f60d82cc18b8344bf69746384e36f1f7011eee7cec",
+     "bytes": 8891
+    }
+   ],
+   "reason": "The raw level 2 input (journal and parquet session files) is not in the repo: only the export arrays, report JSON, and dashboard figures were committed. Live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of this recording exists, so the result stands as published and is archived as not reproducible from the repo. This study reuses archived campaign sessions as its input, so it inherits their status.",
+   "retained": "ETH B3 report JSON with selection, slots, and protocol digest.",
+   "fetch": "No public immutable snapshot exists. A fresh recording of the same venue and symbol would produce different bytes and is a new experiment, not a reproduction."
+  }
+ ]
+}
