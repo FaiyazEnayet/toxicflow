@@ -1,0 +1,82 @@
+{
+ "bar_ms": 10000,
+ "censoring_rule": "Baseline and three-class rows are censored when the target window runs past the last bar or touches an unobserved bar. Next-nonzero rows are censored when no nonzero mid change is observed inside the cutoff window: the window runs past the last bar before any move, the window up to the first move touches an unobserved bar, or a complete observed window holds no move. A move observed before the last bar labels the row even when the cutoff window itself is incomplete. Censored rows are reported per track and per reason.",
+ "configs": [
+  {
+   "flat_eps": 0.0,
+   "horizon_bars": 1,
+   "id": "h1-e0",
+   "kind": "grid"
+  },
+  {
+   "flat_eps": 1e-05,
+   "horizon_bars": 1,
+   "id": "h1-e1e-5",
+   "kind": "grid"
+  },
+  {
+   "flat_eps": 3e-05,
+   "horizon_bars": 1,
+   "id": "h1-e3e-5",
+   "kind": "grid"
+  },
+  {
+   "flat_eps": 0.0,
+   "horizon_bars": 3,
+   "id": "h3-e0",
+   "kind": "grid"
+  },
+  {
+   "flat_eps": 1e-05,
+   "horizon_bars": 3,
+   "id": "h3-e1e-5",
+   "kind": "default"
+  },
+  {
+   "flat_eps": 3e-05,
+   "horizon_bars": 3,
+   "id": "h3-e3e-5",
+   "kind": "grid"
+  },
+  {
+   "flat_eps": 0.0,
+   "horizon_bars": 6,
+   "id": "h6-e0",
+   "kind": "grid"
+  },
+  {
+   "flat_eps": 1e-05,
+   "horizon_bars": 6,
+   "id": "h6-e1e-5",
+   "kind": "grid"
+  },
+  {
+   "flat_eps": 3e-05,
+   "horizon_bars": 6,
+   "id": "h6-e3e-5",
+   "kind": "grid"
+  }
+ ],
+ "decision_rule": "Each decision row is fixed by information available at its bar close: the trailing 30-bar feature window must be fully observed. The label is a rule over future bar mids; a row whose target window is incomplete or touches an unobserved bar is censored and counted, never silently dropped.",
+ "default": {
+  "flat_eps": 1e-05,
+  "horizon_bars": 3,
+  "id": "h3-e1e-5",
+  "kind": "default"
+ },
+ "experiment_id": "p1-target-semantics",
+ "n_splits": 4,
+ "nonzero_cutoff_bars": 10,
+ "note": "Preregistered before any grid run. The default configuration stays the reported configuration regardless of results; no test outcome is used for parameter selection.",
+ "preregistered": "2026-11-16",
+ "schema_version": "toxicflow.p1-grid/v1",
+ "selection_rule": "No test outcome is used for parameter selection. The default configuration stays the reported configuration regardless of results. Every grid cell is reported.",
+ "test_sessions": [
+  "session-20261111-163501-utc",
+  "session-20261111-203511-utc",
+  "session-20261112-003521-utc",
+  "session-20261112-043531-utc",
+  "session-20261112-083541-utc",
+  "session-20261112-123552-utc"
+ ]
+}

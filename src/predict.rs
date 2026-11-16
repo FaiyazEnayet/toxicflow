@@ -50,6 +50,16 @@
 //! predictions scored (`n_oos`), held-out class counts
 //! (`n_pos_oos` / `n_neg_oos`), and rows never scored
 //! (`n_unscored`), plus a per-fold Brier score and log loss table.
+//!
+//! Targets (P1): the binary-sign target above is preserved exactly
+//! as the baseline. Two further tracks share its decision rows and
+//! feature frame: a next-nonzero-mid-change target (sign of the
+//! first nonzero mid change within a frozen cutoff, censored when no
+//! move is observed) and an explicit three-class {down, flat, up}
+//! target over a frozen horizon and flat-band grid. Every row
+//! carries its decision timestamp and every label traces to a
+//! concrete future mid observation; censored rows are counted per
+//! track and per reason, never dropped silently.
 
 use crate::metrics::{ofi_bars, ofi_events, Quote, Trade};
 
@@ -1683,6 +1693,762 @@ pub fn summarize_session_pilot(
     }
 }
 
+// ---- P1: repaired target semantics -----------------------------------
+//
+// The original task labels a row by the sign of the forward return
+// over the next `horizon` bars, so a zero return and a negative
+// return share class 0 and an unchanged market can inflate headline
+// accuracy. P1 keeps that task exactly as it is (see
+// `build_dataset`; `P1Dataset::baseline_bars` reproduces it row for
+// row) and adds two separate labeled tracks over the same decision
+// rows:
+//
+// * next-nonzero: the sign of the first nonzero mid change within
+//   `cutoff_bars` bars after the decision bar, censored when no
+//   move is observed inside the cutoff;
+// * three-class: down (0), flat (1), or up (2) over the horizon,
+//   with flat an explicit band |fwd| <= `flat_eps` instead of a side
+//   effect of the sign.
+//
+// Decision rows are fixed by decision-time information only: the
+// trailing 30-bar feature window must be fully observed, exactly as
+// in `build_dataset`. Labels and censoring are then computed from
+// future bar mids, and every decision row is accounted for in
+// exactly one of labeled or censored, per track, with the reason
+// counted. Nothing is ever included or excluded because of its
+// outcome: the censored rows are reported, not hidden.
+//
+// The selective-population risk is stated, not wished away: the
+// nonzero track trains and scores only on rows where a move occurs
+// within the cutoff, so its accuracy is conditional on a move
+// occurring, and the censored share is reported next to it. The
+// label rule itself is definable at decision time (a rule over
+// future observations with an explicit cutoff and censoring rule),
+// which is what keeps this from being a future-eligibility leak:
+// the population is all decision rows, and the labeled subset is an
+// explicit, counted function of the rule.
+//
+// Every label traces to a concrete future mid: each row records the
+// target mid and the target bar time it came from, and for the
+// nonzero track the bar of the first move.
+//
+// The design grid is frozen (`P1_HORIZONS_BARS`,
+// `P1_FLAT_EPS`, `P1_NONZERO_CUTOFF_BARS`, and
+// `experiments/p1/grid.json`, which must match
+// `preregistered_p1_grid`). All cells are reported; no test outcome
+// selects a configuration. The default cell is horizon 3 bars with
+// flat band 1e-5, the baseline horizon.
+
+/// Frozen P1 design grid: horizons in bars for the three-class track.
+pub const P1_HORIZONS_BARS: [usize; 3] = [1, 3, 6];
+/// Frozen P1 design grid: flat-band half-widths as relative mid moves.
+pub const P1_FLAT_EPS: [f64; 3] = [0.0, 1e-5, 3e-5];
+/// Frozen next-nonzero cutoff in bars.
+pub const P1_NONZERO_CUTOFF_BARS: usize = 10;
+/// Default P1 cell: the baseline horizon of 3 bars.
+pub const P1_DEFAULT_HORIZON: usize = 3;
+/// Default P1 cell: flat band of 1e-5 relative mid move.
+pub const P1_DEFAULT_FLAT_EPS: f64 = 1e-5;
+/// Schema tag for `experiments/p1/grid.json`.
+pub const P1_GRID_SCHEMA: &str = "toxicflow.p1-grid/v1";
+
+/// Three-class label: down.
+pub const P1_DOWN: u8 = 0;
+/// Three-class label: flat.
+pub const P1_FLAT: u8 = 1;
+/// Three-class label: up.
+pub const P1_UP: u8 = 2;
+
+/// One frozen P1 design cell: a three-class horizon and flat band.
+/// The nonzero track uses the same horizon for its baseline
+/// comparison and the frozen `P1_NONZERO_CUTOFF_BARS` cutoff.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct P1Config {
+    pub horizon_bars: usize,
+    pub flat_eps: f64,
+}
+
+impl P1Config {
+    /// Stable id, e.g. `h3-e1e-5` for horizon 3, band 1e-5.
+    pub fn id(&self) -> String {
+        let eps = if self.flat_eps == 0.0 {
+            "e0".to_string()
+        } else {
+            format!("e{:e}", self.flat_eps)
+        };
+        format!("h{}-{eps}", self.horizon_bars)
+    }
+
+    /// True for the default cell (horizon 3, band 1e-5).
+    pub fn is_default(&self) -> bool {
+        self.horizon_bars == P1_DEFAULT_HORIZON && self.flat_eps == P1_DEFAULT_FLAT_EPS
+    }
+}
+
+/// The default P1 cell.
+pub const P1_DEFAULT_CONFIG: P1Config = P1Config {
+    horizon_bars: P1_DEFAULT_HORIZON,
+    flat_eps: P1_DEFAULT_FLAT_EPS,
+};
+
+/// The frozen P1 design grid, in grid-file order: horizons 1, 3, 6
+/// crossed with flat bands 0, 1e-5, 3e-5.
+pub fn preregistered_p1_grid() -> Vec<P1Config> {
+    let mut grid = Vec::with_capacity(9);
+    for &h in P1_HORIZONS_BARS.iter() {
+        for &e in P1_FLAT_EPS.iter() {
+            grid.push(P1Config {
+                horizon_bars: h,
+                flat_eps: e,
+            });
+        }
+    }
+    grid
+}
+
+/// Parse the `configs` array of a P1 grid file
+/// (`experiments/p1/grid.json`). Each entry carries `horizon_bars`
+/// and `flat_eps`; the entry order is preserved.
+pub fn p1_grid_from_json(text: &str) -> Result<Vec<P1Config>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("p1 grid.json does not parse: {e}"))?;
+    let configs = v
+        .get("configs")
+        .and_then(|c| c.as_array())
+        .ok_or("p1 grid.json has no configs array")?;
+    let mut out = Vec::with_capacity(configs.len());
+    for (i, c) in configs.iter().enumerate() {
+        let horizon = c
+            .get("horizon_bars")
+            .and_then(|h| h.as_u64())
+            .ok_or(format!("p1 grid config {i} has no horizon_bars"))?;
+        let eps = c
+            .get("flat_eps")
+            .and_then(|e| e.as_f64())
+            .ok_or(format!("p1 grid config {i} has no flat_eps"))?;
+        out.push(P1Config {
+            horizon_bars: horizon as usize,
+            flat_eps: eps,
+        });
+    }
+    Ok(out)
+}
+
+/// One P1 decision row: the shared feature frame plus all three
+/// labels. A label is `None` exactly when the row is censored for
+/// that track; the reason is counted in `P1Counts`.
+#[derive(Debug, Clone)]
+pub struct P1Row {
+    /// Index of the decision bar on the OFI bar grid.
+    pub decision_bar: usize,
+    /// Decision timestamp: the start time of the decision bar.
+    pub decision_time_ms: i64,
+    /// Feature values in `FEATURE_NAMES` order.
+    pub features: [f64; N_FEATURES],
+    pub spread_degenerate: bool,
+    /// Preserved baseline label (sign of the forward return).
+    pub baseline: Option<u8>,
+    pub baseline_target_mid: Option<f64>,
+    pub baseline_target_time_ms: Option<i64>,
+    /// Next-nonzero label: 0 down, 1 up.
+    pub nonzero: Option<u8>,
+    pub nonzero_target_mid: Option<f64>,
+    pub nonzero_target_time_ms: Option<i64>,
+    /// Bar of the first nonzero mid change.
+    pub nonzero_move_bar: Option<usize>,
+    /// Three-class label: 0 down, 1 flat, 2 up.
+    pub three: Option<u8>,
+    pub three_target_mid: Option<f64>,
+    pub three_target_time_ms: Option<i64>,
+}
+
+/// Reconciled sample counts for a P1 dataset. Every track satisfies
+/// labeled + censored == `n_decision`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct P1Counts {
+    /// OFI bars on the grid.
+    pub n_bars: usize,
+    /// Candidate decision rows (feature window defined and observed).
+    pub n_decision: usize,
+    pub baseline_labeled: usize,
+    pub baseline_censored: usize,
+    /// Labeled baseline rows whose forward return is exactly zero:
+    /// the rows the old binary rule lumps with negatives.
+    pub baseline_zero_fwd: usize,
+    pub nonzero_labeled: usize,
+    pub nonzero_up: usize,
+    pub nonzero_down: usize,
+    /// Complete observed cutoff window with no nonzero move.
+    pub nonzero_censored_no_move: usize,
+    /// Window runs past the last bar before any move is observed.
+    pub nonzero_censored_incomplete: usize,
+    /// Window up to the first move touches an unobserved bar, or a
+    /// move-free window touches one.
+    pub nonzero_censored_gap: usize,
+    pub three_labeled: usize,
+    pub three_down: usize,
+    pub three_flat: usize,
+    pub three_up: usize,
+    /// Target window runs past the last bar.
+    pub three_censored_incomplete: usize,
+    /// Target window touches an unobserved bar.
+    pub three_censored_gap: usize,
+}
+
+/// A P1 dataset: decision rows with all three labels, plus the
+/// reconciled counts and the frozen cell that produced them.
+#[derive(Debug, Clone)]
+pub struct P1Dataset {
+    pub rows: Vec<P1Row>,
+    pub counts: P1Counts,
+    pub config: P1Config,
+    pub cutoff_bars: usize,
+    /// Feature-frame version of the shared frame (see
+    /// `FEATURE_VERSION`): the P1 tracks reuse the v3 frame, so the
+    /// baseline comparison is over identical features.
+    pub feature_version: &'static str,
+}
+
+impl P1Dataset {
+    /// The preserved baseline frame: exactly the rows
+    /// `build_dataset` returns for the same quotes and horizon,
+    /// with the same features and targets (pinned by test).
+    pub fn baseline_bars(&self) -> Vec<Bar> {
+        self.rows
+            .iter()
+            .filter_map(|r| {
+                r.baseline.map(|t| Bar {
+                    time_ms: r.decision_time_ms,
+                    ofi: r.features[0],
+                    ofi_z: r.features[1],
+                    imbalance: r.features[2],
+                    spread_z: r.features[3],
+                    spread_degenerate: r.spread_degenerate,
+                    signed_vol: r.features[4],
+                    target: t,
+                })
+            })
+            .collect()
+    }
+
+    /// The next-nonzero labeled rows as binary bars (target 0 down,
+    /// 1 up), in decision order.
+    pub fn nonzero_bars(&self) -> Vec<Bar> {
+        self.rows
+            .iter()
+            .filter_map(|r| {
+                r.nonzero.map(|t| Bar {
+                    time_ms: r.decision_time_ms,
+                    ofi: r.features[0],
+                    ofi_z: r.features[1],
+                    imbalance: r.features[2],
+                    spread_z: r.features[3],
+                    spread_degenerate: r.spread_degenerate,
+                    signed_vol: r.features[4],
+                    target: t,
+                })
+            })
+            .collect()
+    }
+
+    /// The three-class labeled rows, in decision order.
+    pub fn three_class_rows(&self) -> Vec<ClassRow> {
+        self.rows
+            .iter()
+            .filter_map(|r| {
+                r.three.map(|t| ClassRow {
+                    time_ms: r.decision_time_ms,
+                    features: r.features,
+                    target: t,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Build the P1 dataset: the shared v3 feature frame (the same
+/// computation as `build_dataset`, row for row) with all three
+/// labels attached. `config` sets the three-class horizon and flat
+/// band and the baseline horizon; `cutoff_bars` is the next-nonzero
+/// cutoff. Thin data (fewer than 40 bars) yields no decision rows,
+/// mirroring `build_dataset`.
+pub fn build_p1_dataset(
+    quotes: &[Quote],
+    trades: &[Trade],
+    bar_ms: i64,
+    config: P1Config,
+    cutoff_bars: usize,
+) -> P1Dataset {
+    let horizon = config.horizon_bars;
+    let eps = config.flat_eps;
+    let empty = |n_bars: usize| P1Dataset {
+        rows: Vec::new(),
+        counts: P1Counts {
+            n_bars,
+            ..Default::default()
+        },
+        config,
+        cutoff_bars,
+        feature_version: FEATURE_VERSION,
+    };
+    let events = ofi_events(quotes);
+    let bars = ofi_bars(quotes, &events, bar_ms);
+    if bars.len() < 40 {
+        return empty(bars.len());
+    }
+    let n = bars.len();
+    let ofi: Vec<f64> = bars.iter().map(|b| b.1).collect();
+    let mids: Vec<f64> = bars.iter().map(|b| b.2).collect();
+    let spreads: Vec<f64> = bars.iter().map(|b| b.3).collect();
+    let imbs: Vec<f64> = bars.iter().map(|b| b.4).collect();
+    let t0 = bars[0].0;
+    let mut signed = vec![0.0; n];
+    for t in trades {
+        let idx = ((t.time_ms - t0) / bar_ms) as usize;
+        if idx < n {
+            signed[idx] += t.signed_qty();
+        }
+    }
+    let (ofi_m, ofi_s) = rolling_mean_sd(&ofi, 30);
+    let (sp_m, sp_s) = rolling_mean_sd(&spreads, 30);
+    let status = crate::metrics::bar_status(quotes, bar_ms);
+    let window_observed = |lo: usize, hi: usize| -> bool {
+        status.len() == n && status[lo..=hi].iter().all(|s| s.observed)
+    };
+    let mut rows = Vec::new();
+    let mut counts = P1Counts {
+        n_bars: n,
+        ..Default::default()
+    };
+    for i in 0..n {
+        if ofi_s[i].is_nan() || sp_s[i].is_nan() {
+            continue;
+        }
+        if status.len() == n {
+            let lo = i.saturating_sub(29);
+            if !status[lo..=i].iter().all(|s| s.observed) {
+                continue;
+            }
+        }
+        counts.n_decision += 1;
+        let spread_degenerate = sp_s[i] == 0.0;
+        let features = [
+            ofi[i],
+            (ofi[i] - ofi_m[i]) / (ofi_s[i] + 1e-12),
+            imbs[i],
+            if spread_degenerate {
+                0.0
+            } else {
+                (spreads[i] - sp_m[i]) / (sp_s[i] + 1e-12)
+            },
+            signed[i],
+        ];
+        // Baseline and three-class share one target window.
+        let mut baseline = None;
+        let mut baseline_target_mid = None;
+        let mut baseline_target_time_ms = None;
+        let mut three = None;
+        let mut three_target_mid = None;
+        let mut three_target_time_ms = None;
+        if i + horizon >= n {
+            counts.baseline_censored += 1;
+            counts.three_censored_incomplete += 1;
+        } else if !window_observed(i + 1, i + horizon) {
+            counts.baseline_censored += 1;
+            counts.three_censored_gap += 1;
+        } else {
+            let fwd = mids[i + horizon] / mids[i] - 1.0;
+            baseline = Some(u8::from(fwd > 0.0));
+            baseline_target_mid = Some(mids[i + horizon]);
+            baseline_target_time_ms = Some(bars[i + horizon].0);
+            counts.baseline_labeled += 1;
+            if fwd == 0.0 {
+                counts.baseline_zero_fwd += 1;
+            }
+            three = Some(if fwd < -eps {
+                P1_DOWN
+            } else if fwd > eps {
+                P1_UP
+            } else {
+                P1_FLAT
+            });
+            three_target_mid = Some(mids[i + horizon]);
+            three_target_time_ms = Some(bars[i + horizon].0);
+            counts.three_labeled += 1;
+            match three {
+                Some(P1_DOWN) => counts.three_down += 1,
+                Some(P1_FLAT) => counts.three_flat += 1,
+                Some(P1_UP) => counts.three_up += 1,
+                _ => unreachable!(),
+            }
+        }
+        // Next-nonzero: scan forward for the first bar whose mid
+        // differs from the decision bar's mid.
+        let scan_end = (i + cutoff_bars).min(n - 1);
+        let mut nonzero = None;
+        let mut nonzero_target_mid = None;
+        let mut nonzero_target_time_ms = None;
+        let mut nonzero_move_bar = None;
+        let first_move = (i + 1..=scan_end).find(|&j| mids[j] != mids[i]);
+        match first_move {
+            Some(j) => {
+                if window_observed(i + 1, j) {
+                    nonzero = Some(u8::from(mids[j] > mids[i]));
+                    nonzero_target_mid = Some(mids[j]);
+                    nonzero_target_time_ms = Some(bars[j].0);
+                    nonzero_move_bar = Some(j);
+                    counts.nonzero_labeled += 1;
+                    if mids[j] > mids[i] {
+                        counts.nonzero_up += 1;
+                    } else {
+                        counts.nonzero_down += 1;
+                    }
+                } else {
+                    counts.nonzero_censored_gap += 1;
+                }
+            }
+            None => {
+                if i + cutoff_bars >= n {
+                    counts.nonzero_censored_incomplete += 1;
+                } else if !window_observed(i + 1, i + cutoff_bars) {
+                    counts.nonzero_censored_gap += 1;
+                } else {
+                    counts.nonzero_censored_no_move += 1;
+                }
+            }
+        }
+        rows.push(P1Row {
+            decision_bar: i,
+            decision_time_ms: bars[i].0,
+            features,
+            spread_degenerate,
+            baseline,
+            baseline_target_mid,
+            baseline_target_time_ms,
+            nonzero,
+            nonzero_target_mid,
+            nonzero_target_time_ms,
+            nonzero_move_bar,
+            three,
+            three_target_mid,
+            three_target_time_ms,
+        });
+    }
+    P1Dataset {
+        rows,
+        counts,
+        config,
+        cutoff_bars,
+        feature_version: FEATURE_VERSION,
+    }
+}
+
+/// One three-class row: shared features with a down/flat/up label.
+#[derive(Debug, Clone, Copy)]
+pub struct ClassRow {
+    pub time_ms: i64,
+    pub features: [f64; N_FEATURES],
+    /// 0 down, 1 flat, 2 up.
+    pub target: u8,
+}
+
+/// Full-batch gradient descent for L2 multinomial logistic
+/// regression (softmax), mirroring `fit_logistic`: features are
+/// standardized with the training fold's mean and population sd
+/// (sd floor 1e-12) during descent, then folded back into raw-space
+/// weights, so a saved model scores a raw feature row directly.
+/// Returns one intercept-appended weight vector per class.
+pub fn fit_softmax(
+    xs: &[[f64; N_FEATURES]],
+    y: &[u8],
+    l2: f64,
+    iters: usize,
+    lr: f64,
+) -> [[f64; N_FEATURES + 1]; 3] {
+    let n = xs.len() as f64;
+    let d = N_FEATURES;
+    let mut mu = [0.0; N_FEATURES];
+    let mut sd = [0.0; N_FEATURES];
+    for row in xs {
+        for j in 0..d {
+            mu[j] += row[j];
+        }
+    }
+    for m in mu.iter_mut().take(d) {
+        *m /= n;
+    }
+    for row in xs {
+        for j in 0..d {
+            let z = row[j] - mu[j];
+            sd[j] += z * z;
+        }
+    }
+    for s in sd.iter_mut().take(d) {
+        *s = (*s / n).sqrt() + 1e-12;
+    }
+    let mut w = [[0.0; N_FEATURES + 1]; 3];
+    for _ in 0..iters {
+        let mut grad = [[0.0; N_FEATURES + 1]; 3];
+        for (row, &yi) in xs.iter().zip(y.iter()) {
+            if yi > 2 {
+                continue;
+            }
+            let mut z = [0.0; 3];
+            for c in 0..3 {
+                z[c] = w[c][d];
+                for j in 0..d {
+                    z[c] += w[c][j] * (row[j] - mu[j]) / sd[j];
+                }
+            }
+            let mx = z.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let mut denom = 0.0;
+            let mut p = [0.0; 3];
+            for c in 0..3 {
+                p[c] = (z[c] - mx).exp();
+                denom += p[c];
+            }
+            for c in 0..3 {
+                let err = p[c] / denom - f64::from(u8::from(c == yi as usize));
+                for j in 0..d {
+                    grad[c][j] += err * (row[j] - mu[j]) / sd[j];
+                }
+                grad[c][d] += err;
+            }
+        }
+        for c in 0..3 {
+            for j in 0..d {
+                w[c][j] -= lr * (grad[c][j] / n + l2 * w[c][j] / n);
+            }
+            w[c][d] -= lr * grad[c][d] / n;
+        }
+    }
+    let mut raw = [[0.0; N_FEATURES + 1]; 3];
+    for c in 0..3 {
+        let mut b = w[c][d];
+        for j in 0..d {
+            raw[c][j] = w[c][j] / sd[j];
+            b -= w[c][j] * mu[j] / sd[j];
+        }
+        raw[c][d] = b;
+    }
+    raw
+}
+
+/// Softmax class probabilities for a raw feature row under
+/// `fit_softmax` weights.
+pub fn predict_softmax(x: &[f64; N_FEATURES], w: &[[f64; N_FEATURES + 1]; 3]) -> [f64; 3] {
+    let mut z = [0.0; 3];
+    for c in 0..3 {
+        z[c] = w[c][N_FEATURES];
+        for j in 0..N_FEATURES {
+            z[c] += w[c][j] * x[j];
+        }
+        z[c] = z[c].clamp(-30.0, 30.0);
+    }
+    let mx = z.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let mut denom = 0.0;
+    let mut p = [0.0; 3];
+    for c in 0..3 {
+        p[c] = (z[c] - mx).exp();
+        denom += p[c];
+    }
+    [p[0] / denom, p[1] / denom, p[2] / denom]
+}
+
+/// One fold's three-class held-out scores.
+#[derive(Debug, Clone)]
+pub struct ThreeClassFoldMetrics {
+    pub fold: usize,
+    pub n_train: usize,
+    pub train_down: usize,
+    pub train_flat: usize,
+    pub train_up: usize,
+    /// Train-majority class (argmax of the train-only counts,
+    /// lowest index on ties): the baseline commits to this label
+    /// without ever reading a test outcome.
+    pub train_majority_label: u8,
+    pub n_test: usize,
+    pub n_down: usize,
+    pub n_flat: usize,
+    pub n_up: usize,
+    pub accuracy: f64,
+    /// Accuracy of the training-majority predictor on this fold.
+    pub baseline_accuracy: f64,
+    /// Multiclass Brier score: mean over rows of the squared error
+    /// summed over the three one-hot classes.
+    pub brier: f64,
+    pub log_loss: f64,
+    /// Confusion counts [true][predicted].
+    pub confusion: [[usize; 3]; 3],
+}
+
+/// Purged walk-forward evaluation of the three-class track, with
+/// the same fold geometry as `walk_forward_detailed`: the purge gap
+/// is `horizon` rows, so no training target window overlaps the
+/// test block. Train priors are train-only by construction.
+#[derive(Debug, Clone)]
+pub struct ThreeClassReport {
+    /// Total labeled rows fed to the evaluation.
+    pub n_labeled: usize,
+    /// Held-out predictions scored.
+    pub n_oos: usize,
+    pub n_down_oos: usize,
+    pub n_flat_oos: usize,
+    pub n_up_oos: usize,
+    /// Labeled rows never scored (training and purge-gap rows).
+    pub n_unscored: usize,
+    pub n_folds: usize,
+    pub accuracy: f64,
+    /// Out-of-sample accuracy of the training-majority predictor.
+    pub baseline: f64,
+    /// Mean per-class recall over the held-out rows. NaN when a
+    /// class is absent from the held-out rows.
+    pub balanced_accuracy: f64,
+    pub brier: f64,
+    pub log_loss: f64,
+    /// Confusion counts [true][predicted] over all held-out rows.
+    pub confusion: [[usize; 3]; 3],
+    pub per_fold: Vec<ThreeClassFoldMetrics>,
+}
+
+pub fn walk_forward_three_class(
+    rows: &[ClassRow],
+    n_splits: usize,
+    horizon: usize,
+) -> Option<ThreeClassReport> {
+    let n = rows.len();
+    if n < 60 {
+        return None;
+    }
+    let fold = n / (n_splits + 1);
+    if fold < 10 {
+        return None;
+    }
+    let mut per_fold: Vec<ThreeClassFoldMetrics> = Vec::new();
+    let mut confusion = [[0usize; 3]; 3];
+    let (mut acc_sum, mut base_sum, mut brier_sum, mut ll_sum) = (0.0, 0.0, 0.0, 0.0);
+    let (mut n_oos, mut n_down_oos, mut n_flat_oos, mut n_up_oos) =
+        (0usize, 0usize, 0usize, 0usize);
+    for k in 1..=n_splits {
+        let a = k * fold;
+        let b = ((k + 1) * fold).min(n);
+        let train_end = a.saturating_sub(horizon);
+        if train_end < 30 || b - a < 10 {
+            continue;
+        }
+        let mut train_counts = [0usize; 3];
+        for r in &rows[..train_end] {
+            if r.target <= 2 {
+                train_counts[r.target as usize] += 1;
+            }
+        }
+        let mut majority = 0u8;
+        for c in 1..3 {
+            if train_counts[c] > train_counts[majority as usize] {
+                majority = c as u8;
+            }
+        }
+        let xs: Vec<[f64; N_FEATURES]> = rows[..train_end].iter().map(|r| r.features).collect();
+        let ys: Vec<u8> = rows[..train_end].iter().map(|r| r.target).collect();
+        let w = fit_softmax(&xs, &ys, FIT_L2, FIT_ITERS, FIT_LR);
+        let mut fold_conf = [[0usize; 3]; 3];
+        let (mut f_acc, mut f_base, mut f_brier, mut f_ll) = (0.0, 0.0, 0.0, 0.0);
+        let (mut f_down, mut f_flat, mut f_up) = (0usize, 0usize, 0usize);
+        for r in &rows[a..b] {
+            if r.target > 2 {
+                continue;
+            }
+            let p = predict_softmax(&r.features, &w);
+            let mut pred = 0usize;
+            for c in 1..3 {
+                if p[c] > p[pred] {
+                    pred = c;
+                }
+            }
+            let t = r.target as usize;
+            fold_conf[t][pred] += 1;
+            confusion[t][pred] += 1;
+            f_acc += f64::from(pred == t);
+            f_base += f64::from(majority as usize == t);
+            let mut brier = 0.0;
+            for (c, &pc) in p.iter().enumerate() {
+                let onehot = f64::from(c == t);
+                brier += (pc - onehot).powi(2);
+            }
+            f_brier += brier;
+            let pc = p[t].clamp(1e-15, 1.0 - 1e-15);
+            f_ll += -pc.ln();
+            match t {
+                0 => f_down += 1,
+                1 => f_flat += 1,
+                _ => f_up += 1,
+            }
+        }
+        let n_test = f_down + f_flat + f_up;
+        if n_test == 0 {
+            continue;
+        }
+        let d = n_test as f64;
+        acc_sum += f_acc;
+        base_sum += f_base;
+        brier_sum += f_brier;
+        ll_sum += f_ll;
+        n_oos += n_test;
+        n_down_oos += f_down;
+        n_flat_oos += f_flat;
+        n_up_oos += f_up;
+        per_fold.push(ThreeClassFoldMetrics {
+            fold: per_fold.len(),
+            n_train: train_end,
+            train_down: train_counts[0],
+            train_flat: train_counts[1],
+            train_up: train_counts[2],
+            train_majority_label: majority,
+            n_test,
+            n_down: f_down,
+            n_flat: f_flat,
+            n_up: f_up,
+            accuracy: f_acc / d,
+            baseline_accuracy: f_base / d,
+            brier: f_brier / d,
+            log_loss: f_ll / d,
+            confusion: fold_conf,
+        });
+    }
+    if n_oos == 0 {
+        return None;
+    }
+    let d = n_oos as f64;
+    let mut balanced = 0.0;
+    for (c, row) in confusion.iter().enumerate() {
+        let row_sum: usize = row.iter().sum();
+        if row_sum == 0 {
+            balanced = f64::NAN;
+            break;
+        }
+        balanced += row[c] as f64 / row_sum as f64;
+    }
+    if balanced.is_finite() {
+        balanced /= 3.0;
+    }
+    Some(ThreeClassReport {
+        n_labeled: n,
+        n_oos,
+        n_down_oos,
+        n_flat_oos,
+        n_up_oos,
+        n_unscored: n - n_oos,
+        n_folds: per_fold.len(),
+        accuracy: acc_sum / d,
+        baseline: base_sum / d,
+        balanced_accuracy: balanced,
+        brier: brier_sum / d,
+        log_loss: ll_sum / d,
+        confusion,
+        per_fold,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1747,6 +2513,44 @@ mod tests {
         let w = fit_logistic(&xs, &y, 0.01, 2000, 0.5);
         assert!(predict_proba(&[10.0, 0.0, 0.0, 0.0, 0.0], &w) > 0.9);
         assert!(predict_proba(&[-10.0, 0.0, 0.0, 0.0, 0.0], &w) < 0.1);
+    }
+
+    #[test]
+    fn p1_softmax_separates_three_classes() {
+        let xs = vec![
+            [10.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [-10.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let y = vec![2u8, 1, 0];
+        let w = fit_softmax(&xs, &y, 0.01, 2000, 0.5);
+        let p_up = predict_softmax(&[10.0, 0.0, 0.0, 0.0, 0.0], &w);
+        let p_flat = predict_softmax(&[0.0, 0.0, 0.0, 0.0, 0.0], &w);
+        let p_down = predict_softmax(&[-10.0, 0.0, 0.0, 0.0, 0.0], &w);
+        for p in [p_up, p_flat, p_down] {
+            assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+            assert!(p.iter().all(|&v| (0.0..=1.0).contains(&v)));
+        }
+        assert!(p_up[2] > 0.9);
+        assert!(p_flat[1] > 0.9);
+        assert!(p_down[0] > 0.9);
+    }
+
+    #[test]
+    fn p1_thin_data_has_no_decision_rows() {
+        let quotes: Vec<Quote> = (0..10)
+            .map(|i| Quote {
+                time_ms: i * 10_000 + 1_000,
+                bid_px: 99.95,
+                bid_sz: 5.0,
+                ask_px: 100.05,
+                ask_sz: 5.0,
+            })
+            .collect();
+        let ds = build_p1_dataset(&quotes, &[], 10_000, P1_DEFAULT_CONFIG, 10);
+        assert!(ds.rows.is_empty());
+        assert_eq!(ds.counts.n_bars, 10);
+        assert_eq!(ds.counts.n_decision, 0);
     }
 
     #[test]
