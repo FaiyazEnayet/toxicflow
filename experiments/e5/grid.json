@@ -1,0 +1,57 @@
+{
+  "experiment_id": "e5-robustness",
+  "schema_version": "toxicflow.e5-grid/v1",
+  "preregistered": "2026-11-16",
+  "note": "Preregistered before any grid run. The default configuration stays the reported configuration regardless of results; no test outcome is used for parameter selection.",
+  "default": {
+    "id": "default",
+    "n_buckets": 50,
+    "vpin_window": 20,
+    "bar_ms": 10000,
+    "lambda_window": 60,
+    "vpin_gate": 0.7,
+    "kind": "default"
+  },
+  "configs": [
+    {"id": "default", "n_buckets": 50, "vpin_window": 20, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "default"},
+    {"id": "b25", "n_buckets": 25, "vpin_window": 20, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "one-at-a-time"},
+    {"id": "b100", "n_buckets": 100, "vpin_window": 20, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "one-at-a-time"},
+    {"id": "w10", "n_buckets": 50, "vpin_window": 10, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "one-at-a-time"},
+    {"id": "w40", "n_buckets": 50, "vpin_window": 40, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "one-at-a-time"},
+    {"id": "bar5", "n_buckets": 50, "vpin_window": 20, "bar_ms": 5000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "one-at-a-time"},
+    {"id": "bar30", "n_buckets": 50, "vpin_window": 20, "bar_ms": 30000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "one-at-a-time"},
+    {"id": "lam30", "n_buckets": 50, "vpin_window": 20, "bar_ms": 10000, "lambda_window": 30, "vpin_gate": 0.7, "kind": "one-at-a-time"},
+    {"id": "lam120", "n_buckets": 50, "vpin_window": 20, "bar_ms": 10000, "lambda_window": 120, "vpin_gate": 0.7, "kind": "one-at-a-time"},
+    {"id": "g060", "n_buckets": 50, "vpin_window": 20, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.6, "kind": "one-at-a-time"},
+    {"id": "g080", "n_buckets": 50, "vpin_window": 20, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.8, "kind": "one-at-a-time"},
+    {"id": "b25-w10", "n_buckets": 25, "vpin_window": 10, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "buckets-window-factorial"},
+    {"id": "b25-w40", "n_buckets": 25, "vpin_window": 40, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "buckets-window-factorial"},
+    {"id": "b100-w10", "n_buckets": 100, "vpin_window": 10, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "buckets-window-factorial"},
+    {"id": "b100-w40", "n_buckets": 100, "vpin_window": 40, "bar_ms": 10000, "lambda_window": 60, "vpin_gate": 0.7, "kind": "buckets-window-factorial"}
+  ],
+  "train_sessions": [
+    "session-20261109-083238-utc",
+    "session-20261109-123248-utc",
+    "session-20261109-163259-utc",
+    "session-20261109-203309-utc"
+  ],
+  "test_sessions": [
+    "session-20261111-163501-utc",
+    "session-20261111-203511-utc",
+    "session-20261112-003521-utc",
+    "session-20261112-043531-utc",
+    "session-20261112-083541-utc",
+    "session-20261112-123552-utc"
+  ],
+  "calibration": {
+    "rule": "VPIN gate calibrated as the 90th percentile of the pooled train-session VPIN series under the default configuration; train sessions only, never the test sessions.",
+    "percentile": 0.9
+  },
+  "nulls": {
+    "timestamp_shift_ms": 120000,
+    "lead_lags": [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5],
+    "shift_bars": 3
+  },
+  "ablation_controls": ["volume", "intensity", "volatility"],
+  "selection_rule": "No test outcome is used for parameter selection. The default configuration stays the reported configuration regardless of results; the grid only documents how far each number moves."
+}

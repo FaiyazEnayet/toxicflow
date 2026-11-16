@@ -10,6 +10,7 @@ pub mod net;
 pub mod orderbook;
 pub mod predict;
 pub mod recorder;
+pub mod robustness;
 pub mod speed;
 pub mod storage;
 pub mod strategy;

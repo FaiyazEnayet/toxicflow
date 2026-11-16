@@ -7,6 +7,7 @@ use tokio_tungstenite::tungstenite::Message;
 use toxicflow::metrics::{
     kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, LiveVpin, Quote, Trade,
 };
+use toxicflow::robustness::{kyle_lambda_robust, lambda_tail_summary};
 use toxicflow::{evidence, predict, recorder, speed, storage, strategy};
 
 #[derive(Parser)]
@@ -494,16 +495,21 @@ fn export_session(
             .collect::<Vec<_>>(),
     )?;
 
-    // Kyle's lambda series on 10s bars
+    // Kyle's lambda series on 10s bars, with per-window valid
+    // counts and tail flags (E5): a window cut short by a feed gap
+    // reports fewer valid points, and an extreme lambda is flagged
+    // instead of silently dominating the session mean.
     let bars = flow_bars(&trades, &quotes, 10_000);
-    let lam = kyle_lambda(&bars, 60);
+    let lam = kyle_lambda_robust(&bars, 60);
+    let lam_summary = lambda_tail_summary(&lam);
     write_csv(
         &format!("{out}/kyle.csv"),
-        "time_ms,lambda",
-        &bars
-            .iter()
-            .zip(lam.iter())
-            .filter_map(|(b, l)| l.map(|(v, _)| format!("{},{}", b.time_ms, v)))
+        "time_ms,lambda,n_valid,tail_flag",
+        &lam.iter()
+            .filter_map(|w| {
+                w.lambda
+                    .map(|v| format!("{},{},{},{}", w.time_ms, v, w.n_valid, w.tail_flag as u8))
+            })
             .collect::<Vec<_>>(),
     )?;
 
@@ -602,7 +608,7 @@ fn export_session(
 
     let vp_vals: Vec<f64> = vp.iter().map(|(_, v)| *v).collect();
     let vp_mean = vp_vals.iter().sum::<f64>() / vp_vals.len() as f64;
-    let lams: Vec<f64> = lam.iter().filter_map(|x| x.map(|(l, _)| l)).collect();
+    let lams: Vec<f64> = lam.iter().filter_map(|w| w.lambda).collect();
     let ofis: Vec<f64> = ob.iter().map(|b| b.1).collect();
     let ofi_m = ofis.iter().sum::<f64>() / ofis.len() as f64;
     let ofi_sd = (ofis.iter().map(|x| (x - ofi_m).powi(2)).sum::<f64>() / ofis.len() as f64).sqrt();
@@ -625,6 +631,13 @@ fn export_session(
         "kyle_lambda": {
             "mean": lams.iter().sum::<f64>() / lams.len().max(1) as f64,
             "last": lams.last().copied().unwrap_or(f64::NAN),
+            "n_windows": lam_summary.n_windows,
+            "n_with_lambda": lam_summary.n_with_lambda,
+            "n_tail": lam_summary.n_tail,
+            "tail_share": lam_summary.tail_share,
+            "winsorized_mean": lam_summary.winsorized_mean_lambda,
+            "median_abs_lambda": lam_summary.median_abs_lambda,
+            "p99_abs_lambda": lam_summary.p99_abs_lambda,
         },
         "ofi": { "mean": ofi_m, "std": ofi_sd },
         "speed": speed_res.as_ref().map(|s| serde_json::json!({
@@ -902,7 +915,8 @@ mod tests {
         assert!(vpin.lines().count() > 2, "vpin.csv has no data rows");
 
         let kyle = std::fs::read_to_string(out.join("kyle.csv")).unwrap();
-        assert!(kyle.starts_with("time_ms,lambda\n"));
+        assert!(kyle.starts_with("time_ms,lambda,n_valid,tail_flag\n"));
+        assert!(kyle.lines().count() > 2, "kyle.csv has no data rows");
 
         let ofi = std::fs::read_to_string(out.join("ofi.csv")).unwrap();
         assert!(ofi.starts_with("time_ms,ofi,mid,spread,imbalance,signed_vol,fwd_ret_bps\n"));
@@ -928,6 +942,11 @@ mod tests {
         assert!(summary["speed"]["response_bps"].as_array().unwrap().len() > 10);
         assert!(summary["predict"]["accuracy"].as_f64().is_some());
         assert!(summary["mm"]["pnl_open"].as_f64().is_some());
+        // E5: the export carries lambda tail diagnostics.
+        assert!(summary["kyle_lambda"]["n_windows"].as_u64().is_some());
+        assert!(summary["kyle_lambda"]["n_tail"].as_u64().is_some());
+        assert!(summary["kyle_lambda"]["tail_share"].as_f64().is_some());
+        assert!(summary["kyle_lambda"]["winsorized_mean"].as_f64().is_some());
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
