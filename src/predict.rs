@@ -39,6 +39,17 @@
 //! (`evaluate_session` / `summarize_session_pilot`), a bootstrap over
 //! sessions, because the independent recording session — not the
 //! serially dependent bar — is the effective sample unit.
+//!
+//! Statistics (E4): `accuracy_std` is the population standard
+//! deviation of the per-fold accuracies (inter-fold variability),
+//! with `accuracy_se_folds` alongside it. The pre-E4 per-row value
+//! is kept as `accuracy_std_rows` and reproduced by
+//! `historical_metrics` next to the repaired numbers, flagged as an
+//! incomparable protocol. The report also states its denominators
+//! explicitly: total labeled rows (`n_labeled`), held-out
+//! predictions scored (`n_oos`), held-out class counts
+//! (`n_pos_oos` / `n_neg_oos`), and rows never scored
+//! (`n_unscored`), plus a per-fold Brier score and log loss table.
 
 use crate::metrics::{ofi_bars, ofi_events, Quote, Trade};
 
@@ -387,20 +398,72 @@ pub fn predict_proba(x: &[f64; N_FEATURES], w: &[f64; N_FEATURES + 1]) -> f64 {
     sigmoid(z)
 }
 
+/// One fold's held-out scores (E4): accuracy, Brier score, log loss,
+/// and class counts, all scored on exactly that fold's held-out rows.
+/// Serialized in `fold_models.json` so the per-fold table survives
+/// the producing process, and re-verified by
+/// `verify_prediction_ledger`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FoldMetrics {
+    pub fold: usize,
+    pub n_test: usize,
+    pub n_pos: usize,
+    pub n_neg: usize,
+    pub accuracy: f64,
+    /// Accuracy of the training-majority predictor on this fold's
+    /// held-out rows.
+    pub baseline_accuracy: f64,
+    pub brier: f64,
+    pub log_loss: f64,
+}
+
 #[derive(Debug)]
 pub struct EvalReport {
     /// Feature-frame version the evaluated bars were built with
     /// (see FEATURE_VERSION).
     pub feature_version: &'static str,
+    /// Total labeled dataset rows fed to the evaluation. This is the
+    /// labeled total, not the scored total: only `n_oos` of these
+    /// rows are held-out predictions. Kept under its historical name
+    /// for compatibility; `n_labeled` carries the same value with
+    /// the explicit name.
     pub n_bars: usize,
+    /// Total labeled dataset rows fed to the evaluation (same value
+    /// as `n_bars`).
+    pub n_labeled: usize,
+    /// Held-out predictions scored: the exact denominator behind
+    /// accuracy, Brier score, log loss, and the calibration bins.
+    pub n_oos: usize,
+    /// Held-out rows with a positive target (the denominator for
+    /// the positive class frequency).
+    pub n_pos_oos: usize,
+    /// Held-out rows with a negative target (the denominator for
+    /// the negative class frequency).
+    pub n_neg_oos: usize,
+    /// Labeled rows the evaluation never scores: training rows and
+    /// purge-gap rows. The prediction path scores every held-out
+    /// row, so these are the only rows it abstains on, and the
+    /// count is stated here instead of left implicit.
+    pub n_unscored: usize,
     pub n_folds: usize,
     pub accuracy: f64,
-    /// Population standard deviation of the per-row 0/1 correctness
-    /// values. For Bernoulli outcomes this is exactly
-    /// sqrt(accuracy * (1 - accuracy)): it describes the dispersion
-    /// of the rows and must not be read as the uncertainty of the
-    /// accuracy estimate. Use `accuracy_ci` for uncertainty.
+    /// Population standard deviation of the per-fold accuracies
+    /// (E4): inter-fold variability of the accuracy estimate. This
+    /// replaced the pre-E4 meaning of this field, the population
+    /// standard deviation of the per-row 0/1 correctness values
+    /// (exactly sqrt(accuracy * (1 - accuracy)) for Bernoulli
+    /// outcomes). That historical value is kept as
+    /// `accuracy_std_rows`; the two come from different protocols
+    /// and must not be compared. Use `accuracy_ci` for uncertainty.
     pub accuracy_std: f64,
+    /// The pre-E4 `accuracy_std`: population standard deviation of
+    /// the per-row 0/1 correctness values. Row dispersion, not an
+    /// uncertainty. Kept so the old number stays visible and
+    /// reproducible instead of being silently replaced.
+    pub accuracy_std_rows: f64,
+    /// Standard error of the accuracy across folds:
+    /// `accuracy_std / sqrt(number of folds fit)`.
+    pub accuracy_se_folds: f64,
     /// Out-of-sample accuracy of the training-majority predictor:
     /// each fold predicts its own training majority label for every
     /// test row. This is the headline baseline (TF6); it is computed
@@ -420,8 +483,13 @@ pub struct EvalReport {
     /// percentiles of the resampled means.
     pub accuracy_ci: (f64, f64),
     pub brier: f64,
+    /// Mean log loss (negative log likelihood) over the held-out
+    /// predictions, with probabilities clamped to [1e-15, 1-1e-15].
+    pub log_loss: f64,
     /// (mean predicted prob, realized rate, n) per decile
     pub calibration: Vec<(f64, f64, usize)>,
+    /// Per-fold scores, one entry per fold actually fit.
+    pub per_fold: Vec<FoldMetrics>,
 }
 
 /// One fold's persisted model record (N4): everything an independent
@@ -474,13 +542,30 @@ pub struct PredictionRow {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SavedReport {
     pub accuracy: f64,
+    /// Population standard deviation of the per-fold accuracies
+    /// (E4). Files written before E4 stored the per-row Bernoulli
+    /// dispersion here; that value now lives in
+    /// `accuracy_std_rows`, and the two are not comparable.
     pub accuracy_std: f64,
+    /// The pre-E4 `accuracy_std` (per-row dispersion). Defaults to
+    /// 0.0 when loading files written before E4, which did not
+    /// record it separately.
+    #[serde(default)]
+    pub accuracy_std_rows: f64,
+    /// Standard error of the accuracy across folds. Defaults to 0.0
+    /// when loading files written before E4.
+    #[serde(default)]
+    pub accuracy_se_folds: f64,
     /// Training-majority predictor accuracy (TF6). Files written
     /// before TF6 stored the test-outcome majority rate here; the
     /// ledger verifier never checks this field, and TF6 files are
     /// identified by the presence of `test_majority_rate`.
     pub baseline: f64,
     pub brier: f64,
+    /// Mean log loss over the held-out predictions. Defaults to 0.0
+    /// when loading files written before E4.
+    #[serde(default)]
+    pub log_loss: f64,
     /// Balanced accuracy (TF6). Defaults to 0.0 when loading files
     /// written before TF6, which did not record it.
     #[serde(default)]
@@ -490,8 +575,33 @@ pub struct SavedReport {
     /// the same value sits in `baseline`.
     #[serde(default)]
     pub test_majority_rate: f64,
+    /// Total labeled dataset rows fed to the evaluation. Defaults to
+    /// 0 when loading files written before E4.
+    #[serde(default)]
+    pub n_labeled: usize,
+    /// Held-out predictions scored. Defaults to 0 when loading files
+    /// written before E4; in those files the same value sits in
+    /// `FoldModelsFile::n_oos`.
+    #[serde(default)]
+    pub n_oos: usize,
+    /// Held-out rows with a positive target. Defaults to 0 when
+    /// loading files written before E4.
+    #[serde(default)]
+    pub n_pos_oos: usize,
+    /// Held-out rows with a negative target. Defaults to 0 when
+    /// loading files written before E4.
+    #[serde(default)]
+    pub n_neg_oos: usize,
+    /// Labeled rows never scored (training and purge-gap rows).
+    /// Defaults to 0 when loading files written before E4.
+    #[serde(default)]
+    pub n_unscored: usize,
     /// (mean predicted prob, realized rate, n) per decile
     pub calibration: Vec<(f64, f64, usize)>,
+    /// Per-fold scores, one entry per fold actually fit. Empty when
+    /// loading files written before E4.
+    #[serde(default)]
+    pub per_fold: Vec<FoldMetrics>,
 }
 
 /// Serialized form of `fold_models.json`.
@@ -534,6 +644,8 @@ pub struct WalkForwardDetail {
     pub dataset_sha256: String,
     pub folds: Vec<FoldModel>,
     pub predictions: Vec<PredictionRow>,
+    /// Per-fold scores (E4), parallel to `folds`.
+    pub per_fold: Vec<FoldMetrics>,
     /// Per-row correctness of the training-majority predictor (TF6),
     /// parallel to `predictions`: 1.0 when the row's fold committed
     /// to a training majority label equal to the row's target. The
@@ -684,24 +796,50 @@ pub fn walk_forward_detailed(
     );
 
     let calibration = calibration_bins(&predictions);
+    // E4: fold-level statistics and explicit denominators. The
+    // headline `accuracy_std` is inter-fold variability (the
+    // population SD of the per-fold accuracies); the historical
+    // per-row value is kept as `accuracy_std_rows`.
+    let per_fold = per_fold_metrics(&folds, &predictions, &baseline_correct);
+    let fold_accs: Vec<f64> = per_fold.iter().map(|f| f.accuracy).collect();
+    let fold_mean = mean(&fold_accs);
+    let fold_std = (fold_accs
+        .iter()
+        .map(|a| (a - fold_mean).powi(2))
+        .sum::<f64>()
+        / fold_accs.len() as f64)
+        .sqrt();
+    let fold_se = fold_std / (fold_accs.len() as f64).sqrt();
+    let n_pos_oos = predictions.iter().filter(|r| r.target == 1).count();
+    let n_oos = predictions.len();
     Some(WalkForwardDetail {
         report: EvalReport {
             feature_version: FEATURE_VERSION,
             n_bars: n,
+            n_labeled: n,
+            n_oos,
+            n_pos_oos,
+            n_neg_oos: n_oos - n_pos_oos,
+            n_unscored: n - n_oos,
             n_folds: n_splits,
             accuracy: acc,
-            accuracy_std: std,
+            accuracy_std: fold_std,
+            accuracy_std_rows: std,
+            accuracy_se_folds: fold_se,
             baseline,
             test_majority_rate,
             balanced_accuracy,
             accuracy_ci,
             brier: brier_score(&predictions),
+            log_loss: log_loss(&predictions),
             calibration,
+            per_fold: per_fold.clone(),
         },
         n_bars: n,
         dataset_sha256: hash_bars(bars),
         folds,
         predictions,
+        per_fold,
         baseline_correct,
     })
 }
@@ -741,11 +879,20 @@ pub fn build_fold_models_file(
         report: SavedReport {
             accuracy: detail.report.accuracy,
             accuracy_std: detail.report.accuracy_std,
+            accuracy_std_rows: detail.report.accuracy_std_rows,
+            accuracy_se_folds: detail.report.accuracy_se_folds,
             baseline: detail.report.baseline,
             brier: detail.report.brier,
+            log_loss: detail.report.log_loss,
             balanced_accuracy: detail.report.balanced_accuracy,
             test_majority_rate: detail.report.test_majority_rate,
+            n_labeled: detail.report.n_labeled,
+            n_oos: detail.report.n_oos,
+            n_pos_oos: detail.report.n_pos_oos,
+            n_neg_oos: detail.report.n_neg_oos,
+            n_unscored: detail.report.n_unscored,
             calibration: detail.report.calibration.clone(),
+            per_fold: detail.report.per_fold.clone(),
         },
         folds: detail.folds.clone(),
     }
@@ -927,6 +1074,14 @@ pub fn verify_prediction_ledger(
     let mut max_err = 0.0f64;
     let mut acc_sum = 0.0f64;
     let mut brier_sum = 0.0f64;
+    // E4 accumulators for the per-fold recomputation below, plus the
+    // (fold, time) keys that must be unique across the ledger.
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut fold_acc = vec![0.0f64; models.folds.len()];
+    let mut fold_base = vec![0.0f64; models.folds.len()];
+    let mut fold_brier = vec![0.0f64; models.folds.len()];
+    let mut fold_ll = vec![0.0f64; models.folds.len()];
+    let mut fold_npos = vec![0usize; models.folds.len()];
     for r in rows {
         let f = models
             .folds
@@ -965,6 +1120,22 @@ pub fn verify_prediction_ledger(
         }
         max_err = max_err.max(err);
         per_fold[r.fold] += 1;
+        if !seen_keys.insert((r.fold, r.time_ms)) {
+            return Err(format!(
+                "duplicate (fold, time) key: fold {} time {} appears twice in the ledger",
+                r.fold, r.time_ms
+            ));
+        }
+        fold_acc[r.fold] += f64::from(u8::from(p > 0.5) == r.target);
+        fold_base[r.fold] += f64::from(f.train_majority_label == r.target);
+        fold_brier[r.fold] += (p - r.target as f64).powi(2);
+        let pc = p.clamp(1e-15, 1.0 - 1e-15);
+        fold_ll[r.fold] += if r.target == 1 {
+            -pc.ln()
+        } else {
+            -(1.0 - pc).ln()
+        };
+        fold_npos[r.fold] += usize::from(r.target == 1);
         acc_sum += f64::from(u8::from(p > 0.5) == r.target);
         brier_sum += (p - r.target as f64).powi(2);
     }
@@ -974,6 +1145,55 @@ pub fn verify_prediction_ledger(
                 "fold {}: ledger holds {} rows, fold record says {}",
                 f.fold, per_fold[i], f.n_test
             ));
+        }
+    }
+    // E4: the calibration bins must conserve the held-out
+    // denominator in at most 10 bins.
+    let cal_sum: usize = models.report.calibration.iter().map(|c| c.2).sum();
+    if cal_sum != models.n_oos {
+        return Err(format!(
+            "calibration bins sum to {cal_sum}, saved OOS denominator is {}",
+            models.n_oos
+        ));
+    }
+    if models.report.calibration.len() > 10 {
+        return Err(format!(
+            "calibration table has {} bins, expected at most 10",
+            models.report.calibration.len()
+        ));
+    }
+    // E4: when the file carries a per-fold table, its scores must
+    // recompute from the reconstructed probabilities. Files written
+    // before E4 carry no per-fold table and skip this check.
+    if !models.report.per_fold.is_empty() {
+        if models.report.per_fold.len() != models.folds.len() {
+            return Err(format!(
+                "per-fold table holds {} entries for {} folds",
+                models.report.per_fold.len(),
+                models.folds.len()
+            ));
+        }
+        for (i, fm) in models.report.per_fold.iter().enumerate() {
+            let f = &models.folds[i];
+            if fm.fold != f.fold || fm.n_test != f.n_test || fm.n_pos != fold_npos[i] {
+                return Err(format!(
+                    "per-fold entry {i} does not match fold {} (n_test {} vs {}, n_pos {} vs {})",
+                    f.fold, fm.n_test, f.n_test, fm.n_pos, fold_npos[i]
+                ));
+            }
+            let d = per_fold[i].max(1) as f64;
+            let check = |name: &str, saved: f64, got: f64| -> Result<(), String> {
+                if (saved - got).abs() > 1e-8 {
+                    return Err(format!(
+                        "fold {i}: recomputed {name} {got} differs from saved {saved} by more than 1e-8"
+                    ));
+                }
+                Ok(())
+            };
+            check("accuracy", fm.accuracy, fold_acc[i] / d)?;
+            check("baseline accuracy", fm.baseline_accuracy, fold_base[i] / d)?;
+            check("brier", fm.brier, fold_brier[i] / d)?;
+            check("log loss", fm.log_loss, fold_ll[i] / d)?;
         }
     }
     if max_err > 1e-8 {
@@ -1037,6 +1257,194 @@ pub fn brier_score(rows: &[PredictionRow]) -> f64 {
         .map(|r| (r.proba - f64::from(r.target)).powi(2))
         .sum::<f64>()
         / rows.len() as f64
+}
+
+/// Log loss (mean negative log likelihood) of the probabilities in
+/// `rows` (E4). Probabilities are clamped to [1e-15, 1-1e-15] so a
+/// certain wrong prediction costs a large finite number instead of
+/// infinity. Returns NaN on empty input, never a fabricated 0.
+pub fn log_loss(rows: &[PredictionRow]) -> f64 {
+    if rows.is_empty() {
+        return f64::NAN;
+    }
+    rows.iter()
+        .map(|r| {
+            let p = r.proba.clamp(1e-15, 1.0 - 1e-15);
+            if r.target == 1 {
+                -p.ln()
+            } else {
+                -(1.0 - p).ln()
+            }
+        })
+        .sum::<f64>()
+        / rows.len() as f64
+}
+
+/// Per-fold scores for a detailed evaluation (E4): accuracy, Brier
+/// score, log loss, class counts, and the training-majority baseline
+/// accuracy of each fold, computed from that fold's held-out rows.
+/// `baseline_correct` is parallel to `predictions` (see
+/// `WalkForwardDetail`).
+fn per_fold_metrics(
+    folds: &[FoldModel],
+    predictions: &[PredictionRow],
+    baseline_correct: &[f64],
+) -> Vec<FoldMetrics> {
+    let mut acc = vec![0.0f64; folds.len()];
+    let mut base = vec![0.0f64; folds.len()];
+    let mut brier = vec![0.0f64; folds.len()];
+    let mut ll = vec![0.0f64; folds.len()];
+    let mut n = vec![0usize; folds.len()];
+    let mut n_pos = vec![0usize; folds.len()];
+    for (r, b) in predictions.iter().zip(baseline_correct.iter()) {
+        if r.fold >= folds.len() {
+            continue;
+        }
+        let i = r.fold;
+        n[i] += 1;
+        n_pos[i] += usize::from(r.target == 1);
+        acc[i] += f64::from(u8::from(r.proba > 0.5) == r.target);
+        base[i] += b;
+        brier[i] += (r.proba - f64::from(r.target)).powi(2);
+        let p = r.proba.clamp(1e-15, 1.0 - 1e-15);
+        ll[i] += if r.target == 1 {
+            -p.ln()
+        } else {
+            -(1.0 - p).ln()
+        };
+    }
+    folds
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let d = n[i].max(1) as f64;
+            let div = |x: f64| if n[i] == 0 { f64::NAN } else { x / d };
+            FoldMetrics {
+                fold: i,
+                n_test: n[i],
+                n_pos: n_pos[i],
+                n_neg: n[i] - n_pos[i],
+                accuracy: div(acc[i]),
+                baseline_accuracy: div(base[i]),
+                brier: div(brier[i]),
+                log_loss: div(ll[i]),
+            }
+        })
+        .collect()
+}
+
+// ---- E4: historical protocol reproduction ----------------------
+//
+// The pre-E4 protocol reported different numbers from the same
+// evaluation: the headline baseline was the test-outcome majority
+// rate, `accuracy_std` was the per-row Bernoulli dispersion, and
+// the calibration table was built by fixed chunks. Those numbers
+// are reproduced here from the same detail so a reproduction can
+// reprint both protocols side by side, but they are never
+// comparable to the repaired numbers: `comparable_to_repaired` is
+// always false, and `reproduction_summary` says so in plain text.
+
+/// Metrics under the pre-E4 protocol, recomputed from the same
+/// evaluation detail.
+#[derive(Debug, Clone)]
+pub struct HistoricalMetrics {
+    pub protocol: &'static str,
+    pub comparable_to_repaired: bool,
+    /// The historical headline baseline: the test-outcome majority
+    /// rate. Descriptive only, never the bar the model had to beat.
+    pub baseline: f64,
+    /// The historical `accuracy_std`: per-row dispersion, exactly
+    /// sqrt(accuracy * (1 - accuracy)).
+    pub accuracy_std: f64,
+    /// The historical calibration table (fixed-chunk partition).
+    pub calibration: Vec<(f64, f64, usize)>,
+}
+
+/// The pre-E4 calibration partition: fixed chunks of `n / 10` rows,
+/// which leaves an eleventh nearly-empty bin whenever `n` is not a
+/// multiple of 10. Kept only so a reproduction can reprint the
+/// historical table next to the repaired one.
+fn historical_calibration_bins(predictions: &[PredictionRow]) -> Vec<(f64, f64, usize)> {
+    let n = predictions.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let chunk = (n / 10).max(1);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| {
+        predictions[i]
+            .proba
+            .partial_cmp(&predictions[j].proba)
+            .unwrap()
+    });
+    let mut out = Vec::new();
+    for c in order.chunks(chunk) {
+        let mp = c.iter().map(|&i| predictions[i].proba).sum::<f64>() / c.len() as f64;
+        let rl = c
+            .iter()
+            .map(|&i| f64::from(predictions[i].target))
+            .sum::<f64>()
+            / c.len() as f64;
+        out.push((mp, rl, c.len()));
+    }
+    out
+}
+
+/// Recompute the historical protocol metrics from a detailed
+/// evaluation.
+pub fn historical_metrics(detail: &WalkForwardDetail) -> HistoricalMetrics {
+    HistoricalMetrics {
+        protocol: "historical-pre-e4",
+        comparable_to_repaired: false,
+        baseline: detail.report.test_majority_rate,
+        accuracy_std: detail.report.accuracy_std_rows,
+        calibration: historical_calibration_bins(&detail.predictions),
+    }
+}
+
+/// Reprint the historical and the repaired metrics from one
+/// evaluation, side by side, with the protocols flagged
+/// incomparable. Both blocks name their denominators; the
+/// historical block is a record of what the old protocol reported,
+/// not a number the repaired block can be judged against.
+pub fn reproduction_summary(detail: &WalkForwardDetail) -> String {
+    let hist = historical_metrics(detail);
+    let rep = &detail.report;
+    let mut s = String::new();
+    s.push_str("reproduction: historical and repaired metrics\n");
+    s.push_str(
+        "INCOMPARABLE PROTOCOL: the historical block and the repaired block measure \
+         different things; do not compare them as before/after values of one metric.\n",
+    );
+    s.push_str(&format!(
+        "historical (protocol {}): baseline {:.4} (test-outcome majority rate, {} held-out \
+         predictions), accuracy_std {:.4} (per-row dispersion), calibration bins {}\n",
+        hist.protocol,
+        hist.baseline,
+        rep.n_oos,
+        hist.accuracy_std,
+        hist.calibration.len()
+    ));
+    s.push_str(&format!(
+        "repaired (protocol e4): accuracy {:.4} vs trained-majority baseline {:.4}, \
+         accuracy_std {:.4} (SD of {} per-fold accuracies), SE {:.4}, brier {:.4}, log loss {:.4}, \
+         {} labeled rows, {} held-out predictions ({} positive / {} negative), {} rows never \
+         scored, calibration bins {}\n",
+        rep.accuracy,
+        rep.baseline,
+        rep.accuracy_std,
+        rep.per_fold.len(),
+        rep.accuracy_se_folds,
+        rep.brier,
+        rep.log_loss,
+        rep.n_labeled,
+        rep.n_oos,
+        rep.n_pos_oos,
+        rep.n_neg_oos,
+        rep.n_unscored,
+        rep.calibration.len()
+    ));
+    s
 }
 
 /// SplitMix64: a tiny deterministic PRNG for bootstrap resampling,
@@ -1999,13 +2407,24 @@ mod tests {
         }
         let recomputed = correct as f64 / detail.predictions.len() as f64;
         assert!((recomputed - rep.baseline).abs() < 1e-12);
-        // accuracy_std is the population SD of the 0/1 correctness
-        // values, which for Bernoulli outcomes is sqrt(acc*(1-acc))
-        // exactly. It is dispersion of the rows, not an interval.
-        let expect_std = (rep.accuracy * (1.0 - rep.accuracy)).sqrt();
+        // accuracy_std is inter-fold variability now (E4): the
+        // population SD of the per-fold accuracies. The historical
+        // per-row value survives separately as accuracy_std_rows,
+        // which for Bernoulli outcomes is sqrt(acc*(1-acc)) exactly.
+        // It is dispersion of the rows, not an interval.
+        let expect_rows = (rep.accuracy * (1.0 - rep.accuracy)).sqrt();
         assert!(
-            (rep.accuracy_std - expect_std).abs() < 1e-12,
-            "accuracy_std {} vs bernoulli sd {expect_std}",
+            (rep.accuracy_std_rows - expect_rows).abs() < 1e-12,
+            "accuracy_std_rows {} vs bernoulli sd {expect_rows}",
+            rep.accuracy_std_rows
+        );
+        let accs: Vec<f64> = rep.per_fold.iter().map(|f| f.accuracy).collect();
+        let m = accs.iter().sum::<f64>() / accs.len() as f64;
+        let expect_folds =
+            (accs.iter().map(|a| (a - m).powi(2)).sum::<f64>() / accs.len() as f64).sqrt();
+        assert!(
+            (rep.accuracy_std - expect_folds).abs() < 1e-12,
+            "accuracy_std {} vs fold sd {expect_folds}",
             rep.accuracy_std
         );
         // The uncertainty interval is a separate object: ordered,
@@ -2264,5 +2683,382 @@ mod tests {
         let sizes: Vec<usize> = cal.iter().map(|c| c.2).collect();
         assert_eq!(sizes, vec![83, 83, 83, 83, 84, 83, 83, 83, 83, 84]);
         assert_eq!(sizes.iter().sum::<usize>(), 832);
+    }
+
+    // ======================= E4 fixtures =======================
+    // Stage 3 E4: repair out-of-sample statistics. The historical
+    // protocol reported a test-outcome majority baseline (fixed by
+    // TF6), a per-row accuracy_std, chunk-based calibration bins
+    // (fixed by the rank-bin change), and an unexplained n_bars.
+    // These fixtures pin the repaired statistics: fold-level
+    // variability, explicit labeled/held-out counts, per-fold Brier
+    // and log loss, and a reproduction that reprints both protocols
+    // flagged incomparable.
+
+    /// The 1040-bar fixture from the calibration test: 4 splits,
+    /// horizon 2, exactly 832 held-out predictions.
+    fn e4_832_bars() -> Vec<Bar> {
+        (0..1040)
+            .map(|i| Bar {
+                time_ms: i as i64 * 10_000,
+                ofi: ((i * 37 % 101) as f64 - 50.0) / 25.0,
+                ofi_z: ((i * 53 % 89) as f64 - 44.0) / 22.0,
+                imbalance: ((i * 29 % 41) as f64 - 20.0) / 20.0,
+                spread_z: 0.0,
+                spread_degenerate: false,
+                signed_vol: ((i * 17 % 31) as f64 - 15.0) / 15.0,
+                target: u8::from((i * 37 % 101) + (i * 11 % 7) > 55),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stage3_toxicflow_4_log_loss_known_answers() {
+        // (1, 0.5) and (0, 0.5) each cost ln 2; (1, 0.9) and
+        // (0, 0.1) each cost -ln 0.9. Mean over the four rows:
+        // (2 ln 2 - 2 ln 0.9) / 4 = 0.3992538481088858.
+        let rows = vec![
+            tf6_row(1, 0.5),
+            tf6_row(0, 0.5),
+            tf6_row(1, 0.9),
+            tf6_row(0, 0.1),
+        ];
+        let ll = log_loss(&rows);
+        assert!(
+            (ll - 0.399_253_848_108_885_8).abs() < 1e-12,
+            "log loss {ll}"
+        );
+        // A certain correct prediction costs ~0 (clamped, never -inf).
+        assert!(log_loss(&[tf6_row(1, 1.0)]) < 1e-12);
+        assert!(log_loss(&[tf6_row(0, 0.0)]) < 1e-12);
+        // No rows, no defined loss: NaN, never a fabricated 0.
+        assert!(log_loss(&[]).is_nan());
+    }
+
+    #[test]
+    fn stage3_toxicflow_4_per_fold_metrics_and_explicit_counts() {
+        // Skewed fixture: 200 labeled rows, 4 folds of 40 held-out
+        // rows each (160 scored, 40 never scored). Held-out class
+        // counts per fold are 36/4, 20/20, 4/36, 4/36 positives, so
+        // the pooled held-out classes are 64 positive / 96 negative
+        // and every fold's training majority is 1, giving per-fold
+        // baseline accuracies 0.9, 0.5, 0.1, 0.1 and pooled 0.4.
+        let bars = tf6_skewed_bars();
+        let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        let rep = &detail.report;
+        assert_eq!(rep.n_labeled, 200);
+        assert_eq!(rep.n_bars, 200);
+        assert_eq!(rep.n_oos, 160);
+        assert_eq!(rep.n_unscored, 40);
+        assert_eq!(rep.n_oos + rep.n_unscored, rep.n_labeled);
+        assert_eq!(rep.n_pos_oos, 64);
+        assert_eq!(rep.n_neg_oos, 96);
+        assert_eq!(rep.n_pos_oos + rep.n_neg_oos, rep.n_oos);
+
+        assert_eq!(rep.per_fold.len(), 4);
+        let pos = [36usize, 20, 4, 4];
+        let base = [0.9f64, 0.5, 0.1, 0.1];
+        for (i, fm) in rep.per_fold.iter().enumerate() {
+            assert_eq!(fm.fold, i);
+            assert_eq!(fm.n_test, 40, "fold {i} n_test");
+            assert_eq!(fm.n_pos, pos[i], "fold {i} n_pos");
+            assert_eq!(fm.n_neg, 40 - pos[i], "fold {i} n_neg");
+            assert!(
+                (fm.baseline_accuracy - base[i]).abs() < 1e-12,
+                "fold {i} baseline {}",
+                fm.baseline_accuracy
+            );
+            // Per-fold Brier and log loss recomputed from the ledger
+            // rows of that fold must match the stored fold metrics.
+            let rows: Vec<&PredictionRow> =
+                detail.predictions.iter().filter(|r| r.fold == i).collect();
+            let brier: f64 = rows
+                .iter()
+                .map(|r| (r.proba - f64::from(r.target)).powi(2))
+                .sum::<f64>()
+                / rows.len() as f64;
+            assert!(
+                (fm.brier - brier).abs() < 1e-12,
+                "fold {i} brier {} vs {brier}",
+                fm.brier
+            );
+            let owned: Vec<PredictionRow> = rows.iter().map(|r| (*r).clone()).collect();
+            assert!(
+                (fm.log_loss - log_loss(&owned)).abs() < 1e-12,
+                "fold {i} log loss {}",
+                fm.log_loss
+            );
+        }
+        assert_eq!(
+            rep.per_fold.iter().map(|f| f.n_test).sum::<usize>(),
+            rep.n_oos
+        );
+        assert_eq!(
+            rep.per_fold.iter().map(|f| f.n_pos).sum::<usize>(),
+            rep.n_pos_oos
+        );
+
+        // accuracy_std is inter-fold variability now: the population
+        // SD of the four per-fold accuracies, recomputed here from
+        // the stored fold table. The historical per-row value
+        // survives separately as accuracy_std_rows.
+        let accs: Vec<f64> = rep.per_fold.iter().map(|f| f.accuracy).collect();
+        let m = accs.iter().sum::<f64>() / accs.len() as f64;
+        let fold_sd =
+            (accs.iter().map(|a| (a - m).powi(2)).sum::<f64>() / accs.len() as f64).sqrt();
+        assert!(
+            (rep.accuracy_std - fold_sd).abs() < 1e-12,
+            "accuracy_std {} vs fold sd {fold_sd}",
+            rep.accuracy_std
+        );
+        assert!(
+            (rep.accuracy_se_folds - fold_sd / 2.0).abs() < 1e-12,
+            "fold SE {}",
+            rep.accuracy_se_folds
+        );
+        let expect_rows = (rep.accuracy * (1.0 - rep.accuracy)).sqrt();
+        assert!(
+            (rep.accuracy_std_rows - expect_rows).abs() < 1e-12,
+            "accuracy_std_rows {} vs {expect_rows}",
+            rep.accuracy_std_rows
+        );
+        // Pooled log loss matches the ledger recomputation.
+        assert!(
+            (rep.log_loss - log_loss(&detail.predictions)).abs() < 1e-12,
+            "pooled log loss {}",
+            rep.log_loss
+        );
+    }
+
+    #[test]
+    fn stage3_toxicflow_4_future_label_change_leaves_earlier_baseline() {
+        // Flip every label at index 80 or later. Folds 0 and 1
+        // train only on rows below index 78, so their committed
+        // training-majority labels and their fitted probabilities
+        // must be bit-identical; a later label cannot reach back
+        // into an earlier fold's baseline.
+        let bars = tf6_skewed_bars();
+        let before = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        let mut changed = bars.clone();
+        for b in changed.iter_mut().skip(80) {
+            b.target ^= 1;
+        }
+        let after = walk_forward_detailed(&changed, 4, 2).expect("detailed eval");
+        for k in 0..2usize {
+            assert_eq!(
+                after.folds[k].train_majority_label, before.folds[k].train_majority_label,
+                "fold {k} baseline label moved after a future label change"
+            );
+            let p0: Vec<&PredictionRow> =
+                before.predictions.iter().filter(|r| r.fold == k).collect();
+            let p1: Vec<&PredictionRow> =
+                after.predictions.iter().filter(|r| r.fold == k).collect();
+            assert_eq!(p0.len(), p1.len(), "fold {k} prediction count moved");
+            for (a, b) in p0.iter().zip(p1.iter()) {
+                assert_eq!(a.row, b.row);
+                assert_eq!(
+                    a.proba.to_bits(),
+                    b.proba.to_bits(),
+                    "fold {k} row {} proba moved after a future label change",
+                    a.row
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_4_training_label_horizon_never_overlaps_test() {
+        // For every fold, the last training row's forward target
+        // window (horizon bars) must end strictly before the test
+        // block starts: (train_end - 1) + horizon < test_start.
+        for (bars, horizon) in [(tf6_skewed_bars(), 2usize), (e4_832_bars(), 2usize)] {
+            let detail = walk_forward_detailed(&bars, 4, horizon).expect("detailed eval");
+            for f in &detail.folds {
+                assert_eq!(
+                    f.test_start,
+                    f.train_end + f.purge_bars,
+                    "fold {} test block must start exactly purge bars after the cutoff",
+                    f.fold
+                );
+                assert!(
+                    f.purge_bars >= horizon,
+                    "fold {} purge {} shorter than horizon {horizon}",
+                    f.fold,
+                    f.purge_bars
+                );
+                assert!(
+                    f.train_end - 1 + horizon < f.test_start,
+                    "fold {}: last training row {} target window ends at {} but test starts at {}",
+                    f.fold,
+                    f.train_end - 1,
+                    f.train_end - 1 + horizon,
+                    f.test_start
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_4_oos_predictions_have_unique_fold_time_keys() {
+        for bars in [tf6_skewed_bars(), e4_832_bars()] {
+            let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+            let mut keys: Vec<(usize, i64)> = detail
+                .predictions
+                .iter()
+                .map(|r| (r.fold, r.time_ms))
+                .collect();
+            keys.sort_unstable();
+            assert!(
+                keys.windows(2).all(|w| w[0] != w[1]),
+                "duplicate (fold, time) key in held-out predictions"
+            );
+            let mut rows: Vec<(usize, usize)> =
+                detail.predictions.iter().map(|r| (r.fold, r.row)).collect();
+            rows.sort_unstable();
+            assert!(
+                rows.windows(2).all(|w| w[0] != w[1]),
+                "duplicate (fold, row) key in held-out predictions"
+            );
+            // Every held-out row lies inside its own fold's test
+            // block, never in a training range.
+            for r in &detail.predictions {
+                let f = &detail.folds[r.fold];
+                assert!(
+                    r.row >= f.test_start && r.row < f.test_end,
+                    "row {} outside fold {} test range",
+                    r.row,
+                    r.fold
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_4_calibration_bins_conserve_oos_predictions() {
+        for bars in [tf6_skewed_bars(), e4_832_bars()] {
+            let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+            let cal = &detail.report.calibration;
+            assert!(cal.len() <= 10, "{} bins, expected at most 10", cal.len());
+            assert!(!cal.is_empty());
+            let total: usize = cal.iter().map(|c| c.2).sum();
+            assert_eq!(
+                total, detail.report.n_oos,
+                "bin counts sum to {total}, held-out predictions are {}",
+                detail.report.n_oos
+            );
+            let (lo, hi) = (
+                cal.iter().map(|c| c.2).min().unwrap(),
+                cal.iter().map(|c| c.2).max().unwrap(),
+            );
+            assert!(
+                hi - lo <= 1,
+                "approximately equal-count bins differ by more than one row: {lo}..{hi}"
+            );
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_4_historical_and_repaired_metrics_reprinted() {
+        // Skewed fixture: the historical protocol's headline baseline
+        // is the test-outcome majority rate 0.6 while the repaired
+        // training-majority baseline is 0.4. The two numbers come
+        // from different protocols and must never be compared as if
+        // one replaced the other.
+        let bars = tf6_skewed_bars();
+        let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        let hist = historical_metrics(&detail);
+        assert_eq!(hist.protocol, "historical-pre-e4");
+        assert!(!hist.comparable_to_repaired);
+        assert!(
+            (hist.baseline - 0.6).abs() < 1e-12,
+            "historical baseline {}",
+            hist.baseline
+        );
+        assert!(
+            (detail.report.baseline - 0.4).abs() < 1e-12,
+            "repaired baseline {}",
+            detail.report.baseline
+        );
+        assert!(
+            (hist.accuracy_std - detail.report.accuracy_std_rows).abs() < 1e-12,
+            "historical accuracy_std must equal the kept per-row value"
+        );
+        let summary = reproduction_summary(&detail);
+        assert!(
+            summary.contains("INCOMPARABLE"),
+            "reproduction must flag the protocols incomparable:\n{summary}"
+        );
+        assert!(summary.contains("historical"), "summary:\n{summary}");
+        assert!(summary.contains("repaired"), "summary:\n{summary}");
+        assert!(summary.contains("0.6000"), "summary:\n{summary}");
+        assert!(summary.contains("0.4000"), "summary:\n{summary}");
+
+        // 832 held-out predictions: the historical chunk partition
+        // made 11 bins (ten of 83 plus a 2-row remainder) while the
+        // repaired rank partition makes exactly 10.
+        let detail = walk_forward_detailed(&e4_832_bars(), 4, 2).expect("detailed eval");
+        let hist = historical_metrics(&detail);
+        assert_eq!(hist.calibration.len(), 11);
+        let sizes: Vec<usize> = hist.calibration.iter().map(|c| c.2).collect();
+        assert_eq!(
+            sizes,
+            vec![83, 83, 83, 83, 83, 83, 83, 83, 83, 83, 2],
+            "historical bin sizes {sizes:?}"
+        );
+        assert_eq!(sizes.iter().sum::<usize>(), 832);
+        assert_eq!(detail.report.calibration.len(), 10);
+        assert_eq!(
+            detail.report.calibration.iter().map(|c| c.2).sum::<usize>(),
+            832
+        );
+    }
+
+    #[test]
+    fn stage3_toxicflow_4_ledger_verifier_checks_per_fold_and_bins() {
+        let bars = tf6_skewed_bars();
+        let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
+        let models = build_fold_models_file(&detail, 10_000, 1_700_000_000_000);
+        assert_eq!(models.report.per_fold.len(), 4);
+        assert_eq!(models.report.n_oos, 160);
+        assert_eq!(models.report.n_labeled, 200);
+        assert_eq!(models.n_oos, detail.predictions.len());
+        let json = models.to_json();
+        let csv = predictions_csv(&detail.predictions);
+        let loaded_models = load_fold_models(&json).expect("load fold models");
+        let loaded_rows = load_predictions(&csv).expect("load predictions");
+        verify_prediction_ledger(&loaded_models, &loaded_rows).expect("valid ledger");
+
+        // A tampered per-fold Brier score must fail verification.
+        let mut bad = loaded_models.clone();
+        bad.report.per_fold[0].brier += 0.01;
+        assert!(
+            verify_prediction_ledger(&bad, &loaded_rows).is_err(),
+            "tampered per-fold brier went undetected"
+        );
+
+        // A tampered per-fold log loss must fail verification.
+        let mut bad = loaded_models.clone();
+        bad.report.per_fold[1].log_loss += 0.01;
+        assert!(
+            verify_prediction_ledger(&bad, &loaded_rows).is_err(),
+            "tampered per-fold log loss went undetected"
+        );
+
+        // A duplicated (fold, time) key must fail verification.
+        let mut dup = loaded_rows.clone();
+        dup[1].time_ms = dup[0].time_ms;
+        assert!(
+            verify_prediction_ledger(&loaded_models, &dup).is_err(),
+            "duplicated (fold, time) key went undetected"
+        );
+
+        // A calibration table whose bins do not sum to the held-out
+        // denominator must fail verification.
+        let mut bad = loaded_models.clone();
+        bad.report.calibration = vec![(0.5, 0.5, 1)];
+        assert!(
+            verify_prediction_ledger(&bad, &loaded_rows).is_err(),
+            "calibration bins not summing to n_oos went undetected"
+        );
     }
 }

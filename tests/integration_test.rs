@@ -99,6 +99,24 @@ fn full_pipeline_toxic_second_half() {
     assert!((0.3..=1.0).contains(&rep.accuracy));
     assert!((0.0..=1.0).contains(&rep.baseline));
     assert!(!rep.calibration.is_empty());
+    // E4: explicit denominators. The labeled total splits exactly
+    // into held-out predictions scored and rows never scored, the
+    // per-fold test counts sum to the held-out denominator, and the
+    // calibration bins conserve the held-out predictions in at
+    // most 10 bins.
+    assert_eq!(rep.n_labeled, ds.len());
+    assert_eq!(rep.n_oos + rep.n_unscored, rep.n_labeled);
+    assert_eq!(rep.n_pos_oos + rep.n_neg_oos, rep.n_oos);
+    assert_eq!(
+        rep.per_fold.iter().map(|f| f.n_test).sum::<usize>(),
+        rep.n_oos
+    );
+    assert_eq!(
+        rep.calibration.iter().map(|c| c.2).sum::<usize>(),
+        rep.n_oos
+    );
+    assert!(rep.calibration.len() <= 10);
+    assert!(rep.log_loss.is_finite() && rep.log_loss >= 0.0);
 
     // gated MM avoids the toxic half
     let cfg = strategy::MmConfig {

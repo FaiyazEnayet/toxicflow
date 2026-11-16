@@ -275,11 +275,31 @@ fn analyze(
     let ds = predict::build_dataset(&quotes, &trades, 10_000, 3);
     match predict::walk_forward(&ds, 4, 3) {
         Some(rep) => {
+            // E4: the headline spread is inter-fold variability, not
+            // a per-row dispersion printed as if it were an
+            // interval; every rate names its denominator.
             println!(
-                "  accuracy {:.3} +- {:.3} vs baseline {:.3} ({} bars, {} folds)",
-                rep.accuracy, rep.accuracy_std, rep.baseline, rep.n_bars, rep.n_folds
+                "  accuracy {:.3} (fold SD {:.3}, SE {:.3}; block-bootstrap 95% CI [{:.3}, {:.3}]) vs trained-majority baseline {:.3} ({} labeled rows, {} held-out predictions, {} folds)",
+                rep.accuracy,
+                rep.accuracy_std,
+                rep.accuracy_se_folds,
+                rep.accuracy_ci.0,
+                rep.accuracy_ci.1,
+                rep.baseline,
+                rep.n_labeled,
+                rep.n_oos,
+                rep.n_folds
             );
-            println!("  brier {:.4}", rep.brier);
+            println!(
+                "  brier {:.4}, log loss {:.4} | held-out classes: {} positive / {} negative of {} | {} rows never scored",
+                rep.brier, rep.log_loss, rep.n_pos_oos, rep.n_neg_oos, rep.n_oos, rep.n_unscored
+            );
+            for f in &rep.per_fold {
+                println!(
+                    "    fold {}: accuracy {:.3} vs baseline {:.3}, brier {:.4}, log loss {:.4} (n={})",
+                    f.fold, f.accuracy, f.baseline_accuracy, f.brier, f.log_loss, f.n_test
+                );
+            }
             println!("  calibration (pred -> realized):");
             for (mp, rl, n) in &rep.calibration {
                 println!("    {mp:.3} -> {rl:.3}  (n={n})");
@@ -636,8 +656,15 @@ fn export_session(
         "predict": rep.as_ref().map(|r| serde_json::json!({
             "feature_version": r.feature_version,
             "accuracy": r.accuracy, "accuracy_std": r.accuracy_std,
+            "accuracy_std_rows": r.accuracy_std_rows,
+            "accuracy_se_folds": r.accuracy_se_folds,
             "baseline": r.baseline, "n_bars": r.n_bars,
+            "n_labeled": r.n_labeled, "n_oos": r.n_oos,
+            "n_pos_oos": r.n_pos_oos, "n_neg_oos": r.n_neg_oos,
+            "n_unscored": r.n_unscored,
             "n_folds": r.n_folds, "brier": r.brier,
+            "log_loss": r.log_loss,
+            "per_fold": r.per_fold,
         })).unwrap_or(serde_json::Value::Null),
         "mm": mm.as_ref().map(|r| serde_json::json!({
             "pnl_open": r.pnl_open, "pnl_gated": r.pnl_gated,
