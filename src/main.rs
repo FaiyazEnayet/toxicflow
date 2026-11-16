@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::Message;
 use toxicflow::metrics::{
     kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, LiveVpin, Quote, Trade,
 };
-use toxicflow::{predict, recorder, speed, storage, strategy};
+use toxicflow::{evidence, predict, recorder, speed, storage, strategy};
 
 #[derive(Parser)]
 #[command(name = "toxicflow", about = "Order-flow toxicity on free crypto data")]
@@ -44,6 +44,49 @@ enum Cmd {
     /// fixture in JSON-lines form, so the existing export command can
     /// regenerate the report offline from raw recorded events.
     JournalToSession { journal: String, out: String },
+    /// Build a versioned evidence manifest for a rebuilt session and
+    /// its export: capture interval and chunk edges, endpoints,
+    /// software SHA, input hashes, resync and gap accounting,
+    /// parameter and label definitions, output hashes, and the
+    /// dependency lock hash.
+    Evidence {
+        /// Fixture journal the session was rebuilt from.
+        #[arg(long)]
+        journal: String,
+        /// Rebuilt session directory.
+        #[arg(long)]
+        session: String,
+        /// Export directory.
+        #[arg(long)]
+        export: String,
+        /// Experiment id for the manifest.
+        #[arg(long)]
+        experiment_id: String,
+        /// Where to write the manifest JSON.
+        #[arg(long)]
+        out: String,
+        /// Source session directory name, e.g. session-20261108-160454-utc.
+        #[arg(long)]
+        source_session: String,
+        /// Source session id from the journal, e.g. btcusdt-1794153894158.
+        #[arg(long)]
+        source_session_id: String,
+    },
+    /// Verify an evidence manifest against the repo and a rebuilt
+    /// session plus export: re-hashes every input and output and
+    /// re-checks the expected numbers within tolerance. Prints every
+    /// mismatch and exits non-zero when any check fails.
+    EvidenceVerify {
+        /// Evidence manifest to verify.
+        #[arg(long)]
+        manifest: String,
+        /// Rebuilt session directory.
+        #[arg(long)]
+        session: String,
+        /// Export directory.
+        #[arg(long)]
+        export: String,
+    },
     /// Terminal dashboard: rolling VPIN and book imbalance, live.
     Live {
         #[arg(long, default_value = "BTCUSDT")]
@@ -95,6 +138,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bucket_btc,
         } => export_session(&dir, &out, buckets, window, bucket_btc)?,
         Cmd::JournalToSession { journal, out } => journal_to_session(&journal, &out)?,
+        Cmd::Evidence {
+            journal,
+            session,
+            export,
+            experiment_id,
+            out,
+            source_session,
+            source_session_id,
+        } => build_evidence(
+            &journal,
+            &session,
+            &export,
+            &experiment_id,
+            &out,
+            &source_session,
+            &source_session_id,
+        )?,
+        Cmd::EvidenceVerify {
+            manifest,
+            session,
+            export,
+        } => verify_evidence(&manifest, &session, &export)?,
         Cmd::Live { symbol } => live_dashboard(&symbol).await?,
     }
     Ok(())
@@ -254,6 +319,81 @@ fn write_csv(path: &str, header: &str, rows: &[String]) -> Result<(), Box<dyn Er
 /// Export analyzer intermediates as CSV + JSON for the dashboard script.
 /// Reuses the exact same metric functions as `analyze`; it only changes
 /// the output format, not the computation.
+/// Build an evidence manifest for a rebuilt session and its export.
+fn build_evidence(
+    journal: &str,
+    session: &str,
+    export: &str,
+    experiment_id: &str,
+    out: &str,
+    source_session: &str,
+    source_session_id: &str,
+) -> Result<(), Box<dyn Error>> {
+    let repo_root = std::env::current_dir()?;
+    let repo_root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
+    let journal_path = std::fs::canonicalize(journal)
+        .map_err(|e| format!("cannot resolve journal {journal}: {e}"))?;
+    let git_sha = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repo_root)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if git_sha.len() != 40 || !git_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("cannot determine the software commit: run from a git checkout".into());
+    }
+    let rustc_version = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let manifest = evidence::build_evidence_manifest(&evidence::EvidenceBuild {
+        experiment_id: experiment_id.to_string(),
+        title: "Reproducible raw-to-report experiment from a real recorded session slice"
+            .to_string(),
+        journal: journal_path,
+        session_dir: std::path::PathBuf::from(session),
+        export_dir: std::path::PathBuf::from(export),
+        repo_root,
+        source_session: source_session.to_string(),
+        source_session_id: source_session_id.to_string(),
+        git_sha,
+        rustc_version,
+    })?;
+    if let Some(parent) = std::path::Path::new(out).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(out, serde_json::to_string_pretty(&manifest)?)?;
+    println!("evidence manifest -> {out} (experiment {experiment_id})");
+    Ok(())
+}
+
+/// Verify an evidence manifest; exit non-zero with every failure named.
+fn verify_evidence(manifest: &str, session: &str, export: &str) -> Result<(), Box<dyn Error>> {
+    let repo_root = std::env::current_dir()?;
+    let text = std::fs::read_to_string(manifest)?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    let failures = evidence::verify_manifest(
+        &value,
+        &repo_root,
+        std::path::Path::new(session),
+        std::path::Path::new(export),
+    );
+    if failures.is_empty() {
+        println!("evidence manifest verifies: {manifest}");
+        Ok(())
+    } else {
+        for f in &failures {
+            eprintln!("evidence failure: {f}");
+        }
+        Err(format!(
+            "evidence manifest failed verification with {} failure(s)",
+            failures.len()
+        )
+        .into())
+    }
+}
+
 /// Rebuild a recorded session directory from a journal fixture: replay
 /// the journal into trades and quotes and write the same parquet files
 /// a live recording writes, plus a meta file naming the journal the

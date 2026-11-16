@@ -136,6 +136,21 @@ python3 scripts/dashboard.py --data runs/tf7_dashboard_data --out runs/tf7_dashb
 
 The rebuilt session reproduces the fixture's recorded numbers: 2,975 trades, 7,263 quotes, VPIN mean 0.722, and a 60-second OFI-price response of +0.188 bps. The speed fit on this short slice does not clear the reporting bar (R² -0.165), so no tau is reported for it. Full recorded sessions stay out of the repo and ship with their own checksums.
 
+## Experiments and reproducibility
+
+Every number in this README traces to one experiment ID. `experiments/evidence/index.json` maps each README section, dashboard figure, and report file to its ID and status.
+
+| Experiment | Status | What it covers |
+| :--- | :--- | :--- |
+| `tf7-fixture` | reproducible | The 12 minute fixture slice above. `experiments/evidence/tf7-fixture.json` records the capture interval (2026-11-08 16:04:57 to 16:17:08 UTC), the market-data endpoints, the software commit and dependency lock hash, the SHA256 of every input and output, the resync and gap accounting, and the numbers a rebuild must match. `cargo run --locked -- evidence-verify --manifest experiments/evidence/tf7-fixture.json --session runs/tf7_session --export runs/tf7_dashboard_data` re-checks all of it after the three rebuild commands. |
+| `main-session-325h` | archived-not-reproducible | The main 3.25 hour session behind the evidence table, the dashboard, and the animation data. Its raw level 2 input is not in the repo. |
+| `info-speed-historical-captures` | archived-not-reproducible | The five 30 minute captures in the six-session information-speed report. Its raw level 2 input is not in the repo. |
+| `closing-btc-80h` | archived-not-reproducible | The twenty 4 hour BTCUSDT campaign sessions. Its raw level 2 input is not in the repo. |
+| `closing-eth-80h` | archived-not-reproducible | The twenty 4 hour ETHUSDT campaign sessions. Its raw level 2 input is not in the repo. |
+| `direction-confirmation`, `direction-b3-btc`, `direction-b3-eth` | archived-not-reproducible | The direction studies, which reuse the archived campaign sessions as input and inherit their status. |
+
+Archived means published as measured, not reproducible from the repo: live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of those recordings exists. `experiments/evidence/archive.json` records the reason for each archived experiment, names its sessions, and pins the retained reports by SHA256. A fresh recording of the same venue and symbol would be a new experiment, not a reproduction of an archived one.
+
 
 ## Limitations
 
