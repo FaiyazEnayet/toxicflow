@@ -1,0 +1,178 @@
+{
+ "artifacts": {
+  "Information speed": {
+   "columns": [
+    "horizon_s",
+    "response_bps",
+    "ci_lo_bps",
+    "ci_hi_bps",
+    "n_origins"
+   ],
+   "file": "speed.csv",
+   "note": "The speed array is part of the fixture export. The dashboard plots the information-speed figure only for the main session export, so the fixture report shows the eight base panels above."
+  },
+  "Kyle's lambda, rolling 60-bar OLS": {
+   "columns": [
+    "time_ms",
+    "lambda"
+   ],
+   "file": "kyle.csv"
+  },
+  "Midprice, 10s bars": {
+   "columns": [
+    "time_ms",
+    "mid"
+   ],
+   "file": "ofi.csv"
+  },
+  "OFI vs next 30s mid return": {
+   "columns": [
+    "ofi",
+    "fwd_ret_bps"
+   ],
+   "file": "ofi.csv"
+  },
+  "Predictor calibration (deciles)": {
+   "columns": [
+    "mean_pred",
+    "realized",
+    "n"
+   ],
+   "file": "calibration.csv"
+  },
+  "Session summary": {
+   "fields": [
+    "n_trades",
+    "n_quotes",
+    "span_s",
+    "volume_btc",
+    "buy_share",
+    "price_lo",
+    "price_hi",
+    "vpin.mean",
+    "vpin.max",
+    "kyle_lambda.mean",
+    "ofi.mean",
+    "ofi.std",
+    "predict.accuracy",
+    "predict.baseline"
+   ],
+   "file": "summary.json"
+  },
+  "Signed trade volume per bar": {
+   "columns": [
+    "time_ms",
+    "signed_vol"
+   ],
+   "file": "ofi.csv"
+  },
+  "Toxicity-gated market-making demo": {
+   "fields": [
+    "mm.pnl_open",
+    "mm.pnl_gated"
+   ],
+   "file": "summary.json"
+  },
+  "VPIN over time (equal-volume buckets)": {
+   "columns": [
+    "time_ms",
+    "vpin"
+   ],
+   "file": "vpin.csv"
+  }
+ },
+ "commands": [
+  "cargo run --locked -- journal-to-session experiments/tf7_fixture/journal.jsonl runs/tf7_session",
+  "cargo run --locked -- export runs/tf7_session --out runs/tf7_dashboard_data",
+  "python3 scripts/dashboard.py --data runs/tf7_dashboard_data --out runs/tf7_dashboard.html"
+ ],
+ "expected": {
+  "export_summary": {
+   "buy_share": 0.4286163810176582,
+   "gaps_n_bars": 74,
+   "gaps_n_dataset_rows": 67,
+   "kyle_lambda_mean": 3.9324976046600537,
+   "mm_pnl_gated": -0.06490059999759978,
+   "mm_pnl_open": 0.054796100003841275,
+   "n_quotes": 7263,
+   "n_trades": 2975,
+   "ofi_mean": -1.7005655405405404,
+   "ofi_std": 13.833142914657568,
+   "predict_accuracy": 0.7692307692307693,
+   "predict_baseline": 0.7692307692307693,
+   "price_hi": 76093.75,
+   "price_lo": 76032.94,
+   "span_s": 730.871,
+   "speed_fit_ok": false,
+   "speed_fit_r_squared": -0.16531741299788139,
+   "speed_response_bps_60s": 0.1877827294076455,
+   "volume_btc": 47.03383,
+   "vpin_max": 0.9580514706116856,
+   "vpin_mean": 0.721788459085419
+  }
+ },
+ "fixture": {
+  "bytes": 4126120,
+  "journal_digest": "6b7c8dae52fe46c7",
+  "n_records": 10240,
+  "name": "tf7_fixture",
+  "path": "experiments/tf7_fixture/journal.jsonl",
+  "reconstruction": {
+   "first_mid": 76093.745,
+   "first_quote": {
+    "ask_px": 76093.75,
+    "ask_sz": 10.47833,
+    "bid_px": 76093.74,
+    "bid_sz": 2.06188,
+    "time_ms": 1794153897314
+   },
+   "first_trade": {
+    "is_buyer_maker": false,
+    "price": 76093.75,
+    "qty": 0.00081,
+    "time_ms": 1794153897401
+   },
+   "last_mid": 76046.845,
+   "last_quote": {
+    "ask_px": 76046.85,
+    "ask_sz": 2.10176,
+    "bid_px": 76046.84,
+    "bid_sz": 5.52962,
+    "time_ms": 1794154628414
+   },
+   "last_trade": {
+    "is_buyer_maker": false,
+    "price": 76046.85,
+    "qty": 0.00041,
+    "time_ms": 1794154628272
+   },
+   "n_quotes": 7263,
+   "n_trades": 2975,
+   "replay_check": "This session kept only its journal, so there is no separate trades file to compare against. The replay is checked for internal consistency: sequence numbers contiguous from zero, every payload checksum valid, depth update ids chaining without a gap after the single post-snapshot baseline, trade and quote times monotonic, and no crossed quote. The same replay rule was verified against the recorded trades and quotes files of the smoke session, where it matched all 197 trades and all 313 touch quotes exactly.",
+   "rule": "Fold the journal in sequence order. A snapshot loads the book. A depth update applies to the book and emits a touch quote at the update time. A trade appends a trade. The first depth update after a snapshot is accepted as the new baseline even when its first update id is past the snapshot id, because the depth events buffered across a snapshot merge are recorded only as the snapshot boundary, not as individual journal records.",
+   "volume_btc": 47.03383
+  },
+  "record_kinds": {
+   "depth": 7263,
+   "session_start": 1,
+   "snapshot": 1,
+   "trade": 2975
+  },
+  "sha256": "43bbbdc3bfd4df09fc8d18ed7673ca36b8cbfecba59be07aa541d7cd0ac44364",
+  "source_session": "session-20261108-160454-utc",
+  "source_session_id": "btcusdt-1794153894158",
+  "symbol": "BTCUSDT",
+  "trade_span_ms": [
+   1794153897401,
+   1794154628272
+  ]
+ },
+ "large_sessions": {
+  "note": "Full recorded sessions are not in this repo. Each distributed session ships with its own SHA256 manifest and is used under the Binance market-data terms. This fixture is the only session data in the repo."
+ },
+ "notes": [
+  "All three commands run offline from a clean checkout. The dashboard step needs the Python packages the dashboard already uses (pandas, plotly); the first two commands need only the Rust toolchain.",
+  "The fixture report is the export in runs/tf7_dashboard_data plus the dashboard HTML in runs/tf7_dashboard.html. Nothing is written into docs, so the published dashboard is untouched."
+ ],
+ "schema_version": "toxicflow.raw-to-report/v1"
+}

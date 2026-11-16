@@ -90,6 +90,22 @@ impl OrderBook {
         SyncResult::Applied
     }
 
+    /// Apply a depth update that starts past the last applied id, taking
+    /// it as the new baseline. A journal replay uses this once after a
+    /// snapshot: the updates buffered across the snapshot merge are
+    /// recorded only as the snapshot boundary, so the first update after
+    /// it legitimately starts past the snapshot id.
+    pub fn apply_diff_baseline(
+        &mut self,
+        u_first: i64,
+        u_last: i64,
+        bids: &[(f64, f64)],
+        asks: &[(f64, f64)],
+    ) -> SyncResult {
+        self.last_id = u_first - 1;
+        self.apply_diff(u_first, u_last, bids, asks)
+    }
+
     pub fn best_bid(&self) -> Option<(f64, f64)> {
         self.bids
             .iter()

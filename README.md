@@ -126,6 +126,16 @@ A November 2026 recording campaign adds twenty 4-hour BTCUSDT sessions (80 hours
 
 `src/orderbook.rs` is the local book. `booksync.rs` runs the shared transactional sync state machine behind the recorder and the live dashboard. `metrics.rs` contains the estimators. `predict.rs` handles walk-forward evaluation. `speed.rs` estimates the observational OFI-price response curves (raw and innovation), their segment-bootstrap inference, the adjustment fit, and the robustness variants (gap audit, alternative prices, raw-OFI units, burst events, volume clock, pooled description, pre-shock strata, and frequency and event-time sensitivities). `strategy.rs` is the toy simulation. Dashboard inputs are exported session files, not an invented dataset.
 
+A small raw-to-report fixture lets anyone regenerate a report from recorded events without downloading a full session. `experiments/tf7_fixture/journal.jsonl` holds about 12 minutes of a real recorded BTCUSDT session (10,240 journal records: 2,975 trades and 7,263 depth updates), and `experiments/manifest.json` records its SHA256, the replay digest, the exact commands, and the mapping from each dashboard figure to the export arrays behind it. Three commands rebuild the report offline:
+
+```
+cargo run --locked -- journal-to-session experiments/tf7_fixture/journal.jsonl runs/tf7_session
+cargo run --locked -- export runs/tf7_session --out runs/tf7_dashboard_data
+python3 scripts/dashboard.py --data runs/tf7_dashboard_data --out runs/tf7_dashboard.html
+```
+
+The rebuilt session reproduces the fixture's recorded numbers: 2,975 trades, 7,263 quotes, VPIN mean 0.722, and a 60-second OFI-price response of +0.188 bps. The speed fit on this short slice does not clear the reporting bar (R² -0.165), so no tau is reported for it. Full recorded sessions stay out of the repo and ship with their own checksums.
+
 
 ## Limitations
 
