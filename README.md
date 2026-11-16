@@ -148,6 +148,7 @@ Every number in this README traces to one experiment ID. `experiments/evidence/i
 | `closing-btc-80h` | archived-not-reproducible | The twenty 4 hour BTCUSDT campaign sessions. Its raw level 2 input is not in the repo. |
 | `closing-eth-80h` | archived-not-reproducible | The twenty 4 hour ETHUSDT campaign sessions. Its raw level 2 input is not in the repo. |
 | `direction-confirmation`, `direction-b3-btc`, `direction-b3-eth` | archived-not-reproducible | The direction studies, which reuse the archived campaign sessions as input and inherit their status. |
+| `e5-robustness` | archived-not-reproducible | Robustness, negative controls and estimator sensitivity for the VPIN, lambda, and VPIN-gate parameters. The preregistered 15-configuration grid is `experiments/e5/grid.json` and the results packet is `experiments/e5/results.json`; both reuse the archived `closing-btc-80h` campaign sessions as input and inherit their status. |
 
 Archived means published as measured, not reproducible from the repo: live market-data streams cannot be re-fetched as identical bytes, and no immutable public snapshot of those recordings exists. `experiments/evidence/archive.json` records the reason for each archived experiment, names its sessions, and pins the retained reports by SHA256. A fresh recording of the same venue and symbol would be a new experiment, not a reproduction of an archived one.
 

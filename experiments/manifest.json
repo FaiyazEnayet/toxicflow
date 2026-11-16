@@ -14,7 +14,9 @@
   "Kyle's lambda, rolling 60-bar OLS": {
    "columns": [
     "time_ms",
-    "lambda"
+    "lambda",
+    "n_valid",
+    "tail_flag"
    ],
    "file": "kyle.csv"
   },
