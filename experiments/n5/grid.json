@@ -1,0 +1,27 @@
+{
+ "bar_ms": 10000,
+ "calibration_horizons_bars": [
+  1,
+  2,
+  3,
+  5,
+  10
+ ],
+ "censoring_rule": "Hazard rows are censored when no nonzero mid change is observed inside the cutoff window: the window runs past the last bar before any move, the window up to the first move touches an unobserved bar, or a complete observed window holds no move. A move observed before the last bar labels the row even when the cutoff window itself is incomplete. Censored rows are reported per reason.",
+ "cutoff_bars": 10,
+ "decision_rule": "Each decision row is fixed by information available at its bar close: the trailing 30-bar feature window must be fully observed. The waiting time runs from the decision bar to the first bar whose mid differs from the decision bar's mid, within the frozen cutoff. Up and down moves are competing events.",
+ "experiment_id": "n5-hazard-baseline",
+ "n_splits": 4,
+ "note": "Preregistered before any run. The constant-hazard baseline has no tuned parameters; each walk-forward fold fits on its train rows only with a purge of one cutoff length. No test outcome is used for parameter selection.",
+ "preregistered": "2026-11-17",
+ "schema_version": "toxicflow.n5-grid/v1",
+ "selection_rule": "No test outcome is used for parameter selection. The baseline is fit train-only in every fold; every session is reported.",
+ "test_sessions": [
+  "session-20261111-163501-utc",
+  "session-20261111-203511-utc",
+  "session-20261112-003521-utc",
+  "session-20261112-043531-utc",
+  "session-20261112-083541-utc",
+  "session-20261112-123552-utc"
+ ]
+}

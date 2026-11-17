@@ -1,0 +1,1866 @@
+{
+  "bar_ms": 10000,
+  "calibration_horizons_bars": [
+    1,
+    2,
+    3,
+    5,
+    10
+  ],
+  "censoring_rule": "Hazard rows are censored when no nonzero mid change is observed inside the cutoff window: the window runs past the last bar before any move, the window up to the first move touches an unobserved bar, or a complete observed window holds no move. A move observed before the last bar labels the row even when the cutoff window itself is incomplete. Censored rows are reported per reason.",
+  "cutoff_bars": 10,
+  "experiment_id": "n5-hazard-baseline",
+  "grid_hash": "9b89ab1460a26d56cdbbca5b43b9c775e76c8200d802d9c60278482621f2e688",
+  "n_splits": 4,
+  "notes": [
+    "The hazard target is the waiting time to the first nonzero mid change, with up and down moves as competing events. It is a separate target from P1's binary/three-class direction labels; no hazard number is compared against a direction accuracy or baseline.",
+    "Every row carries valid t_observe <= t_decision <= t_outcome, or explicit censoring with a recorded reason. No outcome window crosses a feed gap.",
+    "Calibration compares the fitted survival exp(-lambda_total * t) against a Kaplan-Meier estimate on held-out rows at each horizon."
+  ],
+  "schema_version": "toxicflow.n5-results/v1",
+  "selection_rule": "No test outcome is used for parameter selection. The constant-hazard baseline has no tuned parameters and each walk-forward fold fits on its train rows only with a purge of one cutoff length. Every session is reported.",
+  "sessions": [
+    {
+      "counts": {
+        "censored_gap": 0,
+        "censored_incomplete": 2,
+        "censored_no_move": 0,
+        "n_bars": 1441,
+        "n_censored": 2,
+        "n_decision": 1437,
+        "n_down": 753,
+        "n_events": 1435,
+        "n_up": 682
+      },
+      "input_hash": "75d50c3facc115652fb90ce4b9af1f6f6fb16acdf19e9a052856945dedf6abd7",
+      "n_quotes": 143578,
+      "n_trades": 132372,
+      "session": "session-20261111-163501-utc",
+      "walk_forward": {
+        "folds": [
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 255,
+                "n_rows": 287,
+                "observed_survival": 0.11149825783972123,
+                "predicted_survival": 0.3947391147230801
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 283,
+                "n_rows": 287,
+                "observed_survival": 0.013937282229965153,
+                "predicted_survival": 0.15581896869236025
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.061507841758685275
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.009584088469331235
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00009185475178796775
+              }
+            ],
+            "fold": 0,
+            "lambda_down_per_bar": 0.45302013422818793,
+            "lambda_total_per_bar": 0.9295302013422819,
+            "lambda_up_per_bar": 0.47651006711409394,
+            "n_test": 287,
+            "n_train": 277,
+            "purge_bars": 10,
+            "test_end": 574,
+            "test_loglik": -520.3623528868171,
+            "test_mean_loglik": -1.8131092435080736,
+            "test_start": 287,
+            "train_censored": 0,
+            "train_end": 277,
+            "train_events_down": 135,
+            "train_events_up": 142,
+            "train_time_at_risk_bars": 298.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 220,
+                "n_rows": 287,
+                "observed_survival": 0.23344947735191635,
+                "predicted_survival": 0.40147044521619457
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 264,
+                "n_rows": 287,
+                "observed_survival": 0.08013937282229965,
+                "predicted_survival": 0.16117851838209185
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 279,
+                "n_rows": 287,
+                "observed_survival": 0.02787456445993031,
+                "predicted_survival": 0.06470841153414499
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 285,
+                "n_rows": 287,
+                "observed_survival": 0.006968641114982578,
+                "predicted_survival": 0.01042960589793208
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00010877667918618076
+              }
+            ],
+            "fold": 1,
+            "lambda_down_per_bar": 0.4563106796116505,
+            "lambda_total_per_bar": 0.912621359223301,
+            "lambda_up_per_bar": 0.4563106796116505,
+            "n_test": 287,
+            "n_train": 564,
+            "purge_bars": 10,
+            "test_end": 861,
+            "test_loglik": -582.0098093874268,
+            "test_mean_loglik": -2.027908743510198,
+            "test_start": 574,
+            "train_censored": 0,
+            "train_end": 564,
+            "train_events_down": 282,
+            "train_events_up": 282,
+            "train_time_at_risk_bars": 618.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 235,
+                "n_rows": 287,
+                "observed_survival": 0.181184668989547,
+                "predicted_survival": 0.42952110117548226
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 277,
+                "n_rows": 287,
+                "observed_survival": 0.03484320557491288,
+                "predicted_survival": 0.18448837635499923
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 284,
+                "n_rows": 287,
+                "observed_survival": 0.010452961672473867,
+                "predicted_survival": 0.07924165056607652
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.01461916345262579
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0002137199400545895
+              }
+            ],
+            "fold": 2,
+            "lambda_down_per_bar": 0.4339622641509434,
+            "lambda_total_per_bar": 0.8450844091360477,
+            "lambda_up_per_bar": 0.41112214498510424,
+            "n_test": 287,
+            "n_train": 851,
+            "purge_bars": 10,
+            "test_end": 1148,
+            "test_loglik": -544.3557261051668,
+            "test_mean_loglik": -1.8967098470563304,
+            "test_start": 861,
+            "train_censored": 0,
+            "train_end": 851,
+            "train_events_down": 437,
+            "train_events_up": 414,
+            "train_time_at_risk_bars": 1007.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 228,
+                "n_rows": 287,
+                "observed_survival": 0.20557491289198604,
+                "predicted_survival": 0.4333758603325854
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 264,
+                "n_rows": 287,
+                "observed_survival": 0.08013937282229963,
+                "predicted_survival": 0.18781463631900566
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 278,
+                "n_rows": 287,
+                "observed_survival": 0.031358885017421595,
+                "predicted_survival": 0.08139432959780017
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 286,
+                "n_rows": 287,
+                "observed_survival": 0.003484320557491289,
+                "predicted_survival": 0.015287046411840113
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00023369378799775612
+              }
+            ],
+            "fold": 3,
+            "lambda_down_per_bar": 0.4313005143277002,
+            "lambda_total_per_bar": 0.8361498897869214,
+            "lambda_up_per_bar": 0.4048493754592212,
+            "n_test": 287,
+            "n_train": 1138,
+            "purge_bars": 10,
+            "test_end": 1435,
+            "test_loglik": -568.9263717460104,
+            "test_mean_loglik": -1.9823218527735555,
+            "test_start": 1148,
+            "train_censored": 0,
+            "train_end": 1138,
+            "train_events_down": 587,
+            "train_events_up": 551,
+            "train_time_at_risk_bars": 1361.0
+          }
+        ],
+        "n_rows": 1437,
+        "n_test": 1148,
+        "pooled_calibration": [
+          {
+            "horizon_bars": 1,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 938,
+            "n_rows": 1148,
+            "observed_survival": 0.18292682926829273,
+            "predicted_survival": 0.4147766303618476
+          },
+          {
+            "horizon_bars": 2,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1088,
+            "n_rows": 1148,
+            "observed_survival": 0.05226480836236935,
+            "predicted_survival": 0.1723251249371186
+          },
+          {
+            "horizon_bars": 3,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1128,
+            "n_rows": 1148,
+            "observed_survival": 0.017421602787456452,
+            "predicted_survival": 0.07171305836417641
+          },
+          {
+            "horizon_bars": 5,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1145,
+            "n_rows": 1148,
+            "observed_survival": 0.002613240418118468,
+            "predicted_survival": 0.012479976057932276
+          },
+          {
+            "horizon_bars": 10,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1148,
+            "n_rows": 1148,
+            "observed_survival": 0.0,
+            "predicted_survival": 0.0001620112897566235
+          }
+        ],
+        "pooled_loglik": -2215.654260125421,
+        "pooled_mean_loglik": -1.9300124217120391
+      }
+    },
+    {
+      "counts": {
+        "censored_gap": 0,
+        "censored_incomplete": 2,
+        "censored_no_move": 0,
+        "n_bars": 1441,
+        "n_censored": 2,
+        "n_decision": 1437,
+        "n_down": 743,
+        "n_events": 1435,
+        "n_up": 692
+      },
+      "input_hash": "39d68869d9af74095ba9800da4b384cac0cff988de6dbbdd20dcda23ab0288c5",
+      "n_quotes": 143414,
+      "n_trades": 119384,
+      "session": "session-20261111-203511-utc",
+      "walk_forward": {
+        "folds": [
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 213,
+                "n_rows": 287,
+                "observed_survival": 0.2578397212543554,
+                "predicted_survival": 0.4701194853819722
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 268,
+                "n_rows": 287,
+                "observed_survival": 0.0662020905923345,
+                "predicted_survival": 0.22101233053580846
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 281,
+                "n_rows": 287,
+                "observed_survival": 0.020905923344947737,
+                "predicted_survival": 0.10390220309456576
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.02296366805373485
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0005273300504821224
+              }
+            ],
+            "fold": 0,
+            "lambda_down_per_bar": 0.3896457765667575,
+            "lambda_total_per_bar": 0.7547683923705721,
+            "lambda_up_per_bar": 0.3651226158038147,
+            "n_test": 287,
+            "n_train": 277,
+            "purge_bars": 10,
+            "test_end": 574,
+            "test_loglik": -571.2434517855743,
+            "test_mean_loglik": -1.9903953023887606,
+            "test_start": 287,
+            "train_censored": 0,
+            "train_end": 277,
+            "train_events_down": 143,
+            "train_events_up": 134,
+            "train_time_at_risk_bars": 367.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 214,
+                "n_rows": 287,
+                "observed_survival": 0.25435540069686413,
+                "predicted_survival": 0.47330720935594034
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 256,
+                "n_rows": 287,
+                "observed_survival": 0.10801393728222998,
+                "predicted_survival": 0.22401971442831004
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 274,
+                "n_rows": 287,
+                "observed_survival": 0.04529616724738676,
+                "predicted_survival": 0.10603014587677943
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 282,
+                "n_rows": 287,
+                "observed_survival": 0.01742160278745645,
+                "predicted_survival": 0.02375284300010813
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0005641975505877866
+              }
+            ],
+            "fold": 1,
+            "lambda_down_per_bar": 0.3912466843501326,
+            "lambda_total_per_bar": 0.7480106100795756,
+            "lambda_up_per_bar": 0.356763925729443,
+            "n_test": 287,
+            "n_train": 564,
+            "purge_bars": 10,
+            "test_end": 861,
+            "test_loglik": -596.334628941109,
+            "test_mean_loglik": -2.077821006763446,
+            "test_start": 574,
+            "train_censored": 0,
+            "train_end": 564,
+            "train_events_down": 295,
+            "train_events_up": 269,
+            "train_time_at_risk_bars": 754.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 267,
+                "n_rows": 287,
+                "observed_survival": 0.06968641114982577,
+                "predicted_survival": 0.4843864542421111
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 282,
+                "n_rows": 287,
+                "observed_survival": 0.01742160278745644,
+                "predicted_survival": 0.23463023705324387
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 286,
+                "n_rows": 287,
+                "observed_survival": 0.0034843205574912875,
+                "predicted_survival": 0.11365170858420656
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.026666127326618272
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.000711082346599424
+              }
+            ],
+            "fold": 2,
+            "lambda_down_per_bar": 0.3901192504258944,
+            "lambda_total_per_bar": 0.7248722316865417,
+            "lambda_up_per_bar": 0.33475298126064734,
+            "n_test": 287,
+            "n_train": 851,
+            "purge_bars": 10,
+            "test_end": 1148,
+            "test_loglik": -519.0794951917549,
+            "test_mean_loglik": -1.8086393560688323,
+            "test_start": 861,
+            "train_censored": 0,
+            "train_end": 851,
+            "train_events_down": 458,
+            "train_events_up": 393,
+            "train_time_at_risk_bars": 1174.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 262,
+                "n_rows": 287,
+                "observed_survival": 0.08710801393728218,
+                "predicted_survival": 0.46591205340712427
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 281,
+                "n_rows": 287,
+                "observed_survival": 0.020905923344947723,
+                "predicted_survival": 0.21707404151004536
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 285,
+                "n_rows": 287,
+                "observed_survival": 0.006968641114982575,
+                "predicted_survival": 0.10113741242132948
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.021954306862165998
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0004819915897981539
+              }
+            ],
+            "fold": 3,
+            "lambda_down_per_bar": 0.4040268456375839,
+            "lambda_total_per_bar": 0.763758389261745,
+            "lambda_up_per_bar": 0.3597315436241611,
+            "n_test": 287,
+            "n_train": 1138,
+            "purge_bars": 10,
+            "test_end": 1435,
+            "test_loglik": -522.8016835649676,
+            "test_mean_loglik": -1.8216086535364724,
+            "test_start": 1148,
+            "train_censored": 0,
+            "train_end": 1138,
+            "train_events_down": 602,
+            "train_events_up": 536,
+            "train_time_at_risk_bars": 1490.0
+          }
+        ],
+        "n_rows": 1437,
+        "n_test": 1148,
+        "pooled_calibration": [
+          {
+            "horizon_bars": 1,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 956,
+            "n_rows": 1148,
+            "observed_survival": 0.16724738675958184,
+            "predicted_survival": 0.4734313005967829
+          },
+          {
+            "horizon_bars": 2,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1087,
+            "n_rows": 1148,
+            "observed_survival": 0.053135888501742154,
+            "predicted_survival": 0.22418408088185024
+          },
+          {
+            "horizon_bars": 3,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1126,
+            "n_rows": 1148,
+            "observed_survival": 0.019163763066202086,
+            "predicted_survival": 0.10618036749421741
+          },
+          {
+            "horizon_bars": 5,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1143,
+            "n_rows": 1148,
+            "observed_survival": 0.00435540069686411,
+            "predicted_survival": 0.02383423631065706
+          },
+          {
+            "horizon_bars": 10,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1148,
+            "n_rows": 1148,
+            "observed_survival": 0.0,
+            "predicted_survival": 0.000571150384366867
+          }
+        ],
+        "pooled_loglik": -2209.4592594834057,
+        "pooled_mean_loglik": -1.9246160796893779
+      }
+    },
+    {
+      "counts": {
+        "censored_gap": 0,
+        "censored_incomplete": 2,
+        "censored_no_move": 0,
+        "n_bars": 1441,
+        "n_censored": 2,
+        "n_decision": 1437,
+        "n_down": 754,
+        "n_events": 1435,
+        "n_up": 681
+      },
+      "input_hash": "a5edc15307ea6720adbdf6f7e428b0896ae8c06273887f89ee884f862a79d09b",
+      "n_quotes": 143535,
+      "n_trades": 102809,
+      "session": "session-20261112-003521-utc",
+      "walk_forward": {
+        "folds": [
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 261,
+                "n_rows": 287,
+                "observed_survival": 0.09059233449477355,
+                "predicted_survival": 0.41388562762664
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 285,
+                "n_rows": 287,
+                "observed_survival": 0.006968641114982577,
+                "predicted_survival": 0.17130131275589552
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0708991513432409
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.012145117698376196
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00014750388390740834
+              }
+            ],
+            "fold": 0,
+            "lambda_down_per_bar": 0.4713375796178344,
+            "lambda_total_per_bar": 0.8821656050955414,
+            "lambda_up_per_bar": 0.410828025477707,
+            "n_test": 287,
+            "n_train": 277,
+            "purge_bars": 10,
+            "test_end": 574,
+            "test_loglik": -514.0932106620265,
+            "test_mean_loglik": -1.791265542376399,
+            "test_start": 287,
+            "train_censored": 0,
+            "train_end": 277,
+            "train_events_down": 148,
+            "train_events_up": 129,
+            "train_time_at_risk_bars": 314.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 228,
+                "n_rows": 287,
+                "observed_survival": 0.20557491289198604,
+                "predicted_survival": 0.40909031248635275
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 266,
+                "n_rows": 287,
+                "observed_survival": 0.07317073170731707,
+                "predicted_survival": 0.16735488377018018
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 278,
+                "n_rows": 287,
+                "observed_survival": 0.0313588850174216,
+                "predicted_survival": 0.06846326169765997
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 283,
+                "n_rows": 287,
+                "observed_survival": 0.013937282229965157,
+                "predicted_survival": 0.01145766120393931
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0001312780002642567
+              }
+            ],
+            "fold": 1,
+            "lambda_down_per_bar": 0.45800316957210774,
+            "lambda_total_per_bar": 0.8938193343898573,
+            "lambda_up_per_bar": 0.4358161648177496,
+            "n_test": 287,
+            "n_train": 564,
+            "purge_bars": 10,
+            "test_end": 861,
+            "test_loglik": -579.951598384565,
+            "test_mean_loglik": -2.020737276601272,
+            "test_start": 574,
+            "train_censored": 0,
+            "train_end": 564,
+            "train_events_down": 289,
+            "train_events_up": 275,
+            "train_time_at_risk_bars": 631.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 230,
+                "n_rows": 287,
+                "observed_survival": 0.19860627177700352,
+                "predicted_survival": 0.4331051118385604
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 273,
+                "n_rows": 287,
+                "observed_survival": 0.04878048780487806,
+                "predicted_survival": 0.18758003790069425
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 285,
+                "n_rows": 287,
+                "observed_survival": 0.006968641114982582,
+                "predicted_survival": 0.08124187329366116
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.01523935367154835
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00023223790032653673
+              }
+            ],
+            "fold": 2,
+            "lambda_down_per_bar": 0.44051130776794495,
+            "lambda_total_per_bar": 0.8367748279252705,
+            "lambda_up_per_bar": 0.39626352015732547,
+            "n_test": 287,
+            "n_train": 851,
+            "purge_bars": 10,
+            "test_end": 1148,
+            "test_loglik": -551.5586852224326,
+            "test_mean_loglik": -1.9218072655833889,
+            "test_start": 861,
+            "train_censored": 0,
+            "train_end": 851,
+            "train_events_down": 448,
+            "train_events_up": 403,
+            "train_time_at_risk_bars": 1017.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 190,
+                "n_rows": 287,
+                "observed_survival": 0.33797909407665505,
+                "predicted_survival": 0.43786941916491195
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 253,
+                "n_rows": 287,
+                "observed_survival": 0.11846689895470383,
+                "predicted_survival": 0.19172962823981926
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 272,
+                "n_rows": 287,
+                "observed_survival": 0.05226480836236934,
+                "predicted_survival": 0.08395254095407377
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 281,
+                "n_rows": 287,
+                "observed_survival": 0.020905923344947737,
+                "predicted_survival": 0.016096189466912783
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00025908731535475286
+              }
+            ],
+            "fold": 3,
+            "lambda_down_per_bar": 0.4288824383164006,
+            "lambda_total_per_bar": 0.8258345428156749,
+            "lambda_up_per_bar": 0.3969521044992743,
+            "n_test": 287,
+            "n_train": 1138,
+            "purge_bars": 10,
+            "test_end": 1435,
+            "test_loglik": -628.0302762073081,
+            "test_mean_loglik": -2.188258802116056,
+            "test_start": 1148,
+            "train_censored": 0,
+            "train_end": 1138,
+            "train_events_down": 591,
+            "train_events_up": 547,
+            "train_time_at_risk_bars": 1378.0
+          }
+        ],
+        "n_rows": 1437,
+        "n_test": 1148,
+        "pooled_calibration": [
+          {
+            "horizon_bars": 1,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 909,
+            "n_rows": 1148,
+            "observed_survival": 0.20818815331010454,
+            "predicted_survival": 0.423487617779126
+          },
+          {
+            "horizon_bars": 2,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1077,
+            "n_rows": 1148,
+            "observed_survival": 0.061846689895470396,
+            "predicted_survival": 0.17949146566664523
+          },
+          {
+            "horizon_bars": 3,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1122,
+            "n_rows": 1148,
+            "observed_survival": 0.02264808362369338,
+            "predicted_survival": 0.07613920682215893
+          },
+          {
+            "horizon_bars": 5,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1138,
+            "n_rows": 1148,
+            "observed_survival": 0.008710801393728224,
+            "predicted_survival": 0.013734580510194137
+          },
+          {
+            "horizon_bars": 10,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1148,
+            "n_rows": 1148,
+            "observed_survival": 0.0,
+            "predicted_survival": 0.0001925267749632402
+          }
+        ],
+        "pooled_loglik": -2273.6337704763323,
+        "pooled_mean_loglik": -1.980517221669279
+      }
+    },
+    {
+      "counts": {
+        "censored_gap": 0,
+        "censored_incomplete": 3,
+        "censored_no_move": 6,
+        "n_bars": 1441,
+        "n_censored": 9,
+        "n_decision": 1437,
+        "n_down": 662,
+        "n_events": 1428,
+        "n_up": 766
+      },
+      "input_hash": "ee7c8f01e7f22c6ff88b0354383b4c3ac30ede2d158dcccc8906bf6bf3968874",
+      "n_quotes": 143398,
+      "n_trades": 72394,
+      "session": "session-20261112-043531-utc",
+      "walk_forward": {
+        "folds": [
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 217,
+                "n_rows": 287,
+                "observed_survival": 0.24390243902439024,
+                "predicted_survival": 0.49507516211728986
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 250,
+                "n_rows": 287,
+                "observed_survival": 0.1289198606271777,
+                "predicted_survival": 0.24509941614545924
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 266,
+                "n_rows": 287,
+                "observed_survival": 0.07317073170731707,
+                "predicted_survival": 0.12134263318306586
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 281,
+                "n_rows": 287,
+                "observed_survival": 0.020905923344947733,
+                "predicted_survival": 0.029741008546722063
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0008845275893762048
+              }
+            ],
+            "fold": 0,
+            "lambda_down_per_bar": 0.4035532994923858,
+            "lambda_total_per_bar": 0.7030456852791878,
+            "lambda_up_per_bar": 0.29949238578680204,
+            "n_test": 287,
+            "n_train": 277,
+            "purge_bars": 10,
+            "test_end": 574,
+            "test_loglik": -613.7005909022802,
+            "test_mean_loglik": -2.1383295850253665,
+            "test_start": 287,
+            "train_censored": 0,
+            "train_end": 277,
+            "train_events_down": 159,
+            "train_events_up": 118,
+            "train_time_at_risk_bars": 394.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 164,
+                "n_rows": 287,
+                "observed_survival": 0.4285714285714286,
+                "predicted_survival": 0.5081031360288525
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 223,
+                "n_rows": 287,
+                "observed_survival": 0.2229965156794425,
+                "predicted_survival": 0.258168796842354
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 253,
+                "n_rows": 287,
+                "observed_survival": 0.11846689895470383,
+                "predicted_survival": 0.1311763753003946
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 277,
+                "n_rows": 287,
+                "observed_survival": 0.03484320557491289,
+                "predicted_survival": 0.033865646985444024
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0011468820457427044
+              }
+            ],
+            "fold": 1,
+            "lambda_down_per_bar": 0.34933973589435774,
+            "lambda_total_per_bar": 0.6770708283313325,
+            "lambda_up_per_bar": 0.3277310924369748,
+            "n_test": 287,
+            "n_train": 564,
+            "purge_bars": 10,
+            "test_end": 861,
+            "test_loglik": -679.74512903389,
+            "test_mean_loglik": -2.368449926947352,
+            "test_start": 574,
+            "train_censored": 0,
+            "train_end": 564,
+            "train_events_down": 291,
+            "train_events_up": 273,
+            "train_time_at_risk_bars": 833.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 217,
+                "n_rows": 287,
+                "observed_survival": 0.24390243902439024,
+                "predicted_survival": 0.5375600486990895
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 259,
+                "n_rows": 287,
+                "observed_survival": 0.0975609756097561,
+                "predicted_survival": 0.28897080595736757
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 270,
+                "n_rows": 287,
+                "observed_survival": 0.05923344947735192,
+                "predicted_survival": 0.15533916052305835
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 282,
+                "n_rows": 287,
+                "observed_survival": 0.01742160278745645,
+                "predicted_survival": 0.04488848241308933
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0020149758533502433
+              }
+            ],
+            "fold": 2,
+            "lambda_down_per_bar": 0.3150984682713348,
+            "lambda_total_per_bar": 0.6207148067104303,
+            "lambda_up_per_bar": 0.3056163384390955,
+            "n_test": 287,
+            "n_train": 851,
+            "purge_bars": 10,
+            "test_end": 1148,
+            "test_loglik": -597.7490607698973,
+            "test_mean_loglik": -2.082749340661663,
+            "test_start": 861,
+            "train_censored": 0,
+            "train_end": 851,
+            "train_events_down": 432,
+            "train_events_up": 419,
+            "train_time_at_risk_bars": 1371.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 122,
+                "n_rows": 287,
+                "observed_survival": 0.5749128919860627,
+                "predicted_survival": 0.5255545436848643
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 179,
+                "n_rows": 287,
+                "observed_survival": 0.3763066202090592,
+                "predicted_survival": 0.27620757838780324
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 1,
+                "n_events_to_horizon": 217,
+                "n_rows": 287,
+                "observed_survival": 0.24266501677032787,
+                "predicted_survival": 0.14516214782190406
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 1,
+                "n_events_to_horizon": 257,
+                "n_rows": 287,
+                "observed_survival": 0.10198964472955808,
+                "predicted_survival": 0.04009488532346059
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 1,
+                "n_events_to_horizon": 280,
+                "n_rows": 287,
+                "observed_survival": 0.021101305806115467,
+                "predicted_survival": 0.0016075998291014552
+              }
+            ],
+            "fold": 3,
+            "lambda_down_per_bar": 0.3148671565856416,
+            "lambda_total_per_bar": 0.6433013001695873,
+            "lambda_up_per_bar": 0.32843414358394574,
+            "n_test": 287,
+            "n_train": 1138,
+            "purge_bars": 10,
+            "test_end": 1435,
+            "test_loglik": -799.9493594508177,
+            "test_mean_loglik": -2.787279998086473,
+            "test_start": 1148,
+            "train_censored": 0,
+            "train_end": 1138,
+            "train_events_down": 557,
+            "train_events_up": 581,
+            "train_time_at_risk_bars": 1769.0
+          }
+        ],
+        "n_rows": 1437,
+        "n_test": 1148,
+        "pooled_calibration": [
+          {
+            "horizon_bars": 1,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 720,
+            "n_rows": 1148,
+            "observed_survival": 0.372822299651568,
+            "predicted_survival": 0.5165732226325271
+          },
+          {
+            "horizon_bars": 2,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 911,
+            "n_rows": 1148,
+            "observed_survival": 0.2064459930313589,
+            "predicted_survival": 0.2671116493332498
+          },
+          {
+            "horizon_bars": 3,
+            "n_censored_to_horizon": 1,
+            "n_events_to_horizon": 1006,
+            "n_rows": 1148,
+            "observed_survival": 0.12334273312466781,
+            "predicted_survival": 0.13825507920710542
+          },
+          {
+            "horizon_bars": 5,
+            "n_censored_to_horizon": 1,
+            "n_events_to_horizon": 1097,
+            "n_rows": 1148,
+            "observed_survival": 0.043738557845626885,
+            "predicted_survival": 0.03714750581717924
+          },
+          {
+            "horizon_bars": 10,
+            "n_censored_to_horizon": 1,
+            "n_events_to_horizon": 1141,
+            "n_rows": 1148,
+            "observed_survival": 0.005248626941475227,
+            "predicted_survival": 0.0014134963293926412
+          }
+        ],
+        "pooled_loglik": -2691.144140156885,
+        "pooled_mean_loglik": -2.3442022126802136
+      }
+    },
+    {
+      "counts": {
+        "censored_gap": 0,
+        "censored_incomplete": 2,
+        "censored_no_move": 10,
+        "n_bars": 1441,
+        "n_censored": 12,
+        "n_decision": 1437,
+        "n_down": 707,
+        "n_events": 1425,
+        "n_up": 718
+      },
+      "input_hash": "7e2953f3c3bb776700ca3bccd79c5830ddd9869740a235849612954fd77da09c",
+      "n_quotes": 143571,
+      "n_trades": 122547,
+      "session": "session-20261112-083541-utc",
+      "walk_forward": {
+        "folds": [
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 220,
+                "n_rows": 287,
+                "observed_survival": 0.23344947735191635,
+                "predicted_survival": 0.6919262791436172
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 267,
+                "n_rows": 287,
+                "observed_survival": 0.06968641114982577,
+                "predicted_survival": 0.4787619757695331
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 282,
+                "n_rows": 287,
+                "observed_survival": 0.01742160278745644,
+                "predicted_survival": 0.33126799248966077
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.15859851859355706
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.025153490100070987
+              }
+            ],
+            "fold": 0,
+            "lambda_down_per_bar": 0.18344827586206897,
+            "lambda_total_per_bar": 0.3682758620689655,
+            "lambda_up_per_bar": 0.18482758620689654,
+            "n_test": 287,
+            "n_train": 277,
+            "purge_bars": 10,
+            "test_end": 574,
+            "test_loglik": -625.1839787953295,
+            "test_mean_loglik": -2.1783413895307646,
+            "test_start": 287,
+            "train_censored": 10,
+            "train_end": 277,
+            "train_events_down": 133,
+            "train_events_up": 134,
+            "train_time_at_risk_bars": 725.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 189,
+                "n_rows": 287,
+                "observed_survival": 0.3414634146341463,
+                "predicted_survival": 0.6048817327920052
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 242,
+                "n_rows": 287,
+                "observed_survival": 0.15679442508710797,
+                "predicted_survival": 0.3658819106654638
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 266,
+                "n_rows": 287,
+                "observed_survival": 0.07317073170731705,
+                "predicted_survival": 0.22131528412057663
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 279,
+                "n_rows": 287,
+                "observed_survival": 0.027874564459930307,
+                "predicted_survival": 0.08097525901350598
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0065569925723043525
+              }
+            ],
+            "fold": 1,
+            "lambda_down_per_bar": 0.24591651542649728,
+            "lambda_total_per_bar": 0.5027223230490019,
+            "lambda_up_per_bar": 0.25680580762250454,
+            "n_test": 287,
+            "n_train": 564,
+            "purge_bars": 10,
+            "test_end": 861,
+            "test_loglik": -638.6487315126751,
+            "test_mean_loglik": -2.2252569042253487,
+            "test_start": 574,
+            "train_censored": 10,
+            "train_end": 564,
+            "train_events_down": 271,
+            "train_events_up": 283,
+            "train_time_at_risk_bars": 1102.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 227,
+                "n_rows": 287,
+                "observed_survival": 0.2090592334494773,
+                "predicted_survival": 0.5848779764244205
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 269,
+                "n_rows": 287,
+                "observed_survival": 0.0627177700348432,
+                "predicted_survival": 0.3420822473063224
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 282,
+                "n_rows": 287,
+                "observed_survival": 0.017421602787456445,
+                "predicted_survival": 0.20007637257523914
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0684425751634344
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.0046843860950023875
+              }
+            ],
+            "fold": 2,
+            "lambda_down_per_bar": 0.2602040816326531,
+            "lambda_total_per_bar": 0.5363520408163265,
+            "lambda_up_per_bar": 0.27614795918367346,
+            "n_test": 287,
+            "n_train": 851,
+            "purge_bars": 10,
+            "test_end": 1148,
+            "test_loglik": -578.2362083767666,
+            "test_mean_loglik": -2.0147603079329848,
+            "test_start": 861,
+            "train_censored": 10,
+            "train_end": 851,
+            "train_events_down": 408,
+            "train_events_up": 433,
+            "train_time_at_risk_bars": 1568.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 274,
+                "n_rows": 287,
+                "observed_survival": 0.04529616724738672,
+                "predicted_survival": 0.5619218827561494
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 286,
+                "n_rows": 287,
+                "observed_survival": 0.003484320557491284,
+                "predicted_survival": 0.3157562023202163
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.17743031969970915
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.05602472392484226
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.003138769690854779
+              }
+            ],
+            "fold": 3,
+            "lambda_down_per_bar": 0.28717424629535004,
+            "lambda_total_per_bar": 0.5763924374041901,
+            "lambda_up_per_bar": 0.28921819110884006,
+            "n_test": 287,
+            "n_train": 1138,
+            "purge_bars": 10,
+            "test_end": 1435,
+            "test_loglik": -530.5317418203506,
+            "test_mean_loglik": -1.8485426544263086,
+            "test_start": 1148,
+            "train_censored": 10,
+            "train_end": 1138,
+            "train_events_down": 562,
+            "train_events_up": 566,
+            "train_time_at_risk_bars": 1957.0
+          }
+        ],
+        "n_rows": 1437,
+        "n_test": 1148,
+        "pooled_calibration": [
+          {
+            "horizon_bars": 1,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 910,
+            "n_rows": 1148,
+            "observed_survival": 0.20731707317073167,
+            "predicted_survival": 0.6109019677790409
+          },
+          {
+            "horizon_bars": 2,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1064,
+            "n_rows": 1148,
+            "observed_survival": 0.07317073170731705,
+            "predicted_survival": 0.3756205840153902
+          },
+          {
+            "horizon_bars": 3,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1117,
+            "n_rows": 1148,
+            "observed_survival": 0.027003484320557485,
+            "predicted_survival": 0.23252249222129542
+          },
+          {
+            "horizon_bars": 5,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1140,
+            "n_rows": 1148,
+            "observed_survival": 0.006968641114982577,
+            "predicted_survival": 0.09101026917383202
+          },
+          {
+            "horizon_bars": 10,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1148,
+            "n_rows": 1148,
+            "observed_survival": 0.0,
+            "predicted_survival": 0.00988340961455822
+          }
+        ],
+        "pooled_loglik": -2372.6006605051216,
+        "pooled_mean_loglik": -2.0667253140288517
+      }
+    },
+    {
+      "counts": {
+        "censored_gap": 0,
+        "censored_incomplete": 1,
+        "censored_no_move": 0,
+        "n_bars": 1441,
+        "n_censored": 1,
+        "n_decision": 1437,
+        "n_down": 723,
+        "n_events": 1436,
+        "n_up": 713
+      },
+      "input_hash": "93226652ec386525e51166a8a3330b25c94454f78545bb15e55199805ede29cd",
+      "n_quotes": 143922,
+      "n_trades": 371096,
+      "session": "session-20261112-123552-utc",
+      "walk_forward": {
+        "folds": [
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 280,
+                "n_rows": 287,
+                "observed_survival": 0.024390243902439046,
+                "predicted_survival": 0.42305696194011966
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 285,
+                "n_rows": 287,
+                "observed_survival": 0.0069686411149825845,
+                "predicted_survival": 0.1789771930460041
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 286,
+                "n_rows": 287,
+                "observed_survival": 0.0034843205574912922,
+                "predicted_survival": 0.0757175475466134
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.013551714124220291
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00018364895570459181
+              }
+            ],
+            "fold": 0,
+            "lambda_down_per_bar": 0.391304347826087,
+            "lambda_total_per_bar": 0.860248447204969,
+            "lambda_up_per_bar": 0.468944099378882,
+            "n_test": 287,
+            "n_train": 277,
+            "purge_bars": 10,
+            "test_end": 574,
+            "test_loglik": -501.42844214366465,
+            "test_mean_loglik": -1.7471374290720023,
+            "test_start": 287,
+            "train_censored": 0,
+            "train_end": 277,
+            "train_events_down": 126,
+            "train_events_up": 151,
+            "train_time_at_risk_bars": 322.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.4020627888829579
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.16165448620434122
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.06499525355875936
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.010506774319762028
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00011039230660641143
+              }
+            ],
+            "fold": 1,
+            "lambda_down_per_bar": 0.45718901453957994,
+            "lambda_total_per_bar": 0.9111470113085622,
+            "lambda_up_per_bar": 0.45395799676898224,
+            "n_test": 287,
+            "n_train": 564,
+            "purge_bars": 10,
+            "test_end": 861,
+            "test_loglik": -487.0654122475916,
+            "test_mean_loglik": -1.697092028737253,
+            "test_start": 574,
+            "train_censored": 0,
+            "train_end": 564,
+            "train_events_down": 283,
+            "train_events_up": 281,
+            "train_time_at_risk_bars": 619.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 284,
+                "n_rows": 287,
+                "observed_survival": 0.010452961672473893,
+                "predicted_survival": 0.3909038730365393
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.15280583795496938
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.05973239387919127
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.009127458499766072
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00008331049866495269
+              }
+            ],
+            "fold": 2,
+            "lambda_down_per_bar": 0.4856512141280353,
+            "lambda_total_per_bar": 0.9392935982339956,
+            "lambda_up_per_bar": 0.45364238410596025,
+            "n_test": 287,
+            "n_train": 851,
+            "purge_bars": 10,
+            "test_end": 1148,
+            "test_loglik": -489.50321548627505,
+            "test_mean_loglik": -1.7055861166769166,
+            "test_start": 861,
+            "train_censored": 0,
+            "train_end": 851,
+            "train_events_down": 440,
+            "train_events_up": 411,
+            "train_time_at_risk_bars": 906.0
+          },
+          {
+            "calibration": [
+              {
+                "horizon_bars": 1,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.3861594095260872
+              },
+              {
+                "horizon_bars": 2,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.14911908956553774
+              },
+              {
+                "horizon_bars": 3,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.05758373957569587
+              },
+              {
+                "horizon_bars": 5,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.008586834819306768
+              },
+              {
+                "horizon_bars": 10,
+                "n_censored_to_horizon": 0,
+                "n_events_to_horizon": 287,
+                "n_rows": 287,
+                "observed_survival": 0.0,
+                "predicted_survival": 0.00007373373221405869
+              }
+            ],
+            "fold": 3,
+            "lambda_down_per_bar": 0.48578595317725753,
+            "lambda_total_per_bar": 0.9515050167224081,
+            "lambda_up_per_bar": 0.4657190635451505,
+            "n_test": 287,
+            "n_train": 1138,
+            "purge_bars": 10,
+            "test_end": 1435,
+            "test_loglik": -486.6622728429882,
+            "test_mean_loglik": -1.6956873618222585,
+            "test_start": 1148,
+            "train_censored": 0,
+            "train_end": 1138,
+            "train_events_down": 581,
+            "train_events_up": 557,
+            "train_time_at_risk_bars": 1196.0
+          }
+        ],
+        "n_rows": 1437,
+        "n_test": 1148,
+        "pooled_calibration": [
+          {
+            "horizon_bars": 1,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1138,
+            "n_rows": 1148,
+            "observed_survival": 0.008710801393728262,
+            "predicted_survival": 0.4005457583464311
+          },
+          {
+            "horizon_bars": 2,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1146,
+            "n_rows": 1148,
+            "observed_survival": 0.0017421602787456522,
+            "predicted_survival": 0.16063915169271445
+          },
+          {
+            "horizon_bars": 3,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1147,
+            "n_rows": 1148,
+            "observed_survival": 0.0008710801393728261,
+            "predicted_survival": 0.06450723364006479
+          },
+          {
+            "horizon_bars": 5,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1148,
+            "n_rows": 1148,
+            "observed_survival": 0.0,
+            "predicted_survival": 0.010443195440763752
+          },
+          {
+            "horizon_bars": 10,
+            "n_censored_to_horizon": 0,
+            "n_events_to_horizon": 1148,
+            "n_rows": 1148,
+            "observed_survival": 0.0,
+            "predicted_survival": 0.00011277137329750179
+          }
+        ],
+        "pooled_loglik": -1964.6593427205196,
+        "pooled_mean_loglik": -1.7113757340771076
+      }
+    }
+  ]
+}
