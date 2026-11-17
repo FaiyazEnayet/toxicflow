@@ -57,7 +57,10 @@
     "ofi.mean",
     "ofi.std",
     "predict.accuracy",
-    "predict.baseline"
+    "predict.baseline",
+    "p2.b3_accuracy",
+    "p2.b5_accuracy",
+    "p2.delta_accuracy"
    ],
    "file": "summary.json"
   },

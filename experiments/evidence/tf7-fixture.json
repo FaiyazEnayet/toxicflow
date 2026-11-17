@@ -146,9 +146,9 @@
         "sha256": "fd07d418b0ec68ee6f8f548250999cfb64c558eb4b9062ffdbfd3cd0ccc926cc"
       },
       {
-        "bytes": 3825,
+        "bytes": 3839,
         "name": "summary.json",
-        "sha256": "dc2b5c82fd7a84e32518fbbc86601384f88a1f392304e05e3bfe08a5d6d14d25"
+        "sha256": "b26ff4be8d980696201c344dd50466c7687d6b3bffd35ea8d325ac26236649f2"
       }
     ],
     "note": "The prediction ledger under experiments/<run>/ is excluded from the output hashes: it carries a wall-clock creation timestamp, so its bytes differ across runs while its numbers do not."
@@ -198,7 +198,7 @@
   },
   "software": {
     "cargo_lock_sha256": "ed36b1e78254ffaf7fb13b00cbfdeb0809bfbaf6e7bfb8e15b3663775793c73b",
-    "git_sha": "6c74efd7052b036792d7a18af26eb10f9dfa5631",
+    "git_sha": "11d1c34f5702f0b89ebfa6985f0f1f393c09f21e",
     "rustc_version": "rustc 1.100.0 (0ef1bc386 2026-11-09)"
   },
   "status": "reproducible",

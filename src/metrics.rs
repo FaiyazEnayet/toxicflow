@@ -443,6 +443,73 @@ pub fn ofi_bars(quotes: &[Quote], events: &[f64], bar_ms: i64) -> Vec<(i64, f64,
     bars
 }
 
+/// Per-bar touch statistics on the `ofi_bars` grid (same `t0`
+/// alignment and bar count).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TouchBar {
+    pub time_ms: i64,
+    /// Mean touch depth over the quotes observed in this bar: the
+    /// mean of (bid_sz + ask_sz) / 2. Empty bars carry the last
+    /// observed value, exactly as `ofi_bars` carries the last
+    /// observed mid, spread and imbalance.
+    pub depth_mean: f64,
+    /// Microprice displacement of the bar's last quote:
+    /// (microprice - mid) / spread, where the microprice weights
+    /// each side's price by the opposite side's size. Zero when the
+    /// spread or the touch depth is zero. Empty bars carry the last
+    /// observed value.
+    pub micro_disp: f64,
+    /// Quotes observed inside this bar (0 for empty bars).
+    pub n_quotes: usize,
+}
+
+/// Touch depth, microprice displacement and quote counts per bar.
+/// Only touch-accessible fields are used, so the series is
+/// computable from archived quote data. Prefix-invariant: appending
+/// a later quote never changes an already-emitted bar.
+pub fn touch_bars(quotes: &[Quote], bar_ms: i64) -> Vec<TouchBar> {
+    if quotes.is_empty() || bar_ms <= 0 {
+        return Vec::new();
+    }
+    let t0 = quotes[0].time_ms / bar_ms * bar_ms;
+    let mut bars: Vec<TouchBar> = Vec::new();
+    let mut prev = &quotes[0];
+    for q in quotes {
+        let b = q.time_ms / bar_ms * bar_ms - t0;
+        let idx = b as usize / bar_ms as usize;
+        while bars.len() <= idx {
+            bars.push(TouchBar {
+                time_ms: t0 + bars.len() as i64 * bar_ms,
+                depth_mean: (prev.bid_sz + prev.ask_sz) / 2.0,
+                micro_disp: micro_disp(prev),
+                n_quotes: 0,
+            });
+        }
+        let row = &mut bars[idx];
+        // Running mean of the bar's quote depths.
+        let depth = (q.bid_sz + q.ask_sz) / 2.0;
+        let n = row.n_quotes as f64;
+        row.depth_mean = (row.depth_mean * n + depth) / (n + 1.0);
+        row.micro_disp = micro_disp(q);
+        row.n_quotes += 1;
+        prev = q;
+    }
+    bars
+}
+
+/// (microprice - mid) / spread for one quote; 0 when the spread or
+/// the touch depth is zero, so a crossed or empty book never yields
+/// a garbage ratio.
+fn micro_disp(q: &Quote) -> f64 {
+    let tot = q.bid_sz + q.ask_sz;
+    let spread = q.spread();
+    if tot == 0.0 || spread == 0.0 {
+        return 0.0;
+    }
+    let micro = (q.ask_px * q.bid_sz + q.bid_px * q.ask_sz) / tot;
+    (micro - q.mid()) / spread
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,5 +998,78 @@ mod tests {
             saw_partial_carry,
             "fixture must exercise a bucket spanning a tick boundary"
         );
+    }
+
+    // ---- Stage 3 P2: touch-bar statistics -------------------------
+
+    #[test]
+    fn stage3_toxicflow_2_touch_bars_known_answer() {
+        // Bar 0: two quotes, depths (4+6)/2 = 5 and (8+2)/2 = 5,
+        // mean depth 5. Last quote microprice
+        // (100.1*8 + 100.0*2)/10 = 100.08 against mid 100.05 and
+        // spread 0.1, so displacement +0.3.
+        // Bar 1: one quote, depth 10, microprice equals mid, 0.
+        // Bar 2: zero sizes, depth 0 and displacement 0 by definition.
+        let qs = vec![
+            q(0, 100.0, 4.0, 100.1, 6.0),
+            q(5_000, 100.0, 8.0, 100.1, 2.0),
+            q(10_000, 100.0, 10.0, 100.2, 10.0),
+            q(20_000, 100.0, 0.0, 100.1, 0.0),
+        ];
+        let bars = touch_bars(&qs, 10_000);
+        assert_eq!(bars.len(), 3);
+        assert!((bars[0].depth_mean - 5.0).abs() < 1e-12);
+        assert!((bars[0].micro_disp - 0.3).abs() < 1e-12);
+        assert_eq!(bars[0].n_quotes, 2);
+        assert!((bars[1].depth_mean - 10.0).abs() < 1e-12);
+        assert!(bars[1].micro_disp.abs() < 1e-12);
+        assert_eq!(bars[1].n_quotes, 1);
+        assert!(bars[2].depth_mean.abs() < 1e-12);
+        assert!(bars[2].micro_disp.abs() < 1e-12);
+        assert_eq!(bars[2].n_quotes, 1);
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_touch_bars_gap_carries_last_observed() {
+        // Quotes at 0 s and 30 s: the empty 10 s and 20 s bars carry
+        // the 0 s quote's depth and displacement with zero quotes.
+        let qs = vec![
+            q(0, 99.95, 6.0, 100.05, 4.0),
+            q(30_000, 109.9, 3.0, 110.1, 7.0),
+        ];
+        let bars = touch_bars(&qs, 10_000);
+        assert_eq!(bars.len(), 4);
+        // Bar 0: depth (6+4)/2 = 5; microprice
+        // (100.05*6 + 99.95*4)/10 = 100.01 against mid 100.00 and
+        // spread 0.1, so displacement +0.1.
+        assert!((bars[0].depth_mean - 5.0).abs() < 1e-12);
+        assert!((bars[0].micro_disp - 0.1).abs() < 1e-12);
+        assert_eq!(bars[0].n_quotes, 1);
+        for b in &bars[1..3] {
+            assert!((b.depth_mean - 5.0).abs() < 1e-12);
+            assert!((b.micro_disp - 0.1).abs() < 1e-12);
+            assert_eq!(b.n_quotes, 0);
+        }
+        // Bar 3: depth (3+7)/2 = 5; microprice
+        // (110.1*3 + 109.9*7)/10 = 109.96 against mid 110.00 and
+        // spread 0.2, so displacement -0.2.
+        assert!((bars[3].depth_mean - 5.0).abs() < 1e-12);
+        assert!((bars[3].micro_disp + 0.2).abs() < 1e-12);
+        assert_eq!(bars[3].n_quotes, 1);
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_touch_bars_prefix_invariant_to_appended_quote() {
+        // Appending a later quote must not change any already-emitted
+        // bar: same bar count alignment as `ofi_bars`.
+        let qs = vec![
+            q(0, 99.95, 6.0, 100.05, 4.0),
+            q(30_000, 109.9, 3.0, 110.1, 7.0),
+            q(60_000, 119.95, 2.0, 120.05, 8.0),
+        ];
+        let before = touch_bars(&qs[..2], 10_000);
+        let after = touch_bars(&qs, 10_000);
+        assert_eq!(before.len(), 4);
+        assert_eq!(before, after[..4]);
     }
 }

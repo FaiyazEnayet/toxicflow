@@ -61,7 +61,7 @@
 //! concrete future mid observation; censored rows are counted per
 //! track and per reason, never dropped silently.
 
-use crate::metrics::{ofi_bars, ofi_events, Quote, Trade};
+use crate::metrics::{ofi_bars, ofi_events, touch_bars, Quote, Trade};
 
 pub const N_FEATURES: usize = 5;
 
@@ -243,6 +243,582 @@ pub fn build_dataset(quotes: &[Quote], trades: &[Trade], bar_ms: i64, horizon: u
         });
     }
     out
+}
+
+// ---- P2: normalized flow features (feature frame v4) ------------
+
+/// Number of features in the P2 (v4) frame: the five v3 features
+/// plus ten normalized-flow features.
+pub const P2_N_FEATURES: usize = 15;
+
+/// P2 feature names, in `P2Bar::features` order.
+pub const P2_FEATURE_NAMES: [&str; P2_N_FEATURES] = [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp",
+];
+
+/// Feature-frame version of `build_p2_dataset`. v4 adds the ten
+/// normalized-flow features to the v3 frame; the first five columns
+/// reproduce `build_dataset` bit-identically on shared rows (pinned
+/// by `stage3_toxicflow_2_p2_v3_columns_bit_identical`), so the v3
+/// baseline is preserved exactly inside the new frame.
+pub const P2_FEATURE_VERSION: &str = "v4";
+
+/// Trailing window behind the signed-flow sum, in bars (6 bars =
+/// 60 s on the 10 s grid).
+pub const P2_FLOW_WINDOW_BARS: usize = 6;
+
+/// Trailing window behind the depth, rate and volatility means, in
+/// bars (30 bars = 300 s on the 10 s grid). P2 rows start at bar 29
+/// so every trailing window is full.
+pub const P2_TRAIL_WINDOW_BARS: usize = 30;
+
+/// Prespecified stationary lag scales, in bars (30 s and 100 s on
+/// the 10 s grid).
+pub const P2_LAG_BARS: [usize; 2] = [3, 10];
+
+/// Column subsets for the baseline ladder (see the P2 grid):
+/// B0 is the empty list (training-majority predictor), B3 is the
+/// v3 frame, B4 adds the flow-normalization group, B5 is the full
+/// v4 frame.
+pub const P2_B0_COLS: &[usize] = &[];
+pub const P2_B3_COLS: &[usize] = &[0, 1, 2, 3, 4];
+pub const P2_B4_COLS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+pub const P2_B5_COLS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+/// The ten P2 columns (indices 5..15): the block the permutation
+/// and shift controls act on.
+pub const P2_NEW_COLS: &[usize] = &[5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+
+/// Seed for the permutation control's deterministic shuffle.
+pub const P2_PERM_SEED: u64 = 0xA5A5_5A5A_F00D_BA5E;
+
+/// Shift lag for the shift control, in bars.
+pub const P2_SHIFT_LAG: usize = 5;
+
+/// One v4 decision row.
+#[derive(Debug, Clone)]
+pub struct P2Bar {
+    /// Start time of the OFI bar this row was built from.
+    pub time_ms: i64,
+    pub features: [f64; P2_N_FEATURES],
+    pub target: u8,
+    pub spread_degenerate: bool,
+}
+
+impl P2Bar {
+    /// The five v3 columns, in `Bar::features` order.
+    pub fn v3_features(&self) -> [f64; N_FEATURES] {
+        [
+            self.features[0],
+            self.features[1],
+            self.features[2],
+            self.features[3],
+            self.features[4],
+        ]
+    }
+}
+
+/// Trailing mean over the last `window` values (all values so far
+/// while the window fills). A pure function of the slice ending at
+/// i, so results are prefix-invariant bitwise.
+fn trailing_mean(xs: &[f64], window: usize) -> Vec<f64> {
+    xs.iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let k = (i + 1).min(window);
+            xs[i + 1 - k..=i].iter().sum::<f64>() / k as f64
+        })
+        .collect()
+}
+
+/// Trailing sum over the last `window` values. A pure function of
+/// the slice ending at i, so results are prefix-invariant bitwise.
+fn trailing_sum(xs: &[f64], window: usize) -> Vec<f64> {
+    xs.iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let k = (i + 1).min(window);
+            xs[i + 1 - k..=i].iter().sum::<f64>()
+        })
+        .collect()
+}
+
+/// Trailing realized volatility: sqrt of the sum of squared log mid
+/// returns over the trailing `window` bars. Only the `window` - 1
+/// returns strictly inside the window are summed, so no return
+/// spans the bar before the window (which may sit across a feed
+/// gap). A pure function of mids at or before i.
+fn trailing_realized_vol(mids: &[f64], window: usize) -> Vec<f64> {
+    mids.iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let k = (i + 1).min(window);
+            let lo = i + 1 - k;
+            let mut s = 0.0;
+            for j in lo + 1..=i {
+                let r = (mids[j] / mids[j - 1]).ln();
+                s += r * r;
+            }
+            s.sqrt()
+        })
+        .collect()
+}
+
+/// Build the v4 feature/target frame. Returns empty vec when data
+/// is thin (fewer than 40 bars). Rows start at bar 29 so every
+/// trailing 30-bar window is full, and share `build_dataset`'s gap
+/// censoring: a row is supervised only if every bar feeding its
+/// features and every bar in its forward target window was actually
+/// observed. Every feature uses touch-accessible fields only, so the
+/// frame is computable from archived quote data.
+pub fn build_p2_dataset(
+    quotes: &[Quote],
+    trades: &[Trade],
+    bar_ms: i64,
+    horizon: usize,
+) -> Vec<P2Bar> {
+    let events = ofi_events(quotes);
+    let bars = ofi_bars(quotes, &events, bar_ms);
+    if bars.len() < 40 {
+        return Vec::new();
+    }
+    let touch = touch_bars(quotes, bar_ms);
+    let n = bars.len();
+    let ofi: Vec<f64> = bars.iter().map(|b| b.1).collect();
+    let mids: Vec<f64> = bars.iter().map(|b| b.2).collect();
+    let spreads: Vec<f64> = bars.iter().map(|b| b.3).collect();
+    let imbs: Vec<f64> = bars.iter().map(|b| b.4).collect();
+
+    let t0 = bars[0].0;
+    let mut signed = vec![0.0; n];
+    let mut trade_counts = vec![0usize; n];
+    for t in trades {
+        let idx = ((t.time_ms - t0) / bar_ms) as usize;
+        if idx < n {
+            signed[idx] += t.signed_qty();
+            trade_counts[idx] += 1;
+        }
+    }
+    let quote_counts: Vec<f64> = touch.iter().map(|b| b.n_quotes as f64).collect();
+    let trade_counts_f: Vec<f64> = trade_counts.iter().map(|&c| c as f64).collect();
+    let depths: Vec<f64> = touch.iter().map(|b| b.depth_mean).collect();
+
+    let (ofi_m, ofi_s) = rolling_mean_sd(&ofi, 30);
+    let (sp_m, sp_s) = rolling_mean_sd(&spreads, 30);
+    let depth_mean = trailing_mean(&depths, P2_TRAIL_WINDOW_BARS);
+    let quote_rate = trailing_mean(&quote_counts, P2_TRAIL_WINDOW_BARS);
+    let trade_rate = trailing_mean(&trade_counts_f, P2_TRAIL_WINDOW_BARS);
+    let signed_flow_w = trailing_sum(&signed, P2_FLOW_WINDOW_BARS);
+    let realized_vol = trailing_realized_vol(&mids, P2_TRAIL_WINDOW_BARS);
+
+    let status = crate::metrics::bar_status(quotes, bar_ms);
+    let mut out = Vec::new();
+    for i in 0..n {
+        if i < P2_TRAIL_WINDOW_BARS - 1 || i + horizon >= n || ofi_s[i].is_nan() || sp_s[i].is_nan()
+        {
+            continue;
+        }
+        if status.len() == n {
+            let lo = i.saturating_sub(P2_TRAIL_WINDOW_BARS - 1);
+            let features_observed = status[lo..=i].iter().all(|s| s.observed);
+            let target_observed = status[i + 1..=i + horizon].iter().all(|s| s.observed);
+            if !features_observed || !target_observed {
+                continue;
+            }
+        }
+        let fwd = mids[i + horizon] / mids[i] - 1.0;
+        let spread_degenerate = sp_s[i] == 0.0;
+        let mut f = [0.0; P2_N_FEATURES];
+        f[0] = ofi[i];
+        f[1] = (ofi[i] - ofi_m[i]) / (ofi_s[i] + 1e-12);
+        f[2] = imbs[i];
+        f[3] = if spread_degenerate {
+            0.0
+        } else {
+            (spreads[i] - sp_m[i]) / (sp_s[i] + 1e-12)
+        };
+        f[4] = signed[i];
+        f[5] = signed_flow_w[i];
+        f[6] = if depth_mean[i] == 0.0 {
+            0.0
+        } else {
+            ofi[i] / depth_mean[i]
+        };
+        f[7] = signed[i - P2_LAG_BARS[0]];
+        f[8] = signed[i - P2_LAG_BARS[1]];
+        f[9] = ofi[i - P2_LAG_BARS[0]];
+        f[10] = ofi[i - P2_LAG_BARS[1]];
+        f[11] = quote_rate[i];
+        f[12] = trade_rate[i];
+        f[13] = realized_vol[i];
+        f[14] = touch[i].micro_disp;
+        out.push(P2Bar {
+            time_ms: bars[i].0,
+            features: f,
+            target: u8::from(fwd > 0.0),
+            spread_degenerate,
+        });
+    }
+    out
+}
+
+/// How the P2 feature block is treated at scoring time. The fitted
+/// model is identical under every control: only the scored test
+/// rows change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum P2Control {
+    /// Score each row on its own features.
+    Off,
+    /// Within each fold's test block, the P2 block of each row is
+    /// replaced by the P2 block of another test row, drawn by a
+    /// fixed-seed shuffle. Breaks feature-target alignment while
+    /// preserving the block's joint distribution.
+    Permute,
+    /// Within each fold's test block, the P2 block of each row is
+    /// replaced by the P2 block of the test row `P2_SHIFT_LAG` bars
+    /// earlier. The first `P2_SHIFT_LAG` rows of each block are
+    /// unscored.
+    Shift,
+}
+
+/// One scored P2 row.
+#[derive(Debug, Clone)]
+pub struct P2Prediction {
+    pub fold: usize,
+    pub row: usize,
+    pub time_ms: i64,
+    pub target: u8,
+    pub proba: f64,
+}
+
+/// One fold's held-out scores for a P2 evaluation.
+#[derive(Debug, Clone)]
+pub struct P2FoldMetrics {
+    pub fold: usize,
+    pub n_train: usize,
+    pub n_test: usize,
+    /// Rows actually scored (fewer than `n_test` under Shift).
+    pub n_scored: usize,
+    pub accuracy: f64,
+    pub baseline_accuracy: f64,
+    pub brier: f64,
+    pub log_loss: f64,
+}
+
+/// A P2 walk-forward evaluation on one column subset.
+#[derive(Debug, Clone)]
+pub struct P2Eval {
+    pub n_labeled: usize,
+    /// Held-out predictions scored: the exact denominator behind
+    /// accuracy, Brier score and log loss.
+    pub n_oos: usize,
+    pub n_pos_oos: usize,
+    pub n_neg_oos: usize,
+    /// Labeled rows the evaluation never scores: training rows,
+    /// purge-gap rows, and (under Shift) warm-up rows.
+    pub n_unscored: usize,
+    pub accuracy: f64,
+    /// Out-of-sample accuracy of the training-majority predictor on
+    /// the same scored rows.
+    pub baseline: f64,
+    pub brier: f64,
+    pub log_loss: f64,
+    pub balanced_accuracy: f64,
+    pub per_fold: Vec<P2FoldMetrics>,
+    pub predictions: Vec<P2Prediction>,
+    /// (raw-space weights in `cols` order, intercept) per fold.
+    /// The standardization behind each fold is learned from that
+    /// fold's training rows only.
+    pub fold_models: Vec<(Vec<f64>, f64)>,
+}
+
+/// Full-batch gradient descent for L2 logistic regression on a
+/// column subset of the P2 frame. Standardization (mean and
+/// population sd, sd floor 1e-12) is learned from the supplied rows
+/// only, exactly as in `fit_logistic`; callers pass training rows.
+/// Returns (raw-space weights in `cols` order, intercept).
+fn fit_logistic_p2_cols(
+    xs: &[[f64; P2_N_FEATURES]],
+    y: &[u8],
+    cols: &[usize],
+    l2: f64,
+    iters: usize,
+    lr: f64,
+) -> (Vec<f64>, f64) {
+    let n = xs.len() as f64;
+    let d = cols.len();
+    let mut mu = vec![0.0; d];
+    let mut sd = vec![0.0; d];
+    for row in xs {
+        for (k, &j) in cols.iter().enumerate() {
+            mu[k] += row[j];
+        }
+    }
+    for m in mu.iter_mut() {
+        *m /= n;
+    }
+    for row in xs {
+        for (k, &j) in cols.iter().enumerate() {
+            let z = row[j] - mu[k];
+            sd[k] += z * z;
+        }
+    }
+    for s in sd.iter_mut() {
+        *s = (*s / n).sqrt() + 1e-12;
+    }
+    let mut w = vec![0.0; d + 1];
+    for _ in 0..iters {
+        let mut grad = vec![0.0; d + 1];
+        for (row, &yi) in xs.iter().zip(y.iter()) {
+            let mut z = w[d];
+            for (k, &j) in cols.iter().enumerate() {
+                z += w[k] * (row[j] - mu[k]) / sd[k];
+            }
+            let err = sigmoid(z) - yi as f64;
+            for (k, &j) in cols.iter().enumerate() {
+                grad[k] += err * (row[j] - mu[k]) / sd[k];
+            }
+            grad[d] += err;
+        }
+        for k in 0..d {
+            w[k] -= lr * (grad[k] / n + l2 * w[k] / n);
+        }
+        w[d] -= lr * grad[d] / n;
+    }
+    let mut raw = vec![0.0; d];
+    let mut b = w[d];
+    for k in 0..d {
+        raw[k] = w[k] / sd[k];
+        b -= w[k] * mu[k] / sd[k];
+    }
+    (raw, b)
+}
+
+fn predict_proba_p2_cols(
+    x: &[f64; P2_N_FEATURES],
+    cols: &[usize],
+    w: &[f64],
+    intercept: f64,
+) -> f64 {
+    let mut z = intercept;
+    for (k, &j) in cols.iter().enumerate() {
+        z += w[k] * x[j];
+    }
+    sigmoid(z)
+}
+
+/// Deterministic Fisher-Yates shuffle of 0..n with a xorshift
+/// seeded by `seed`. Scored row j takes its P2 block from donor
+/// row perm[j].
+fn p2_permutation(n: usize, seed: u64) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut s: u64 = seed | 1;
+    let mut rnd = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    };
+    for i in (1..n).rev() {
+        let j = (rnd() % (i as u64 + 1)) as usize;
+        idx.swap(i, j);
+    }
+    idx
+}
+
+/// Purged walk-forward evaluation of one P2 column subset, with the
+/// same fold geometry as `walk_forward_detailed` (fold =
+/// n / (n_splits + 1), purge gap = `horizon` bars). An empty column
+/// list is the B0 training-majority predictor: every row scores the
+/// training positive rate, and the reported accuracy equals the
+/// training-majority accuracy by construction.
+pub fn walk_forward_p2(
+    bars: &[P2Bar],
+    cols: &[usize],
+    control: P2Control,
+    n_splits: usize,
+    horizon: usize,
+) -> Option<P2Eval> {
+    let n = bars.len();
+    if n < 60 {
+        return None;
+    }
+    let fold = n / (n_splits + 1);
+    if fold < 10 {
+        return None;
+    }
+    let mut per_fold: Vec<P2FoldMetrics> = Vec::new();
+    let mut predictions: Vec<P2Prediction> = Vec::new();
+    let mut fold_models: Vec<(Vec<f64>, f64)> = Vec::new();
+    for k in 1..=n_splits {
+        let a = k * fold;
+        let b = ((k + 1) * fold).min(n);
+        let train_end = a.saturating_sub(horizon);
+        if train_end < 30 || b - a < 10 {
+            continue;
+        }
+        let train = &bars[..train_end];
+        let ys: Vec<u8> = train.iter().map(|x| x.target).collect();
+        let pos = ys.iter().map(|&y| usize::from(y)).sum::<usize>();
+        let (majority_label, _majority_n) = if pos * 2 >= ys.len() {
+            (1u8, pos)
+        } else {
+            (0u8, ys.len() - pos)
+        };
+        let (w, intercept) = if cols.is_empty() {
+            let p = (pos as f64 / ys.len() as f64).clamp(1e-6, 1.0 - 1e-6);
+            (Vec::new(), (p / (1.0 - p)).ln())
+        } else {
+            let xs: Vec<[f64; P2_N_FEATURES]> = train.iter().map(|x| x.features).collect();
+            fit_logistic_p2_cols(&xs, &ys, cols, FIT_L2, FIT_ITERS, FIT_LR)
+        };
+        let test = &bars[a..b];
+        let mut scored: Vec<(usize, [f64; P2_N_FEATURES])> = Vec::new();
+        match control {
+            P2Control::Off => {
+                for (off, row) in test.iter().enumerate() {
+                    scored.push((a + off, row.features));
+                }
+            }
+            P2Control::Permute => {
+                let perm = p2_permutation(test.len(), P2_PERM_SEED ^ (k as u64));
+                for (off, row) in test.iter().enumerate() {
+                    let mut f = row.features;
+                    let donor = test[perm[off]].features;
+                    for &j in P2_NEW_COLS {
+                        f[j] = donor[j];
+                    }
+                    scored.push((a + off, f));
+                }
+            }
+            P2Control::Shift => {
+                for (off, row) in test.iter().enumerate() {
+                    if off < P2_SHIFT_LAG {
+                        continue;
+                    }
+                    let mut f = row.features;
+                    let donor = test[off - P2_SHIFT_LAG].features;
+                    for &j in P2_NEW_COLS {
+                        f[j] = donor[j];
+                    }
+                    scored.push((a + off, f));
+                }
+            }
+        }
+        let fold_idx = per_fold.len();
+        let mut acc_sum = 0.0f64;
+        let mut base_sum = 0.0f64;
+        let mut brier_sum = 0.0f64;
+        let mut ll_sum = 0.0f64;
+        for (row_idx, f) in &scored {
+            let bar = &bars[*row_idx];
+            let p = if cols.is_empty() {
+                sigmoid(intercept)
+            } else {
+                predict_proba_p2_cols(f, cols, &w, intercept)
+            };
+            predictions.push(P2Prediction {
+                fold: fold_idx,
+                row: *row_idx,
+                time_ms: bar.time_ms,
+                target: bar.target,
+                proba: p,
+            });
+            acc_sum += f64::from(u8::from(p > 0.5) == bar.target);
+            base_sum += f64::from(majority_label == bar.target);
+            brier_sum += (p - f64::from(bar.target)).powi(2);
+            let pc = p.clamp(1e-15, 1.0 - 1e-15);
+            ll_sum += if bar.target == 1 {
+                -pc.ln()
+            } else {
+                -(1.0 - pc).ln()
+            };
+        }
+        let m = scored.len().max(1) as f64;
+        per_fold.push(P2FoldMetrics {
+            fold: fold_idx,
+            n_train: train_end,
+            n_test: b - a,
+            n_scored: scored.len(),
+            accuracy: acc_sum / m,
+            baseline_accuracy: base_sum / m,
+            brier: brier_sum / m,
+            log_loss: ll_sum / m,
+        });
+        fold_models.push((w, intercept));
+    }
+    if predictions.is_empty() {
+        return None;
+    }
+    let n_oos = predictions.len();
+    let acc = predictions
+        .iter()
+        .map(|r| f64::from(u8::from(r.proba > 0.5) == r.target))
+        .sum::<f64>()
+        / n_oos as f64;
+    let (mut tp, mut fn_, mut tn, mut fp) = (0usize, 0usize, 0usize, 0usize);
+    let mut brier_sum = 0.0f64;
+    let mut ll_sum = 0.0f64;
+    let mut n_pos_oos = 0usize;
+    for r in predictions.iter() {
+        match (r.target, r.proba > 0.5) {
+            (1, true) => tp += 1,
+            (1, false) => fn_ += 1,
+            (0, false) => tn += 1,
+            (0, true) => fp += 1,
+            _ => unreachable!(),
+        }
+        brier_sum += (r.proba - f64::from(r.target)).powi(2);
+        let pc = r.proba.clamp(1e-15, 1.0 - 1e-15);
+        ll_sum += if r.target == 1 {
+            -pc.ln()
+        } else {
+            -(1.0 - pc).ln()
+        };
+        n_pos_oos += usize::from(r.target == 1);
+    }
+    // The training-majority accuracy over the scored rows: each
+    // row's fold majority label is the label that fold committed to
+    // from training data alone. It is recovered from the per-fold
+    // baseline accuracies weighted by scored rows.
+    let mut base_correct = 0.0f64;
+    for f in &per_fold {
+        base_correct += f.baseline_accuracy * f.n_scored as f64;
+    }
+    let base_sum = base_correct / n_oos as f64;
+    let balanced = if tp + fn_ == 0 || tn + fp == 0 {
+        f64::NAN
+    } else {
+        0.5 * (tp as f64 / (tp + fn_) as f64 + tn as f64 / (tn + fp) as f64)
+    };
+    Some(P2Eval {
+        n_labeled: n,
+        n_oos,
+        n_pos_oos,
+        n_neg_oos: n_oos - n_pos_oos,
+        n_unscored: n - n_oos,
+        accuracy: acc,
+        baseline: base_sum,
+        brier: brier_sum / n_oos as f64,
+        log_loss: ll_sum / n_oos as f64,
+        balanced_accuracy: balanced,
+        per_fold,
+        predictions,
+        fold_models,
+    })
 }
 
 fn sigmoid(z: f64) -> f64 {
@@ -1829,6 +2405,173 @@ pub fn p1_grid_from_json(text: &str) -> Result<Vec<P1Config>, String> {
         out.push(P1Config {
             horizon_bars: horizon as usize,
             flat_eps: eps,
+        });
+    }
+    Ok(out)
+}
+
+// ---- P2: preregistered ablation grid ------------------------------
+
+/// One frozen P2 design cell: a feature-column subset plus the
+/// control applied at scoring time. `cols` names features from
+/// `P2_FEATURE_NAMES`; `control` is one of "none", "permute",
+/// "shift5".
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct P2Config {
+    pub id: String,
+    pub kind: String,
+    pub cols: Vec<String>,
+    pub control: String,
+}
+
+impl P2Config {
+    /// Column indices for this config, in `P2_FEATURE_NAMES` order.
+    pub fn col_indices(&self) -> Vec<usize> {
+        self.cols
+            .iter()
+            .map(|name| {
+                P2_FEATURE_NAMES
+                    .iter()
+                    .position(|n| n == name)
+                    .unwrap_or_else(|| panic!("P2 config {} names unknown feature {name}", self.id))
+            })
+            .collect()
+    }
+
+    /// The scoring control for this config.
+    pub fn control(&self) -> P2Control {
+        match self.control.as_str() {
+            "permute" => P2Control::Permute,
+            "shift5" => P2Control::Shift,
+            _ => P2Control::Off,
+        }
+    }
+}
+
+fn p2_cfg(id: &str, kind: &str, cols: &[&str], control: &str) -> P2Config {
+    P2Config {
+        id: id.to_string(),
+        kind: kind.to_string(),
+        cols: cols.iter().map(|s| s.to_string()).collect(),
+        control: control.to_string(),
+    }
+}
+
+/// The frozen P2 design grid, in grid-file order: the B0-B5
+/// baseline ladder, single-feature additions on B3, leave-one-out
+/// from B5, and permutation / 5-bar shift controls on the P2 block.
+/// The B0-B5 ladder is defined here because no B0-B5 definition
+/// exists in the workbook or roadmap text: B0 is the
+/// training-majority predictor, B1 is OFI only, B2 is book state,
+/// B3 is the v3 frame, B4 adds the flow-normalization group, and B5
+/// is the full v4 frame.
+pub fn preregistered_p2_grid() -> Vec<P2Config> {
+    const V3: &[&str] = &["ofi", "ofi_z", "imbalance", "spread_z", "signed_vol"];
+    const FLOW: &[&str] = &[
+        "signed_flow_w",
+        "ofi_depth",
+        "signed_flow_lag3",
+        "signed_flow_lag10",
+        "ofi_lag3",
+        "ofi_lag10",
+    ];
+    const ACT: &[&str] = &["quote_rate", "trade_rate", "realized_vol", "micro_disp"];
+    const ALL: &[&str] = &[
+        "ofi",
+        "ofi_z",
+        "imbalance",
+        "spread_z",
+        "signed_vol",
+        "signed_flow_w",
+        "ofi_depth",
+        "signed_flow_lag3",
+        "signed_flow_lag10",
+        "ofi_lag3",
+        "ofi_lag10",
+        "quote_rate",
+        "trade_rate",
+        "realized_vol",
+        "micro_disp",
+    ];
+    let mut grid = Vec::with_capacity(30);
+    grid.push(p2_cfg("b0-majority", "baseline", &[], "none"));
+    grid.push(p2_cfg("b1-ofi", "baseline", &["ofi"], "none"));
+    grid.push(p2_cfg(
+        "b2-book",
+        "baseline",
+        &["ofi", "ofi_z", "imbalance", "spread_z"],
+        "none",
+    ));
+    grid.push(p2_cfg("b3-v3", "baseline", V3, "none"));
+    let mut b4_cols: Vec<&str> = V3.to_vec();
+    b4_cols.extend_from_slice(FLOW);
+    grid.push(p2_cfg("b4-flow", "baseline", &b4_cols, "none"));
+    grid.push(p2_cfg("b5-full", "default", ALL, "none"));
+    // Single-feature additions on B3.
+    for name in FLOW.iter().chain(ACT.iter()) {
+        let mut cols: Vec<&str> = V3.to_vec();
+        cols.push(name);
+        grid.push(p2_cfg(&format!("add-{name}"), "add-one", &cols, "none"));
+    }
+    // Leave-one-out from B5.
+    for name in FLOW.iter().chain(ACT.iter()) {
+        let cols: Vec<&str> = ALL.iter().filter(|&&c| c != *name).copied().collect();
+        grid.push(p2_cfg(
+            &format!("drop-{name}"),
+            "leave-one-out",
+            &cols,
+            "none",
+        ));
+    }
+    // Controls on the P2 block.
+    grid.push(p2_cfg("b5-permute", "control", ALL, "permute"));
+    grid.push(p2_cfg("b5-shift5", "control", ALL, "shift5"));
+    grid.push(p2_cfg("b4-permute", "control", &b4_cols, "permute"));
+    grid.push(p2_cfg("b4-shift5", "control", &b4_cols, "shift5"));
+    grid
+}
+
+/// Parse the `configs` array of a P2 grid file
+/// (`experiments/p2/grid.json`). Each entry carries `id`, `kind`,
+/// `cols` (feature names) and `control`; the entry order is
+/// preserved.
+pub fn p2_grid_from_json(text: &str) -> Result<Vec<P2Config>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("p2 grid.json does not parse: {e}"))?;
+    let configs = v
+        .get("configs")
+        .and_then(|c| c.as_array())
+        .ok_or("p2 grid.json has no configs array")?;
+    let mut out = Vec::with_capacity(configs.len());
+    for (i, c) in configs.iter().enumerate() {
+        let id = c
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or(format!("p2 grid config {i} has no id"))?;
+        let kind = c
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or(format!("p2 grid config {i} has no kind"))?;
+        let cols = c
+            .get("cols")
+            .and_then(|v| v.as_array())
+            .ok_or(format!("p2 grid config {i} has no cols"))?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or(format!("p2 grid config {i} has a non-string col"))
+            })
+            .collect::<Result<Vec<String>, String>>()?;
+        let control = c
+            .get("control")
+            .and_then(|v| v.as_str())
+            .ok_or(format!("p2 grid config {i} has no control"))?;
+        out.push(P2Config {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            cols,
+            control: control.to_string(),
         });
     }
     Ok(out)
@@ -3864,5 +4607,474 @@ mod tests {
             verify_prediction_ledger(&bad, &loaded_rows).is_err(),
             "calibration bins not summing to n_oos went undetected"
         );
+    }
+
+    // ---- Stage 3 P2: normalized flow features ----------------------
+
+    fn p2_q(t: i64, mid: f64, bq: f64, aq: f64) -> Quote {
+        Quote {
+            time_ms: t,
+            bid_px: mid - 0.05,
+            bid_sz: bq,
+            ask_px: mid + 0.05,
+            ask_sz: aq,
+        }
+    }
+
+    fn p2_col(name: &str) -> usize {
+        P2_FEATURE_NAMES
+            .iter()
+            .position(|n| *n == name)
+            .unwrap_or_else(|| panic!("unknown P2 feature {name}"))
+    }
+
+    fn p2_row(t: i64, features: [f64; P2_N_FEATURES], target: u8) -> P2Bar {
+        P2Bar {
+            time_ms: t,
+            features,
+            target,
+            spread_degenerate: false,
+        }
+    }
+
+    /// 40 bars, one quote per bar, constant prices, sizes alternating
+    /// between A on even bars and B on odd bars.
+    fn ofi_depth_session(b_a: f64, a_a: f64, b_b: f64, a_b: f64) -> Vec<Quote> {
+        (0..40)
+            .map(|i| {
+                let (bq, aq) = if i % 2 == 0 { (b_a, a_a) } else { (b_b, a_b) };
+                p2_q(i * 10_000, 100.05, bq, aq)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_ofi_depth_ten_analytic_fixtures() {
+        // (A bid, A ask, B bid, B ask, OFI at odd bar 31, ofi_depth).
+        // Bar 31 compares B sizes against A sizes, so its OFI is
+        // (bB - bA) - (aB - aA); its trailing 30-bar mean depth holds
+        // 15 A bars and 15 B bars, so the mean depth is (dA + dB)/2.
+        let cases: [(f64, f64, f64, f64, f64, f64); 10] = [
+            (4.0, 6.0, 6.0, 4.0, 4.0, 0.8),
+            (2.0, 8.0, 6.0, 4.0, 8.0, 1.6),
+            (1.0, 9.0, 9.0, 1.0, 16.0, 3.2),
+            (3.0, 3.0, 3.0, 9.0, -6.0, -1.3333333333333333),
+            (10.0, 0.0, 0.0, 10.0, -20.0, -4.0),
+            (0.5, 1.5, 2.5, 0.5, 3.0, 2.4),
+            (7.0, 3.0, 7.0, 7.0, -4.0, -0.6666666666666666),
+            (12.0, 4.0, 4.0, 12.0, -16.0, -2.0),
+            (5.0, 5.0, 15.0, 5.0, 10.0, 1.3333333333333333),
+            (2.0, 6.0, 6.0, 2.0, 8.0, 2.0),
+        ];
+        let mut max_err = 0.0f64;
+        for (b_a, a_a, b_b, a_b, want_ofi, want_depth) in cases {
+            let qs = ofi_depth_session(b_a, a_a, b_b, a_b);
+            let ds = build_p2_dataset(&qs, &[], 10_000, 3);
+            let row = ds
+                .iter()
+                .find(|r| r.time_ms == 310_000)
+                .expect("row at bar 31");
+            let ofi_err = (row.features[p2_col("ofi")] - want_ofi).abs();
+            let depth_err = (row.features[p2_col("ofi_depth")] - want_depth).abs();
+            max_err = max_err.max(ofi_err).max(depth_err);
+            assert!(
+                ofi_err <= 1e-10,
+                "case A=({b_a},{a_a}) B=({b_b},{a_b}): OFI {} vs {want_ofi}",
+                row.features[p2_col("ofi")]
+            );
+            assert!(
+                depth_err <= 1e-10,
+                "case A=({b_a},{a_a}) B=({b_b},{a_b}): OFI/depth {} vs {want_depth}",
+                row.features[p2_col("ofi_depth")]
+            );
+        }
+        assert!(
+            max_err <= 1e-10,
+            "max abs error over 10 analytic OFI/depth fixtures is {max_err:e}"
+        );
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_signed_flow_window_and_lags_known_answer() {
+        // Constant quotes (OFI 0); bar i carries one buy trade of i
+        // base units, so signed_vol[i] = i. At bar 35 the trailing
+        // 6-bar signed flow is 30+31+32+33+34+35 = 195, the 3-bar
+        // lag is 32 and the 10-bar lag is 25.
+        let qs: Vec<Quote> = (0..40)
+            .map(|i| p2_q(i * 10_000, 100.05, 5.0, 5.0))
+            .collect();
+        let trades: Vec<Trade> = (0..40)
+            .map(|i| Trade {
+                time_ms: i * 10_000 + 100,
+                price: 100.05,
+                qty: i as f64,
+                is_buyer_maker: false,
+            })
+            .collect();
+        let ds = build_p2_dataset(&qs, &trades, 10_000, 3);
+        let row = ds
+            .iter()
+            .find(|r| r.time_ms == 350_000)
+            .expect("row at bar 35");
+        assert!((row.features[p2_col("signed_flow_w")] - 195.0).abs() < 1e-9);
+        assert!((row.features[p2_col("signed_flow_lag3")] - 32.0).abs() < 1e-9);
+        assert!((row.features[p2_col("signed_flow_lag10")] - 25.0).abs() < 1e-9);
+        assert!(row.features[p2_col("ofi_lag3")].abs() < 1e-9);
+        assert!(row.features[p2_col("ofi_lag10")].abs() < 1e-9);
+        assert!(row.features[p2_col("ofi")].abs() < 1e-9);
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_realized_vol_known_answer() {
+        // Mids double every bar, so each log return is ln 2 and the
+        // trailing 30-bar window holds 29 clean within-window
+        // returns: realized vol = ln 2 * sqrt(29).
+        let qs: Vec<Quote> = (0..40)
+            .map(|i| p2_q(i * 10_000, 100.0 * 2f64.powi(i as i32), 5.0, 5.0))
+            .collect();
+        let ds = build_p2_dataset(&qs, &[], 10_000, 3);
+        let row = ds
+            .iter()
+            .find(|r| r.time_ms == 350_000)
+            .expect("row at bar 35");
+        let want = 2f64.ln() * (29f64).sqrt();
+        assert!(
+            (row.features[p2_col("realized_vol")] - want).abs() <= 1e-10,
+            "realized vol {} vs {want}",
+            row.features[p2_col("realized_vol")]
+        );
+        // Constant mids give exactly zero realized volatility.
+        let flat: Vec<Quote> = (0..40)
+            .map(|i| p2_q(i * 10_000, 100.05, 5.0, 5.0))
+            .collect();
+        let ds_flat = build_p2_dataset(&flat, &[], 10_000, 3);
+        let row_flat = ds_flat
+            .iter()
+            .find(|r| r.time_ms == 350_000)
+            .expect("flat row at bar 35");
+        assert!(row_flat.features[p2_col("realized_vol")].abs() <= 1e-10);
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_quote_trade_rates_known_answer() {
+        // Bar i holds (i%3 + 1) quotes and (i%2 + 1) trades. Bars
+        // 6..=35 cover 10 full quote cycles (mean 2.0) and 15 of
+        // each trade count (mean 1.5).
+        let mut qs = Vec::new();
+        let mut trades = Vec::new();
+        for i in 0..40 {
+            for j in 0..(i % 3 + 1) {
+                qs.push(p2_q(i * 10_000 + j * 100, 100.05, 5.0, 5.0));
+            }
+            for k in 0..(i % 2 + 1) {
+                trades.push(Trade {
+                    time_ms: i * 10_000 + 500 + k * 100,
+                    price: 100.05,
+                    qty: 0.1,
+                    is_buyer_maker: false,
+                });
+            }
+        }
+        let ds = build_p2_dataset(&qs, &trades, 10_000, 3);
+        let row = ds
+            .iter()
+            .find(|r| r.time_ms == 350_000)
+            .expect("row at bar 35");
+        assert!((row.features[p2_col("quote_rate")] - 2.0).abs() < 1e-9);
+        assert!((row.features[p2_col("trade_rate")] - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_micro_disp_known_answer() {
+        // Sizes (8, 2): microprice (100.1*8 + 100.0*2)/10 = 100.08
+        // against mid 100.05 and spread 0.1, displacement +0.3.
+        let qs: Vec<Quote> = (0..40)
+            .map(|i| p2_q(i * 10_000, 100.05, 8.0, 2.0))
+            .collect();
+        let ds = build_p2_dataset(&qs, &[], 10_000, 3);
+        for row in &ds {
+            assert!((row.features[p2_col("micro_disp")] - 0.3).abs() < 1e-12);
+        }
+        // Zero spread pins the displacement to exactly 0.
+        let locked: Vec<Quote> = (0..40)
+            .map(|i| Quote {
+                time_ms: i * 10_000,
+                bid_px: 100.0,
+                bid_sz: 5.0,
+                ask_px: 100.0,
+                ask_sz: 5.0,
+            })
+            .collect();
+        let ds_locked = build_p2_dataset(&locked, &[], 10_000, 3);
+        for row in &ds_locked {
+            assert_eq!(row.features[p2_col("micro_disp")], 0.0);
+            assert_eq!(row.features[p2_col("ofi_depth")], 0.0);
+        }
+        // Zero sizes pin both the displacement and OFI/depth to 0.
+        let empty: Vec<Quote> = (0..40)
+            .map(|i| p2_q(i * 10_000, 100.05, 0.0, 0.0))
+            .collect();
+        let ds_empty = build_p2_dataset(&empty, &[], 10_000, 3);
+        for row in &ds_empty {
+            assert_eq!(row.features[p2_col("micro_disp")], 0.0);
+            assert_eq!(row.features[p2_col("ofi_depth")], 0.0);
+        }
+    }
+
+    /// Deterministic synthetic quote/trade stream: one quote per
+    /// second with a random-walk mid and random sizes, one trade per
+    /// second. Seeded xorshift, no randomness at test time.
+    fn p2_synth_stream(seed: u64, n_bars: usize) -> (Vec<Quote>, Vec<Trade>) {
+        let mut s: u64 = seed;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s as f64) / (u64::MAX as f64)
+        };
+        let mut quotes = Vec::new();
+        let mut trades = Vec::new();
+        let mut mid = 100.0;
+        for sec in 0..(n_bars * 10) {
+            let t = sec as i64 * 1000;
+            quotes.push(p2_q(t, mid, 1.0 + 9.0 * rnd(), 1.0 + 9.0 * rnd()));
+            trades.push(Trade {
+                time_ms: t + 100,
+                price: mid,
+                qty: 0.01 + 0.5 * rnd(),
+                is_buyer_maker: rnd() < 0.5,
+            });
+            mid += (rnd() - 0.5) * 0.04;
+        }
+        (quotes, trades)
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_prefix_extension_bit_identical() {
+        // 10 synthetic prefix-extension cases: building the frame on
+        // a time-prefix of the stream must leave every shared row
+        // bit-identical (0 future-induced changes).
+        for case in 0..10 {
+            let n_bars = 80 + case * 7;
+            let k = n_bars / 2;
+            let (quotes, trades) = p2_synth_stream(0x9E3779B97F4A7C15 + case as u64, n_bars);
+            let cut_ms = k as i64 * 10_000;
+            let pre_q: Vec<Quote> = quotes
+                .iter()
+                .filter(|q| q.time_ms < cut_ms)
+                .copied()
+                .collect();
+            let pre_t: Vec<Trade> = trades
+                .iter()
+                .filter(|t| t.time_ms < cut_ms)
+                .copied()
+                .collect();
+            let full = build_p2_dataset(&quotes, &trades, 10_000, 3);
+            let pre = build_p2_dataset(&pre_q, &pre_t, 10_000, 3);
+            // Rows whose target window ends before the cut exist in
+            // both frames; later rows cannot be compared.
+            let last_shared_ms = (k as i64 - 4) * 10_000;
+            let mut compared = 0;
+            for row in full.iter().filter(|r| r.time_ms <= last_shared_ms) {
+                let other = pre
+                    .iter()
+                    .find(|r| r.time_ms == row.time_ms)
+                    .unwrap_or_else(|| panic!("case {case}: missing prefix row {}", row.time_ms));
+                for j in 0..P2_N_FEATURES {
+                    assert_eq!(
+                        row.features[j].to_bits(),
+                        other.features[j].to_bits(),
+                        "case {case}: feature {} changed after extension at {}",
+                        P2_FEATURE_NAMES[j],
+                        row.time_ms
+                    );
+                }
+                assert_eq!(row.target, other.target);
+                compared += 1;
+            }
+            assert!(compared > 0, "case {case}: no shared rows compared");
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_v3_columns_bit_identical() {
+        // The v4 frame's first five columns must reproduce
+        // `build_dataset` row for row on shared rows, so the v3
+        // baseline is preserved exactly inside the new frame.
+        let (q, t) = synth_quotes(1200, true);
+        let v3 = build_dataset(&q, &t, 10_000, 3);
+        let p2 = build_p2_dataset(&q, &t, 10_000, 3);
+        assert!(!p2.is_empty());
+        let mut compared = 0;
+        for row in &p2 {
+            let other = v3
+                .iter()
+                .find(|b| b.time_ms == row.time_ms)
+                .unwrap_or_else(|| panic!("no v3 row at {}", row.time_ms));
+            for (j, v) in row.v3_features().iter().enumerate() {
+                assert_eq!(
+                    v.to_bits(),
+                    other.features()[j].to_bits(),
+                    "v3 column {j} differs at {}",
+                    row.time_ms
+                );
+            }
+            assert_eq!(row.target, other.target);
+            assert_eq!(row.spread_degenerate, other.spread_degenerate);
+            compared += 1;
+        }
+        assert!(compared > 0);
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_scaler_excludes_test_rows() {
+        // Perturbing only test-block rows must leave every fold's
+        // fitted weights bit-identical (standardization is learned
+        // in training only), while the scored probabilities move.
+        let (q, t) = synth_quotes(1200, true);
+        let ds = build_p2_dataset(&q, &t, 10_000, 3);
+        let base = walk_forward_p2(&ds, P2_B5_COLS, P2Control::Off, 4, 3).expect("eval failed");
+        let n = ds.len();
+        let fold = n / 5;
+        let (a, b) = (4 * fold, n.min(5 * fold));
+        let mut perturbed = ds.clone();
+        for row in &mut perturbed[a..b] {
+            for v in row.features.iter_mut() {
+                *v *= 1000.0;
+            }
+        }
+        let rerun =
+            walk_forward_p2(&perturbed, P2_B5_COLS, P2Control::Off, 4, 3).expect("eval failed");
+        assert_eq!(base.fold_models.len(), rerun.fold_models.len());
+        for (i, ((w0, b0), (w1, b1))) in base
+            .fold_models
+            .iter()
+            .zip(rerun.fold_models.iter())
+            .enumerate()
+        {
+            assert_eq!(w0.len(), w1.len());
+            for (j, (x, y)) in w0.iter().zip(w1.iter()).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "fold {i} weight {j} moved when only test rows changed"
+                );
+            }
+            assert_eq!(
+                b0.to_bits(),
+                b1.to_bits(),
+                "fold {i} intercept moved when only test rows changed"
+            );
+        }
+        let max_p_diff = base
+            .predictions
+            .iter()
+            .zip(rerun.predictions.iter())
+            .map(|(x, y)| (x.proba - y.proba).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            max_p_diff > 0.01,
+            "perturbed test rows left every probability unchanged; the check is vacuous"
+        );
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_controls_on_hand_built_frame() {
+        // 400 rows, alternating targets, one P2 column equal to the
+        // target and every other column zero: the clean model is
+        // near-perfect, the permutation control breaks the alignment,
+        // and a 5-bar shift (odd lag) flips it.
+        let rows: Vec<P2Bar> = (0..400)
+            .map(|i| {
+                let target = (i % 2) as u8;
+                let mut f = [0.0; P2_N_FEATURES];
+                f[p2_col("signed_flow_w")] = target as f64;
+                p2_row(i as i64 * 10_000, f, target)
+            })
+            .collect();
+        let clean =
+            walk_forward_p2(&rows, P2_B5_COLS, P2Control::Off, 4, 3).expect("clean eval failed");
+        assert!(
+            clean.accuracy > 0.95,
+            "clean accuracy {} should be near-perfect",
+            clean.accuracy
+        );
+        let perm =
+            walk_forward_p2(&rows, P2_B5_COLS, P2Control::Permute, 4, 3).expect("perm eval failed");
+        assert!(
+            (0.35..=0.65).contains(&perm.accuracy),
+            "permuted accuracy {} should sit near chance",
+            perm.accuracy
+        );
+        assert!(
+            perm.accuracy < clean.accuracy - 0.3,
+            "permutation did not collapse the signal: {} vs {}",
+            perm.accuracy,
+            clean.accuracy
+        );
+        let shift =
+            walk_forward_p2(&rows, P2_B5_COLS, P2Control::Shift, 4, 3).expect("shift eval failed");
+        assert!(
+            shift.accuracy < 0.1,
+            "shifted accuracy {} should be near zero on alternating targets",
+            shift.accuracy
+        );
+        assert!(shift.n_oos < clean.n_oos, "shift must drop warm-up rows");
+        // B0 is the training-majority predictor by construction, and
+        // B3 sees only zero columns here, so both sit at chance.
+        let b0 = walk_forward_p2(&rows, &[], P2Control::Off, 4, 3).expect("b0 eval failed");
+        assert!(
+            (b0.accuracy - 0.5).abs() < 0.05,
+            "b0 accuracy {}",
+            b0.accuracy
+        );
+        assert!(
+            (b0.baseline - b0.accuracy).abs() < 1e-12,
+            "b0 must equal its own baseline"
+        );
+        let b3 = walk_forward_p2(&rows, P2_B3_COLS, P2Control::Off, 4, 3).expect("b3 eval failed");
+        assert!(
+            (b3.accuracy - 0.5).abs() < 0.05,
+            "b3 accuracy {}",
+            b3.accuracy
+        );
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_thin_data_has_no_rows() {
+        let qs: Vec<Quote> = (0..10)
+            .map(|i| p2_q(i * 10_000 + 1_000, 100.05, 5.0, 5.0))
+            .collect();
+        assert!(build_p2_dataset(&qs, &[], 10_000, 3).is_empty());
+    }
+
+    #[test]
+    fn stage3_toxicflow_2_p2_preregistered_grid_shape() {
+        let grid = preregistered_p2_grid();
+        assert_eq!(grid.len(), 30, "grid must hold 30 configs");
+        let ids: Vec<&str> = grid.iter().map(|c| c.id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(ids.len(), sorted.len(), "config ids must be unique");
+        let defaults: Vec<&P2Config> = grid.iter().filter(|c| c.kind == "default").collect();
+        assert_eq!(defaults.len(), 1, "exactly one default config");
+        assert_eq!(defaults[0].id, "b5-full");
+        assert_eq!(defaults[0].cols.len(), P2_N_FEATURES);
+        let b0 = grid.iter().find(|c| c.id == "b0-majority").expect("b0");
+        assert!(b0.cols.is_empty());
+        let b3 = grid.iter().find(|c| c.id == "b3-v3").expect("b3");
+        assert_eq!(b3.cols.len(), 5);
+        let b4 = grid.iter().find(|c| c.id == "b4-flow").expect("b4");
+        assert_eq!(b4.cols.len(), 11);
+        for c in &grid {
+            for name in &c.cols {
+                assert!(
+                    P2_FEATURE_NAMES.contains(&name.as_str()),
+                    "config {} names unknown feature {name}",
+                    c.id
+                );
+            }
+        }
     }
 }
