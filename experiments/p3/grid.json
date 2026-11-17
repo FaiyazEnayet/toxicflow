@@ -1,0 +1,173 @@
+{
+ "experiment_id": "p3-conditional-toxicity",
+ "schema_version": "toxicflow.p3-grid/v1",
+ "preregistered": "2026-11-17",
+ "note": "Preregistered before any grid run. The default configuration stays the reported configuration regardless of results; no test outcome is used for parameter selection. The VPIN block is defined here because no VPIN-as-feature definition exists in the workbook or roadmap text.",
+ "default": "controls-vpin",
+ "bar_ms": 10000,
+ "horizon_bars": 3,
+ "n_splits": 4,
+ "bucket_vol_btc": 15.0,
+ "vpin_window": 20,
+ "vpin_lag_bars": 3,
+ "shift_lag_bars": 5,
+ "permutation_seed": "0x5EED5EED000000A3",
+ "baselines": {
+  "B0": "training-majority predictor (no features)",
+  "B3": "the v3 frame: OFI, OFI z-score, imbalance, spread z-score, signed trade volume",
+  "B5": "the v4 frame (controls-only): B3 plus signed-flow window, OFI/depth, lagged signed flow and OFI, quote and trade event rates, trailing realized volatility, microprice displacement"
+ },
+ "decision_rule": "Each decision row is fixed by information available at its bar close: the trailing 30-bar feature window must be fully observed, a full 20-bucket VPIN window must have completed before the bar close, and the VPIN value 3 bars earlier must be defined. The VPIN at a bar close is the last completed bucket value at or before the bar close; bucket volume is a fixed 15.0 BTC, never derived from a session total. Labels: direction is the sign of the forward mid return over the next 3 bars; absolute return is the 3-bar absolute forward return above the training-fold median; spread widening is the spread at the horizon bar strictly above the spread at the decision bar; adverse markout is the forward return running against the bar's net aggressive flow side, with zero-flow rows excluded from that outcome only.",
+ "censoring_rule": "A row is supervised only if every bar feeding its features (trailing 30 bars) and every bar in its forward target window was actually observed. Carried-forward bars are never promoted to fresh observations. Rows before the first full VPIN window are outside the P3 row set for every config.",
+ "selection_rule": "No test outcome is used for parameter selection. The default configuration stays the reported configuration regardless of results. Every grid cell is reported for every outcome.",
+ "absent": [
+  "Cross-session confirmation: blocked. P3::confirm is a separate blocked-input unit; this pilot reports exploratory observations on the archived sessions only.",
+  "Depth beyond the touch: unavailable in archived data; only touch-accessible fields are used.",
+  "Deeper-book imbalance and queue imbalance: not recorded in the archive."
+ ],
+ "configs": [
+  {
+   "id": "b0-majority",
+   "kind": "baseline",
+   "cols": [],
+   "control": "none"
+  },
+  {
+   "id": "b3-v3",
+   "kind": "baseline",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "b5-controls",
+   "kind": "baseline",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "b3-vpin",
+   "kind": "paired",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "vpin",
+    "vpin_lag3"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "vpin-only",
+   "kind": "paired",
+   "cols": [
+    "vpin",
+    "vpin_lag3"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "controls-vpin",
+   "kind": "default",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp",
+    "vpin",
+    "vpin_lag3"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "controls-vpin-permute",
+   "kind": "control",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp",
+    "vpin",
+    "vpin_lag3"
+   ],
+   "control": "permute"
+  },
+  {
+   "id": "controls-vpin-shift5",
+   "kind": "control",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp",
+    "vpin",
+    "vpin_lag3"
+   ],
+   "control": "shift5"
+  }
+ ],
+ "test_sessions": [
+  "session-20261111-163501-utc",
+  "session-20261111-203511-utc",
+  "session-20261112-003521-utc",
+  "session-20261112-043531-utc",
+  "session-20261112-083541-utc",
+  "session-20261112-123552-utc"
+ ]
+}
