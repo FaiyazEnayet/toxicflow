@@ -61,7 +61,7 @@
 //! concrete future mid observation; censored rows are counted per
 //! track and per reason, never dropped silently.
 
-use crate::metrics::{ofi_bars, ofi_events, touch_bars, Quote, Trade};
+use crate::metrics::{ofi_bars, ofi_events, touch_bars, volume_buckets_sized, vpin, Quote, Trade};
 
 pub const N_FEATURES: usize = 5;
 
@@ -2577,6 +2577,859 @@ pub fn p2_grid_from_json(text: &str) -> Result<Vec<P2Config>, String> {
     Ok(out)
 }
 
+// ---- P3: conditional toxicity pilot (feature frame v5) ------------
+
+/// Number of features in the P3 (v5) frame: the fifteen v4 features
+/// plus the two-column VPIN block.
+pub const P3_N_FEATURES: usize = 17;
+
+/// P3 feature names, in `P3Bar::features` order.
+pub const P3_FEATURE_NAMES: [&str; P3_N_FEATURES] = [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp",
+    "vpin",
+    "vpin_lag3",
+];
+
+/// Feature-frame version of `build_p3_dataset`. v5 adds the VPIN
+/// block to the v4 frame; the first five columns reproduce
+/// `build_dataset` bit-identically on shared rows (pinned by
+/// `stage3_toxicflow_3_p3_v3_columns_bit_identical`), so the v3
+/// baseline is preserved exactly inside the new frame.
+pub const P3_FEATURE_VERSION: &str = "v5";
+
+/// Frozen bucket volume behind the VPIN block, in BTC. A fixed
+/// absolute volume, never derived from a session total, so the
+/// bucketing carries no session-level lookahead. 15 BTC matches the
+/// export convention of 50 buckets over the roughly 750 BTC main
+/// session; the six frozen test sessions span 1,162 to 6,665 BTC,
+/// so one session yields 77 to 444 buckets.
+pub const P3_BUCKET_VOL_BTC: f64 = 15.0;
+
+/// VPIN window, in completed buckets. A row is scored only once a
+/// full window of buckets has completed before its bar close, so
+/// the statistic is comparable across rows.
+pub const P3_VPIN_WINDOW: usize = 20;
+
+/// Lag of the second VPIN column, in bars (30 s on the 10 s grid).
+pub const P3_VPIN_LAG_BARS: usize = 3;
+
+/// Seed for the permutation control's deterministic shuffle.
+pub const P3_PERM_SEED: u64 = 0x5EED_5EED_0000_00A3;
+
+/// Shift lag for the shift control, in bars.
+pub const P3_SHIFT_LAG: usize = 5;
+
+/// Column subsets for the P3 cells: B0 is the empty list
+/// (training-majority predictor), B3 is the v3 frame, B5 is the
+/// full v4 frame (the controls-only model), VPIN is the VPIN block
+/// alone, and the controls+VPIN frame is all seventeen columns.
+pub const P3_B0_COLS: &[usize] = &[];
+pub const P3_B3_COLS: &[usize] = &[0, 1, 2, 3, 4];
+pub const P3_B5_COLS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+pub const P3_B3_VPIN_COLS: &[usize] = &[0, 1, 2, 3, 4, 15, 16];
+pub const P3_VPIN_COLS: &[usize] = &[15, 16];
+pub const P3_CONTROLS_VPIN_COLS: &[usize] =
+    &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+/// One v5 decision row.
+#[derive(Debug, Clone)]
+pub struct P3Bar {
+    /// Start time of the OFI bar this row was built from.
+    pub time_ms: i64,
+    pub features: [f64; P3_N_FEATURES],
+    /// Direction label: sign of the forward mid return.
+    pub target_direction: u8,
+    /// Absolute forward mid return, for the train-median
+    /// absolute-return outcome.
+    pub fwd_abs: f64,
+    /// Spread-widening label: spread at the horizon bar strictly
+    /// above the spread at the decision bar.
+    pub target_spread_wide: u8,
+    /// Conditional adverse-markout label: 1 when the forward return
+    /// runs against the bar's net aggressive flow side. `None`
+    /// exactly when the bar's net signed flow is zero, so those
+    /// rows are excluded from that outcome only.
+    pub target_adverse: Option<u8>,
+    pub spread_degenerate: bool,
+    /// Trailing 30-bar mean trade count per bar (regime key).
+    pub trade_rate: f64,
+    /// Trailing 30-bar mean touch depth (regime key).
+    pub depth_mean: f64,
+}
+
+/// The three P3 labels from one forward return, the bar's net
+/// signed flow, and the spreads at the decision and horizon bars.
+/// A zero forward return is direction 0; equal spreads are not a
+/// widening; a zero forward return is never adverse to either side.
+pub fn p3_labels(
+    fwd: f64,
+    signed_vol: f64,
+    spread_now: f64,
+    spread_fwd: f64,
+) -> (u8, u8, Option<u8>) {
+    let direction = u8::from(fwd > 0.0);
+    let spread_wide = u8::from(spread_fwd > spread_now);
+    let adverse = if signed_vol == 0.0 {
+        None
+    } else {
+        Some(u8::from(
+            (signed_vol > 0.0 && fwd < 0.0) || (signed_vol < 0.0 && fwd > 0.0),
+        ))
+    };
+    (direction, spread_wide, adverse)
+}
+
+/// Median of a slice (NaN on an empty slice). Copies before
+/// sorting, so callers' order is untouched.
+pub fn p3_median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    let mut xs = values.to_vec();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = xs.len();
+    if n % 2 == 1 {
+        xs[n / 2]
+    } else {
+        (xs[n / 2 - 1] + xs[n / 2]) / 2.0
+    }
+}
+
+/// Tertile cut points of a slice: the sorted values at indices
+/// n/3 and 2n/3 (NaN, NaN on an empty slice). A row is tertile 0
+/// at or below the first cut, tertile 1 at or below the second,
+/// tertile 2 above it; ties at a cut land in the lower tertile.
+pub fn p3_tertile_cuts(values: &[f64]) -> (f64, f64) {
+    if values.is_empty() {
+        return (f64::NAN, f64::NAN);
+    }
+    let mut xs = values.to_vec();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    (xs[xs.len() / 3], xs[2 * xs.len() / 3])
+}
+
+/// Tertile of one value against train-only cut points.
+pub fn p3_tertile(x: f64, cut1: f64, cut2: f64) -> usize {
+    if x <= cut1 {
+        0
+    } else if x <= cut2 {
+        1
+    } else {
+        2
+    }
+}
+
+/// Build the v5 feature/target frame. Returns empty vec when data
+/// is thin (fewer than 40 bars). Rows start at bar 29 so every
+/// trailing 30-bar window is full, share `build_dataset`'s gap
+/// censoring, and additionally require a full 20-bucket VPIN window
+/// completed before the bar close, plus a defined VPIN 3 bars
+/// earlier for the lag column. The first five columns reproduce
+/// `build_dataset` bit-identically on shared rows.
+pub fn build_p3_dataset(
+    quotes: &[Quote],
+    trades: &[Trade],
+    bar_ms: i64,
+    horizon: usize,
+) -> Vec<P3Bar> {
+    let events = ofi_events(quotes);
+    let bars = ofi_bars(quotes, &events, bar_ms);
+    if bars.len() < 40 {
+        return Vec::new();
+    }
+    let touch = touch_bars(quotes, bar_ms);
+    let n = bars.len();
+    let ofi: Vec<f64> = bars.iter().map(|b| b.1).collect();
+    let mids: Vec<f64> = bars.iter().map(|b| b.2).collect();
+    let spreads: Vec<f64> = bars.iter().map(|b| b.3).collect();
+    let imbs: Vec<f64> = bars.iter().map(|b| b.4).collect();
+
+    let t0 = bars[0].0;
+    let mut signed = vec![0.0; n];
+    let mut trade_counts = vec![0usize; n];
+    for t in trades {
+        let idx = ((t.time_ms - t0) / bar_ms) as usize;
+        if idx < n {
+            signed[idx] += t.signed_qty();
+            trade_counts[idx] += 1;
+        }
+    }
+    let quote_counts: Vec<f64> = touch.iter().map(|b| b.n_quotes as f64).collect();
+    let trade_counts_f: Vec<f64> = trade_counts.iter().map(|&c| c as f64).collect();
+    let depths: Vec<f64> = touch.iter().map(|b| b.depth_mean).collect();
+
+    let (ofi_m, ofi_s) = rolling_mean_sd(&ofi, 30);
+    let (sp_m, sp_s) = rolling_mean_sd(&spreads, 30);
+    let depth_mean = trailing_mean(&depths, P2_TRAIL_WINDOW_BARS);
+    let quote_rate = trailing_mean(&quote_counts, P2_TRAIL_WINDOW_BARS);
+    let trade_rate = trailing_mean(&trade_counts_f, P2_TRAIL_WINDOW_BARS);
+    let signed_flow_w = trailing_sum(&signed, P2_FLOW_WINDOW_BARS);
+    let realized_vol = trailing_realized_vol(&mids, P2_TRAIL_WINDOW_BARS);
+
+    // VPIN alignment: buckets of the frozen volume, in time order.
+    // `vpin` returns one entry per completed bucket; entry k holds
+    // the mean imbalance over the last P3_VPIN_WINDOW buckets once
+    // k + 1 reaches the window. A bar's VPIN is the entry of the
+    // last bucket completed strictly before the bar close, and is
+    // defined only once a full window has completed, so no row ever
+    // reads a bucket that completes after its close.
+    let buckets = volume_buckets_sized(trades, P3_BUCKET_VOL_BTC);
+    let vp = vpin(&buckets, P3_VPIN_WINDOW);
+    let vpin_at = |bar_end: i64| -> Option<f64> {
+        let k = vp.partition_point(|(t, _)| *t < bar_end);
+        if k >= P3_VPIN_WINDOW {
+            Some(vp[k - 1].1)
+        } else {
+            None
+        }
+    };
+
+    let status = crate::metrics::bar_status(quotes, bar_ms);
+    let mut out = Vec::new();
+    for i in 0..n {
+        if i < P2_TRAIL_WINDOW_BARS - 1 || i + horizon >= n || ofi_s[i].is_nan() || sp_s[i].is_nan()
+        {
+            continue;
+        }
+        if status.len() == n {
+            let lo = i.saturating_sub(P2_TRAIL_WINDOW_BARS - 1);
+            let features_observed = status[lo..=i].iter().all(|s| s.observed);
+            let target_observed = status[i + 1..=i + horizon].iter().all(|s| s.observed);
+            if !features_observed || !target_observed {
+                continue;
+            }
+        }
+        if i < P3_VPIN_LAG_BARS {
+            continue;
+        }
+        let bar_end = bars[i].0 + bar_ms;
+        let Some(v) = vpin_at(bar_end) else {
+            continue;
+        };
+        let lag_end = bars[i - P3_VPIN_LAG_BARS].0 + bar_ms;
+        let Some(v_lag) = vpin_at(lag_end) else {
+            continue;
+        };
+        let fwd = mids[i + horizon] / mids[i] - 1.0;
+        let spread_degenerate = sp_s[i] == 0.0;
+        let (direction, spread_wide, adverse) =
+            p3_labels(fwd, signed[i], spreads[i], spreads[i + horizon]);
+        let mut f = [0.0; P3_N_FEATURES];
+        f[0] = ofi[i];
+        f[1] = (ofi[i] - ofi_m[i]) / (ofi_s[i] + 1e-12);
+        f[2] = imbs[i];
+        f[3] = if spread_degenerate {
+            0.0
+        } else {
+            (spreads[i] - sp_m[i]) / (sp_s[i] + 1e-12)
+        };
+        f[4] = signed[i];
+        f[5] = signed_flow_w[i];
+        f[6] = if depth_mean[i] == 0.0 {
+            0.0
+        } else {
+            ofi[i] / depth_mean[i]
+        };
+        f[7] = signed[i - P2_LAG_BARS[0]];
+        f[8] = signed[i - P2_LAG_BARS[1]];
+        f[9] = ofi[i - P2_LAG_BARS[0]];
+        f[10] = ofi[i - P2_LAG_BARS[1]];
+        f[11] = quote_rate[i];
+        f[12] = trade_rate[i];
+        f[13] = realized_vol[i];
+        f[14] = touch[i].micro_disp;
+        f[15] = v;
+        f[16] = v_lag;
+        out.push(P3Bar {
+            time_ms: bars[i].0,
+            features: f,
+            target_direction: direction,
+            fwd_abs: fwd.abs(),
+            target_spread_wide: spread_wide,
+            target_adverse: adverse,
+            spread_degenerate,
+            trade_rate: trade_rate[i],
+            depth_mean: depth_mean[i],
+        });
+    }
+    out
+}
+
+/// How the P3 VPIN block is treated at scoring time. The fitted
+/// model is identical under every control: only the scored test
+/// rows change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum P3Control {
+    /// Score each row on its own features.
+    Off,
+    /// Within each fold's test block, the VPIN block of each row is
+    /// replaced by the VPIN block of another test row, drawn by a
+    /// fixed-seed shuffle. Breaks feature-target alignment while
+    /// preserving the block's joint distribution.
+    Permute,
+    /// Within each fold's test block, the VPIN block of each row is
+    /// replaced by the VPIN block of the test row `P3_SHIFT_LAG`
+    /// bars earlier. The first `P3_SHIFT_LAG` rows of each block
+    /// are unscored.
+    Shift,
+}
+
+/// One P3 outcome. The absolute-return outcome resolves its labels
+/// per fold from the training median of `fwd_abs`; the other three
+/// outcomes carry fixed labels built with the dataset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum P3Outcome {
+    /// Sign of the 3-bar forward mid return.
+    Direction,
+    /// 3-bar absolute forward return above the training median.
+    AbsRet,
+    /// Spread at the horizon bar above the spread at the decision bar.
+    SpreadWide,
+    /// Forward return against the bar's net aggressive flow side.
+    AdverseMarkout,
+}
+
+impl P3Outcome {
+    /// Stable id used in result packets.
+    pub fn id(self) -> &'static str {
+        match self {
+            P3Outcome::Direction => "direction",
+            P3Outcome::AbsRet => "absret",
+            P3Outcome::SpreadWide => "spread_wide",
+            P3Outcome::AdverseMarkout => "adverse_markout",
+        }
+    }
+}
+
+/// One scored P3 row.
+#[derive(Debug, Clone)]
+pub struct P3Prediction {
+    pub fold: usize,
+    pub row: usize,
+    pub time_ms: i64,
+    pub target: u8,
+    pub proba: f64,
+}
+
+/// One fold's held-out scores for a P3 evaluation, with the
+/// train-only thresholds behind it: the activity and depth tertile
+/// cuts and, for the absolute-return outcome, the training median
+/// of `fwd_abs` (NaN for the other outcomes).
+#[derive(Debug, Clone)]
+pub struct P3FoldMetrics {
+    pub fold: usize,
+    pub n_train: usize,
+    pub n_test: usize,
+    /// Rows actually scored (fewer than `n_test` under Shift).
+    pub n_scored: usize,
+    pub accuracy: f64,
+    pub baseline_accuracy: f64,
+    pub brier: f64,
+    pub log_loss: f64,
+    pub activity_cut1: f64,
+    pub activity_cut2: f64,
+    pub depth_cut1: f64,
+    pub depth_cut2: f64,
+    pub absret_median: f64,
+}
+
+/// A P3 walk-forward evaluation on one column subset and one
+/// outcome.
+#[derive(Debug, Clone)]
+pub struct P3Eval {
+    pub outcome: P3Outcome,
+    pub n_labeled: usize,
+    /// Held-out predictions scored: the exact denominator behind
+    /// accuracy, Brier score and log loss.
+    pub n_oos: usize,
+    pub n_pos_oos: usize,
+    pub n_neg_oos: usize,
+    /// Labeled rows the evaluation never scores: training rows,
+    /// purge-gap rows, and (under Shift) warm-up rows.
+    pub n_unscored: usize,
+    pub accuracy: f64,
+    /// Out-of-sample accuracy of the training-majority predictor on
+    /// the same scored rows.
+    pub baseline: f64,
+    pub brier: f64,
+    pub log_loss: f64,
+    pub balanced_accuracy: f64,
+    pub per_fold: Vec<P3FoldMetrics>,
+    pub predictions: Vec<P3Prediction>,
+    /// (raw-space weights in `cols` order, intercept) per fold.
+    /// The standardization behind each fold is learned from that
+    /// fold's training rows only.
+    pub fold_models: Vec<(Vec<f64>, f64)>,
+}
+
+/// Full-batch gradient descent for L2 logistic regression on a
+/// column subset of the P3 frame. Standardization (mean and
+/// population sd, sd floor 1e-12) is learned from the supplied rows
+/// only, exactly as in `fit_logistic`; callers pass training rows.
+/// Returns (raw-space weights in `cols` order, intercept).
+fn fit_logistic_p3_cols(
+    xs: &[[f64; P3_N_FEATURES]],
+    y: &[u8],
+    cols: &[usize],
+    l2: f64,
+    iters: usize,
+    lr: f64,
+) -> (Vec<f64>, f64) {
+    let n = xs.len() as f64;
+    let d = cols.len();
+    let mut mu = vec![0.0; d];
+    let mut sd = vec![0.0; d];
+    for row in xs {
+        for (k, &j) in cols.iter().enumerate() {
+            mu[k] += row[j];
+        }
+    }
+    for m in mu.iter_mut() {
+        *m /= n;
+    }
+    for row in xs {
+        for (k, &j) in cols.iter().enumerate() {
+            let z = row[j] - mu[k];
+            sd[k] += z * z;
+        }
+    }
+    for s in sd.iter_mut() {
+        *s = (*s / n).sqrt() + 1e-12;
+    }
+    let mut w = vec![0.0; d + 1];
+    for _ in 0..iters {
+        let mut grad = vec![0.0; d + 1];
+        for (row, &yi) in xs.iter().zip(y.iter()) {
+            let mut z = w[d];
+            for (k, &j) in cols.iter().enumerate() {
+                z += w[k] * (row[j] - mu[k]) / sd[k];
+            }
+            let err = sigmoid(z) - yi as f64;
+            for (k, &j) in cols.iter().enumerate() {
+                grad[k] += err * (row[j] - mu[k]) / sd[k];
+            }
+            grad[d] += err;
+        }
+        for k in 0..d {
+            w[k] -= lr * (grad[k] / n + l2 * w[k] / n);
+        }
+        w[d] -= lr * grad[d] / n;
+    }
+    let mut raw = vec![0.0; d];
+    let mut b = w[d];
+    for k in 0..d {
+        raw[k] = w[k] / sd[k];
+        b -= w[k] * mu[k] / sd[k];
+    }
+    (raw, b)
+}
+
+fn predict_proba_p3_cols(
+    x: &[f64; P3_N_FEATURES],
+    cols: &[usize],
+    w: &[f64],
+    intercept: f64,
+) -> f64 {
+    let mut z = intercept;
+    for (k, &j) in cols.iter().enumerate() {
+        z += w[k] * x[j];
+    }
+    sigmoid(z)
+}
+
+/// Purged walk-forward evaluation of one P3 column subset on one
+/// outcome, with the same fold geometry as `walk_forward_p2` (fold
+/// = n / (n_splits + 1), purge gap = `horizon` bars). An empty
+/// column list is the B0 training-majority predictor: every row
+/// scores the training positive rate. The adverse-markout outcome
+/// scores only rows whose bar carries nonzero net signed flow;
+/// every other outcome scores the full row set, so all configs
+/// compared on one outcome share the same folds and observations.
+pub fn walk_forward_p3(
+    bars: &[P3Bar],
+    cols: &[usize],
+    control: P3Control,
+    n_splits: usize,
+    horizon: usize,
+    outcome: P3Outcome,
+) -> Option<P3Eval> {
+    let rows: Vec<&P3Bar> = match outcome {
+        P3Outcome::AdverseMarkout => bars.iter().filter(|r| r.target_adverse.is_some()).collect(),
+        _ => bars.iter().collect(),
+    };
+    // Original indices into `bars`, so predictions stay addressable
+    // against the unfiltered row set even when the outcome filters
+    // rows out (adverse markout drops zero-flow rows).
+    let orig: Vec<usize> = match outcome {
+        P3Outcome::AdverseMarkout => bars
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.target_adverse.is_some())
+            .map(|(i, _)| i)
+            .collect(),
+        _ => (0..bars.len()).collect(),
+    };
+    let n = rows.len();
+    if n < 60 {
+        return None;
+    }
+    let fold = n / (n_splits + 1);
+    if fold < 10 {
+        return None;
+    }
+    let mut per_fold: Vec<P3FoldMetrics> = Vec::new();
+    let mut predictions: Vec<P3Prediction> = Vec::new();
+    let mut fold_models: Vec<(Vec<f64>, f64)> = Vec::new();
+    for k in 1..=n_splits {
+        let a = k * fold;
+        let b = ((k + 1) * fold).min(n);
+        let train_end = a.saturating_sub(horizon);
+        if train_end < 30 || b - a < 10 {
+            continue;
+        }
+        let train = &rows[..train_end];
+        let test = &rows[a..b];
+        // Train-only thresholds: the absolute-return median and the
+        // activity/depth tertile cuts are learned from the training
+        // rows of this fold only.
+        let absret_median = match outcome {
+            P3Outcome::AbsRet => p3_median(&train.iter().map(|r| r.fwd_abs).collect::<Vec<_>>()),
+            _ => f64::NAN,
+        };
+        let (activity_cut1, activity_cut2) =
+            p3_tertile_cuts(&train.iter().map(|r| r.trade_rate).collect::<Vec<_>>());
+        let (depth_cut1, depth_cut2) =
+            p3_tertile_cuts(&train.iter().map(|r| r.depth_mean).collect::<Vec<_>>());
+        let label = |r: &P3Bar| -> u8 {
+            match outcome {
+                P3Outcome::Direction => r.target_direction,
+                P3Outcome::AbsRet => u8::from(r.fwd_abs > absret_median),
+                P3Outcome::SpreadWide => r.target_spread_wide,
+                P3Outcome::AdverseMarkout => r.target_adverse.unwrap_or(0),
+            }
+        };
+        let ys: Vec<u8> = train.iter().map(|r| label(r)).collect();
+        let pos = ys.iter().map(|&y| usize::from(y)).sum::<usize>();
+        let (majority_label, _majority_n) = if pos * 2 >= ys.len() {
+            (1u8, pos)
+        } else {
+            (0u8, ys.len() - pos)
+        };
+        let (w, intercept) = if cols.is_empty() {
+            let p = (pos as f64 / ys.len() as f64).clamp(1e-6, 1.0 - 1e-6);
+            (Vec::new(), (p / (1.0 - p)).ln())
+        } else {
+            let xs: Vec<[f64; P3_N_FEATURES]> = train.iter().map(|x| x.features).collect();
+            fit_logistic_p3_cols(&xs, &ys, cols, FIT_L2, FIT_ITERS, FIT_LR)
+        };
+        // (filtered position, original row index, scored features).
+        let mut scored: Vec<(usize, usize, [f64; P3_N_FEATURES])> = Vec::new();
+        match control {
+            P3Control::Off => {
+                for (off, row) in test.iter().enumerate() {
+                    scored.push((a + off, orig[a + off], row.features));
+                }
+            }
+            P3Control::Permute => {
+                let perm = p2_permutation(test.len(), P3_PERM_SEED ^ (k as u64));
+                for (off, row) in test.iter().enumerate() {
+                    let mut f = row.features;
+                    let donor = test[perm[off]].features;
+                    for &j in P3_VPIN_COLS {
+                        f[j] = donor[j];
+                    }
+                    scored.push((a + off, orig[a + off], f));
+                }
+            }
+            P3Control::Shift => {
+                for (off, row) in test.iter().enumerate() {
+                    if off < P3_SHIFT_LAG {
+                        continue;
+                    }
+                    let mut f = row.features;
+                    let donor = test[off - P3_SHIFT_LAG].features;
+                    for &j in P3_VPIN_COLS {
+                        f[j] = donor[j];
+                    }
+                    scored.push((a + off, orig[a + off], f));
+                }
+            }
+        }
+        let fold_idx = per_fold.len();
+        let mut acc_sum = 0.0f64;
+        let mut base_sum = 0.0f64;
+        let mut brier_sum = 0.0f64;
+        let mut ll_sum = 0.0f64;
+        for (pos, row_idx, f) in &scored {
+            let bar = &rows[*pos];
+            let target = label(bar);
+            let p = if cols.is_empty() {
+                sigmoid(intercept)
+            } else {
+                predict_proba_p3_cols(f, cols, &w, intercept)
+            };
+            predictions.push(P3Prediction {
+                fold: fold_idx,
+                row: *row_idx,
+                time_ms: bar.time_ms,
+                target,
+                proba: p,
+            });
+            acc_sum += f64::from(u8::from(p > 0.5) == target);
+            base_sum += f64::from(majority_label == target);
+            brier_sum += (p - f64::from(target)).powi(2);
+            let pc = p.clamp(1e-15, 1.0 - 1e-15);
+            ll_sum += if target == 1 {
+                -pc.ln()
+            } else {
+                -(1.0 - pc).ln()
+            };
+        }
+        let m = scored.len().max(1) as f64;
+        per_fold.push(P3FoldMetrics {
+            fold: fold_idx,
+            n_train: train_end,
+            n_test: b - a,
+            n_scored: scored.len(),
+            accuracy: acc_sum / m,
+            baseline_accuracy: base_sum / m,
+            brier: brier_sum / m,
+            log_loss: ll_sum / m,
+            activity_cut1,
+            activity_cut2,
+            depth_cut1,
+            depth_cut2,
+            absret_median,
+        });
+        fold_models.push((w, intercept));
+    }
+    if predictions.is_empty() {
+        return None;
+    }
+    let n_oos = predictions.len();
+    let acc = predictions
+        .iter()
+        .map(|r| f64::from(u8::from(r.proba > 0.5) == r.target))
+        .sum::<f64>()
+        / n_oos as f64;
+    let (mut tp, mut fn_, mut tn, mut fp) = (0usize, 0usize, 0usize, 0usize);
+    let mut brier_sum = 0.0f64;
+    let mut ll_sum = 0.0f64;
+    let mut n_pos_oos = 0usize;
+    for r in predictions.iter() {
+        match (r.target, r.proba > 0.5) {
+            (1, true) => tp += 1,
+            (1, false) => fn_ += 1,
+            (0, false) => tn += 1,
+            (0, true) => fp += 1,
+            _ => unreachable!(),
+        }
+        brier_sum += (r.proba - f64::from(r.target)).powi(2);
+        let pc = r.proba.clamp(1e-15, 1.0 - 1e-15);
+        ll_sum += if r.target == 1 {
+            -pc.ln()
+        } else {
+            -(1.0 - pc).ln()
+        };
+        n_pos_oos += usize::from(r.target == 1);
+    }
+    // The training-majority accuracy over the scored rows: each
+    // row's fold majority label is the label that fold committed to
+    // from training data alone. It is recovered from the per-fold
+    // baseline accuracies weighted by scored rows.
+    let mut base_correct = 0.0f64;
+    for f in &per_fold {
+        base_correct += f.baseline_accuracy * f.n_scored as f64;
+    }
+    let base_sum = base_correct / n_oos as f64;
+    let balanced = if tp + fn_ == 0 || tn + fp == 0 {
+        f64::NAN
+    } else {
+        0.5 * (tp as f64 / (tp + fn_) as f64 + tn as f64 / (tn + fp) as f64)
+    };
+    Some(P3Eval {
+        outcome,
+        n_labeled: n,
+        n_oos,
+        n_pos_oos,
+        n_neg_oos: n_oos - n_pos_oos,
+        n_unscored: n - n_oos,
+        accuracy: acc,
+        baseline: base_sum,
+        brier: brier_sum / n_oos as f64,
+        log_loss: ll_sum / n_oos as f64,
+        balanced_accuracy: balanced,
+        per_fold,
+        predictions,
+        fold_models,
+    })
+}
+
+// ---- P3: preregistered pilot grid ---------------------------------
+
+/// One frozen P3 design cell: a feature-column subset plus the
+/// control applied at scoring time. `cols` names features from
+/// `P3_FEATURE_NAMES`; `control` is one of "none", "permute",
+/// "shift5".
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct P3Config {
+    pub id: String,
+    pub kind: String,
+    pub cols: Vec<String>,
+    pub control: String,
+}
+
+impl P3Config {
+    /// Column indices for this config, in `P3_FEATURE_NAMES` order.
+    pub fn col_indices(&self) -> Vec<usize> {
+        self.cols
+            .iter()
+            .map(|name| {
+                P3_FEATURE_NAMES
+                    .iter()
+                    .position(|n| n == name)
+                    .unwrap_or_else(|| panic!("P3 config {} names unknown feature {name}", self.id))
+            })
+            .collect()
+    }
+
+    /// The scoring control for this config.
+    pub fn control(&self) -> P3Control {
+        match self.control.as_str() {
+            "permute" => P3Control::Permute,
+            "shift5" => P3Control::Shift,
+            _ => P3Control::Off,
+        }
+    }
+}
+
+fn p3_cfg(id: &str, kind: &str, cols: &[&str], control: &str) -> P3Config {
+    P3Config {
+        id: id.to_string(),
+        kind: kind.to_string(),
+        cols: cols.iter().map(|s| s.to_string()).collect(),
+        control: control.to_string(),
+    }
+}
+
+/// The frozen P3 design grid, in grid-file order: the reference
+/// ladder (majority, v3 frame, v4 controls-only frame), the paired
+/// VPIN cells (v3 plus VPIN, VPIN only, controls plus VPIN, the
+/// default cell), and the permutation / 5-bar shift controls on the
+/// VPIN block.
+pub fn preregistered_p3_grid() -> Vec<P3Config> {
+    const V3: &[&str] = &["ofi", "ofi_z", "imbalance", "spread_z", "signed_vol"];
+    const V4: &[&str] = &[
+        "ofi",
+        "ofi_z",
+        "imbalance",
+        "spread_z",
+        "signed_vol",
+        "signed_flow_w",
+        "ofi_depth",
+        "signed_flow_lag3",
+        "signed_flow_lag10",
+        "ofi_lag3",
+        "ofi_lag10",
+        "quote_rate",
+        "trade_rate",
+        "realized_vol",
+        "micro_disp",
+    ];
+    const VPIN: &[&str] = &["vpin", "vpin_lag3"];
+    const ALL: &[&str] = &[
+        "ofi",
+        "ofi_z",
+        "imbalance",
+        "spread_z",
+        "signed_vol",
+        "signed_flow_w",
+        "ofi_depth",
+        "signed_flow_lag3",
+        "signed_flow_lag10",
+        "ofi_lag3",
+        "ofi_lag10",
+        "quote_rate",
+        "trade_rate",
+        "realized_vol",
+        "micro_disp",
+        "vpin",
+        "vpin_lag3",
+    ];
+    let mut grid = Vec::with_capacity(8);
+    grid.push(p3_cfg("b0-majority", "baseline", &[], "none"));
+    grid.push(p3_cfg("b3-v3", "baseline", V3, "none"));
+    grid.push(p3_cfg("b5-controls", "baseline", V4, "none"));
+    let mut b3_vpin: Vec<&str> = V3.to_vec();
+    b3_vpin.extend_from_slice(VPIN);
+    grid.push(p3_cfg("b3-vpin", "paired", &b3_vpin, "none"));
+    grid.push(p3_cfg("vpin-only", "paired", VPIN, "none"));
+    grid.push(p3_cfg("controls-vpin", "default", ALL, "none"));
+    grid.push(p3_cfg("controls-vpin-permute", "control", ALL, "permute"));
+    grid.push(p3_cfg("controls-vpin-shift5", "control", ALL, "shift5"));
+    grid
+}
+
+/// Parse the `configs` array of a P3 grid file
+/// (`experiments/p3/grid.json`). Each entry carries `id`, `kind`,
+/// `cols` (feature names) and `control`; the entry order is
+/// preserved.
+pub fn p3_grid_from_json(text: &str) -> Result<Vec<P3Config>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("p3 grid.json does not parse: {e}"))?;
+    let configs = v
+        .get("configs")
+        .and_then(|c| c.as_array())
+        .ok_or("p3 grid.json has no configs array")?;
+    let mut out = Vec::with_capacity(configs.len());
+    for (i, c) in configs.iter().enumerate() {
+        let id = c
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or(format!("p3 grid config {i} has no id"))?;
+        let kind = c
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or(format!("p3 grid config {i} has no kind"))?;
+        let cols = c
+            .get("cols")
+            .and_then(|v| v.as_array())
+            .ok_or(format!("p3 grid config {i} has no cols"))?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or(format!("p3 grid config {i} has a non-string col"))
+            })
+            .collect::<Result<Vec<String>, String>>()?;
+        let control = c
+            .get("control")
+            .and_then(|v| v.as_str())
+            .ok_or(format!("p3 grid config {i} has no control"))?;
+        out.push(P3Config {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            cols,
+            control: control.to_string(),
+        });
+    }
+    Ok(out)
+}
+
 /// One P1 decision row: the shared feature frame plus all three
 /// labels. A label is `None` exactly when the row is censored for
 /// that track; the reason is counted in `P1Counts`.
@@ -5071,6 +5924,69 @@ mod tests {
             for name in &c.cols {
                 assert!(
                     P2_FEATURE_NAMES.contains(&name.as_str()),
+                    "config {} names unknown feature {name}",
+                    c.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stage3_toxicflow_3_p3_labels() {
+        // Buy flow, mid up: not adverse. Buy flow, mid down: adverse.
+        assert_eq!(p3_labels(0.01, 5.0, 0.10, 0.10), (1, 0, Some(0)));
+        assert_eq!(p3_labels(-0.01, 5.0, 0.10, 0.10), (0, 0, Some(1)));
+        // Sell flow, mid down: not adverse. Sell flow, mid up: adverse.
+        assert_eq!(p3_labels(-0.01, -5.0, 0.10, 0.10), (0, 0, Some(0)));
+        assert_eq!(p3_labels(0.01, -5.0, 0.10, 0.10), (1, 0, Some(1)));
+        // Zero forward return is never adverse; zero flow is excluded.
+        assert_eq!(p3_labels(0.0, 5.0, 0.10, 0.10), (0, 0, Some(0)));
+        assert_eq!(p3_labels(0.01, 0.0, 0.10, 0.10), (1, 0, None));
+        // Spread widening is a strict increase.
+        assert_eq!(p3_labels(0.01, 5.0, 0.10, 0.11), (1, 1, Some(0)));
+        assert_eq!(p3_labels(0.01, 5.0, 0.10, 0.10), (1, 0, Some(0)));
+        assert_eq!(p3_labels(0.01, 5.0, 0.10, 0.09), (1, 0, Some(0)));
+    }
+
+    #[test]
+    fn stage3_toxicflow_3_p3_median_and_tertiles() {
+        assert_eq!(p3_median(&[3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(p3_median(&[4.0, 1.0, 2.0, 3.0]), 2.5);
+        assert!(p3_median(&[]).is_nan());
+        assert_eq!(
+            p3_tertile_cuts(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            (4.0, 7.0)
+        );
+        assert_eq!(p3_tertile(4.0, 4.0, 7.0), 0);
+        assert_eq!(p3_tertile(5.0, 4.0, 7.0), 1);
+        assert_eq!(p3_tertile(7.0, 4.0, 7.0), 1);
+        assert_eq!(p3_tertile(8.0, 4.0, 7.0), 2);
+    }
+
+    #[test]
+    fn stage3_toxicflow_3_p3_preregistered_grid_shape() {
+        let grid = preregistered_p3_grid();
+        assert_eq!(grid.len(), 8, "grid must hold 8 configs");
+        let ids: Vec<&str> = grid.iter().map(|c| c.id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(ids.len(), sorted.len(), "config ids must be unique");
+        let defaults: Vec<&P3Config> = grid.iter().filter(|c| c.kind == "default").collect();
+        assert_eq!(defaults.len(), 1, "exactly one default config");
+        assert_eq!(defaults[0].id, "controls-vpin");
+        assert_eq!(defaults[0].cols.len(), P3_N_FEATURES);
+        let b0 = grid.iter().find(|c| c.id == "b0-majority").expect("b0");
+        assert!(b0.cols.is_empty());
+        let vpin = grid
+            .iter()
+            .find(|c| c.id == "vpin-only")
+            .expect("vpin-only");
+        assert_eq!(vpin.cols, vec!["vpin".to_string(), "vpin_lag3".to_string()]);
+        for c in &grid {
+            for name in &c.cols {
+                assert!(
+                    P3_FEATURE_NAMES.contains(&name.as_str()),
                     "config {} names unknown feature {name}",
                     c.id
                 );

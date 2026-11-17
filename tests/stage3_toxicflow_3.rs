@@ -14,6 +14,12 @@ use serde_json::Value;
 use toxicflow::evidence::{
     build_evidence_manifest, verify_manifest, EvidenceBuild, EVIDENCE_SCHEMA,
 };
+use toxicflow::metrics::{Quote, Trade};
+use toxicflow::predict::{
+    build_dataset, build_p3_dataset, p3_grid_from_json, preregistered_p3_grid, walk_forward_p3,
+    P3Bar, P3Control, P3Outcome, P3_B3_COLS, P3_B5_COLS, P3_BUCKET_VOL_BTC, P3_CONTROLS_VPIN_COLS,
+    P3_N_FEATURES, P3_VPIN_COLS, P3_VPIN_WINDOW,
+};
 use toxicflow::storage::journal_digest;
 
 /// The evidence manifest for the reproducible fixture experiment.
@@ -588,4 +594,382 @@ fn stage3_toxicflow_3_readme_names_experiments_and_statuses() {
         assert!(README.contains(id), "README must name experiment {id}");
         assert!(README.contains(status), "README must state status {status}");
     }
+}
+
+// ---- P3: conditional toxicity pilot (fixtures written first) ----
+
+/// Hand-built session with exactly known VPIN alignment.
+///
+/// 400 s of quotes at 1 s spacing, mid 100.00 until bar 32, then
+/// 101.00. 660 trades at 2/s, 7.5 BTC each, so one bucket is 15 BTC
+/// (two trades). Buckets 270..279 are balanced (one buy plus one
+/// sell, imbalance 0.0); every other bucket is one-sided (imbalance
+/// 1.0). Bucket k completes at 1000k + 500 ms, so bar i (closing at
+/// (10i + 10) s) has completed buckets 0..=10i + 9, and the VPIN at
+/// the bar is the mean imbalance of the last 20 completed buckets:
+/// bar 29 vpin 1.0, lag3 (bar 26) 1.0; bar 30 vpin 1.0, lag3 (bar 27)
+/// 0.5; bar 31 vpin 1.0, lag3 (bar 28) 0.5; bar 32 vpin 1.0, lag3
+/// (bar 29) 1.0. Trades in bars 30..32 are all sells while the mid
+/// rises, so those rows carry adverse-markout label 1.
+fn p3_hand_session() -> (Vec<Quote>, Vec<Trade>) {
+    let mut quotes = Vec::new();
+    for s in 0..400 {
+        let mid = if s < 320 { 100.0 } else { 101.0 };
+        quotes.push(Quote {
+            time_ms: s * 1000,
+            bid_px: mid - 0.05,
+            bid_sz: 5.0,
+            ask_px: mid + 0.05,
+            ask_sz: 5.0,
+        });
+    }
+    let mut trades = Vec::new();
+    for j in 0..660 {
+        trades.push(Trade {
+            time_ms: j as i64 * 500,
+            price: 100.0,
+            qty: 7.5,
+            // Buckets 270..279 (trades 540..559) are balanced;
+            // trades in bars 30..32 (j >= 600) are all sells.
+            is_buyer_maker: ((540..560).contains(&j) && j % 2 == 1) || j >= 600,
+        });
+    }
+    (quotes, trades)
+}
+
+#[test]
+fn stage3_toxicflow_3_p3_vpin_alignment_known_answer() {
+    assert_eq!(P3_BUCKET_VOL_BTC, 15.0);
+    assert_eq!(P3_VPIN_WINDOW, 20);
+    let (quotes, trades) = p3_hand_session();
+    let ds = build_p3_dataset(&quotes, &trades, 10_000, 3);
+    assert_eq!(ds.len(), 8, "hand session must yield bars 29..=36");
+    let row = |i: usize| &ds[i];
+    // (bar, vpin, vpin_lag3, direction, spread_wide, adverse)
+    let expected: [(i64, f64, f64, u8, u8, Option<u8>); 8] = [
+        (290_000, 1.0, 1.0, 1, 0, Some(0)),
+        (300_000, 1.0, 0.5, 1, 0, Some(1)),
+        (310_000, 1.0, 0.5, 1, 0, Some(1)),
+        (320_000, 1.0, 1.0, 0, 0, Some(0)),
+        (330_000, 1.0, 1.0, 0, 0, None),
+        (340_000, 1.0, 1.0, 0, 0, None),
+        (350_000, 1.0, 1.0, 0, 0, None),
+        (360_000, 1.0, 1.0, 0, 0, None),
+    ];
+    for (k, (t, vpin, lag3, dir, wide, adv)) in expected.iter().enumerate() {
+        let r = row(k);
+        assert_eq!(r.time_ms, *t, "row {k} time");
+        assert_eq!(r.features[15], *vpin, "row {k} vpin");
+        assert_eq!(r.features[16], *lag3, "row {k} vpin_lag3");
+        assert_eq!(r.target_direction, *dir, "row {k} direction");
+        assert_eq!(r.target_spread_wide, *wide, "row {k} spread_wide");
+        assert_eq!(r.target_adverse, *adv, "row {k} adverse_markout");
+    }
+    assert!((row(0).fwd_abs - 0.01).abs() < 1e-12);
+    assert_eq!(row(3).fwd_abs, 0.0);
+}
+
+#[test]
+fn stage3_toxicflow_3_p3_vpin_causal_under_future_extension() {
+    // Appending trades after the last bar must not change any
+    // already-built row's VPIN: buckets complete in time order and
+    // a bar only ever sees buckets completed before its close.
+    let (quotes, trades) = p3_hand_session();
+    let ds = build_p3_dataset(&quotes, &trades, 10_000, 3);
+    let mut extended = trades.clone();
+    for j in 0..200 {
+        extended.push(Trade {
+            time_ms: 500_000 + j as i64 * 500,
+            price: 101.0,
+            qty: 7.5,
+            is_buyer_maker: false,
+        });
+    }
+    let ds2 = build_p3_dataset(&quotes, &extended, 10_000, 3);
+    assert_eq!(ds2.len(), ds.len(), "future trades add no rows");
+    for (a, b) in ds.iter().zip(ds2.iter()) {
+        assert_eq!(a.time_ms, b.time_ms);
+        assert_eq!(a.features[15], b.features[15], "vpin must be prefix-stable");
+        assert_eq!(
+            a.features[16], b.features[16],
+            "vpin_lag3 must be prefix-stable"
+        );
+    }
+}
+
+#[test]
+fn stage3_toxicflow_3_p3_v3_columns_bit_identical() {
+    // The first five P3 columns reproduce build_dataset
+    // bit-identically on shared rows, so the v3 baseline is
+    // preserved exactly inside the v5 frame.
+    let (quotes, trades) = p3_hand_session();
+    let v3 = build_dataset(&quotes, &trades, 10_000, 3);
+    let p3 = build_p3_dataset(&quotes, &trades, 10_000, 3);
+    assert!(!p3.is_empty());
+    for row in &p3 {
+        let m = v3
+            .iter()
+            .find(|b| b.time_ms == row.time_ms)
+            .expect("every p3 row must exist in the v3 frame");
+        assert_eq!(row.features[0], m.ofi);
+        assert_eq!(row.features[1], m.ofi_z);
+        assert_eq!(row.features[2], m.imbalance);
+        assert_eq!(row.features[3], m.spread_z);
+        assert_eq!(row.features[4], m.signed_vol);
+        assert_eq!(row.target_direction, m.target);
+    }
+}
+
+/// Synthetic P3 rows where the VPIN block equals the direction
+/// label and every control column is exactly zero: the clean model
+/// must separate, the controls-only model must sit at the majority
+/// baseline, and the permutation control must collapse.
+fn p3_synth_bars() -> Vec<P3Bar> {
+    (0..400)
+        .map(|i| {
+            let target = if (i / 50) % 2 == 0 { 1u8 } else { 0u8 };
+            let mut features = [0.0; P3_N_FEATURES];
+            features[15] = target as f64;
+            features[16] = target as f64;
+            P3Bar {
+                time_ms: i as i64 * 10_000,
+                features,
+                target_direction: target,
+                fwd_abs: 0.01,
+                target_spread_wide: 0,
+                target_adverse: Some(0),
+                spread_degenerate: false,
+                trade_rate: 1.0,
+                depth_mean: 5.0,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn stage3_toxicflow_3_p3_known_answer_separation_and_collapse() {
+    let bars = p3_synth_bars();
+    let clean = walk_forward_p3(
+        &bars,
+        P3_CONTROLS_VPIN_COLS,
+        P3Control::Off,
+        4,
+        3,
+        P3Outcome::Direction,
+    )
+    .expect("clean eval failed");
+    let controls = walk_forward_p3(
+        &bars,
+        P3_B5_COLS,
+        P3Control::Off,
+        4,
+        3,
+        P3Outcome::Direction,
+    )
+    .expect("controls eval failed");
+    let perm = walk_forward_p3(
+        &bars,
+        P3_CONTROLS_VPIN_COLS,
+        P3Control::Permute,
+        4,
+        3,
+        P3Outcome::Direction,
+    )
+    .expect("perm eval failed");
+    let shift = walk_forward_p3(
+        &bars,
+        P3_CONTROLS_VPIN_COLS,
+        P3Control::Shift,
+        4,
+        3,
+        P3Outcome::Direction,
+    )
+    .expect("shift eval failed");
+    assert_eq!(clean.n_oos, controls.n_oos);
+    assert_eq!(clean.n_oos, perm.n_oos);
+    assert_eq!(shift.n_oos, clean.n_oos - 20);
+    assert!(
+        clean.log_loss < 0.55,
+        "clean model must separate: log loss {}",
+        clean.log_loss
+    );
+    assert!(clean.accuracy > 0.85, "clean accuracy {}", clean.accuracy);
+    assert!(
+        controls.log_loss > 0.65,
+        "zero controls must sit near the majority baseline: log loss {}",
+        controls.log_loss
+    );
+    assert!(
+        perm.accuracy < clean.accuracy - 0.15,
+        "permuted VPIN must collapse accuracy: {} vs {}",
+        perm.accuracy,
+        clean.accuracy
+    );
+    assert!(
+        perm.log_loss > clean.log_loss + 0.15,
+        "permuted VPIN must collapse log loss: {} vs {}",
+        perm.log_loss,
+        clean.log_loss
+    );
+    // Every outcome runs on the same rows.
+    for outcome in [
+        P3Outcome::AbsRet,
+        P3Outcome::SpreadWide,
+        P3Outcome::AdverseMarkout,
+    ] {
+        let ev = walk_forward_p3(&bars, P3_B5_COLS, P3Control::Off, 4, 3, outcome)
+            .unwrap_or_else(|| panic!("{outcome:?} eval failed"));
+        assert_eq!(
+            ev.n_oos, clean.n_oos,
+            "{outcome:?} must score the same rows"
+        );
+        assert!(
+            ev.log_loss.is_finite(),
+            "{outcome:?} log loss must be finite"
+        );
+    }
+}
+
+/// Absolute-return labels use the training-fold median only:
+/// perturbing rows that no fold ever trains on must leave every
+/// fitted fold model bit-identical.
+fn p3_synth_bars_absret() -> Vec<P3Bar> {
+    (0..400)
+        .map(|i| {
+            let fwd_abs = if i < 320 {
+                if i % 2 == 0 {
+                    0.001
+                } else {
+                    0.003
+                }
+            } else {
+                0.0025
+            };
+            let mut features = [0.0; P3_N_FEATURES];
+            features[0] = (i % 7) as f64;
+            P3Bar {
+                time_ms: i as i64 * 10_000,
+                features,
+                target_direction: 0,
+                fwd_abs,
+                target_spread_wide: 0,
+                target_adverse: Some(0),
+                spread_degenerate: false,
+                trade_rate: 1.0,
+                depth_mean: 5.0,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn stage3_toxicflow_3_p3_absret_threshold_is_train_only() {
+    let bars = p3_synth_bars_absret();
+    let ev1 = walk_forward_p3(&bars, P3_B5_COLS, P3Control::Off, 4, 3, P3Outcome::AbsRet)
+        .expect("absret eval failed");
+    let mut perturbed = bars.clone();
+    for row in perturbed.iter_mut().skip(320) {
+        row.fwd_abs = 0.0005;
+    }
+    let ev2 = walk_forward_p3(
+        &perturbed,
+        P3_B5_COLS,
+        P3Control::Off,
+        4,
+        3,
+        P3Outcome::AbsRet,
+    )
+    .expect("perturbed absret eval failed");
+    assert_eq!(
+        ev1.fold_models, ev2.fold_models,
+        "perturbing never-trained rows must not change any fitted model"
+    );
+    assert!(
+        ev1.n_pos_oos != ev2.n_pos_oos,
+        "the perturbation must actually move test labels ({} vs {})",
+        ev1.n_pos_oos,
+        ev2.n_pos_oos
+    );
+    for (a, b) in ev1.per_fold.iter().zip(ev2.per_fold.iter()) {
+        assert_eq!(
+            a.absret_median, b.absret_median,
+            "fold {} absret median must be train-only",
+            a.fold
+        );
+    }
+}
+
+#[test]
+fn stage3_toxicflow_3_p3_regime_thresholds_are_train_only() {
+    let mut bars = p3_synth_bars();
+    for (i, row) in bars.iter_mut().enumerate() {
+        row.trade_rate = (i % 9) as f64;
+        row.depth_mean = (i % 5) as f64;
+    }
+    let ev1 = walk_forward_p3(
+        &bars,
+        P3_B5_COLS,
+        P3Control::Off,
+        4,
+        3,
+        P3Outcome::Direction,
+    )
+    .expect("regime eval failed");
+    let mut perturbed = bars.clone();
+    for row in perturbed.iter_mut().skip(320) {
+        row.trade_rate = 1000.0;
+        row.depth_mean = 1000.0;
+    }
+    let ev2 = walk_forward_p3(
+        &perturbed,
+        P3_B5_COLS,
+        P3Control::Off,
+        4,
+        3,
+        P3Outcome::Direction,
+    )
+    .expect("perturbed regime eval failed");
+    for (a, b) in ev1.per_fold.iter().zip(ev2.per_fold.iter()) {
+        assert_eq!(a.activity_cut1, b.activity_cut1);
+        assert_eq!(a.activity_cut2, b.activity_cut2);
+        assert_eq!(a.depth_cut1, b.depth_cut1);
+        assert_eq!(a.depth_cut2, b.depth_cut2);
+    }
+}
+
+#[test]
+fn stage3_toxicflow_3_p3_grid_file_matches_library() {
+    // The committed grid file must match the preregistered library
+    // grid exactly; the runner refuses to run otherwise.
+    let text = std::fs::read_to_string("experiments/p3/grid.json").expect("grid.json missing");
+    let file_grid = p3_grid_from_json(&text).expect("grid.json must parse");
+    assert_eq!(file_grid, preregistered_p3_grid());
+}
+
+#[test]
+fn stage3_toxicflow_3_p3_vpin_only_and_b3_vpin_cells_run() {
+    let bars = p3_synth_bars();
+    let vpin_only = walk_forward_p3(
+        &bars,
+        P3_VPIN_COLS,
+        P3Control::Off,
+        4,
+        3,
+        P3Outcome::Direction,
+    )
+    .expect("vpin-only eval failed");
+    let b3 = walk_forward_p3(
+        &bars,
+        P3_B3_COLS,
+        P3Control::Off,
+        4,
+        3,
+        P3Outcome::Direction,
+    )
+    .expect("b3 eval failed");
+    assert_eq!(vpin_only.n_oos, b3.n_oos);
+    assert!(
+        vpin_only.log_loss < b3.log_loss,
+        "VPIN-only must beat the zero-control frame on separating data"
+    );
 }
