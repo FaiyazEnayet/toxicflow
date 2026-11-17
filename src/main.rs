@@ -309,6 +309,34 @@ fn analyze(
         None => println!("  not enough bars for evaluation"),
     }
 
+    // P2 normalized-flow features: the v3 frame (B3) against the
+    // full v4 frame (B5) on the same decision rows. The full
+    // ablation grid lives in experiments/p2.
+    println!("\nnormalized-flow features (P2, 10s bars, 30s horizon):");
+    let p2 = predict::build_p2_dataset(&quotes, &trades, 10_000, 3);
+    match (
+        predict::walk_forward_p2(&p2, predict::P2_B3_COLS, predict::P2Control::Off, 4, 3),
+        predict::walk_forward_p2(&p2, predict::P2_B5_COLS, predict::P2Control::Off, 4, 3),
+    ) {
+        (Some(b3), Some(b5)) => {
+            println!(
+                "  B3 v3 frame: accuracy {:.3} vs baseline {:.3}, brier {:.4}, log loss {:.4}",
+                b3.accuracy, b3.baseline, b3.brier, b3.log_loss
+            );
+            println!(
+                "  B5 v4 frame: accuracy {:.3} vs baseline {:.3}, brier {:.4}, log loss {:.4} ({} labeled rows, {} held-out predictions)",
+                b5.accuracy, b5.baseline, b5.brier, b5.log_loss, b5.n_labeled, b5.n_oos
+            );
+            println!(
+                "  delta (B5 - B3): accuracy {:+.3}, brier {:+.4}, log loss {:+.4}",
+                b5.accuracy - b3.accuracy,
+                b5.brier - b3.brier,
+                b5.log_loss - b3.log_loss
+            );
+        }
+        _ => println!("  not enough bars for evaluation"),
+    }
+
     // toxicity-gated MM demo
     println!("\nmarket-making demo (toy fill model, NOT a strategy):");
     let cfg = strategy::MmConfig::default();
@@ -569,6 +597,16 @@ fn export_session(
     let detail = predict::walk_forward_detailed(&ds, 4, 3);
     let rep = detail.as_ref().map(|d| &d.report);
 
+    // P2: B3 (v3 frame) vs B5 (full v4 frame) on the same rows.
+    let p2ds = predict::build_p2_dataset(&quotes, &trades, 10_000, 3);
+    let p2_summary = match (
+        predict::walk_forward_p2(&p2ds, predict::P2_B3_COLS, predict::P2Control::Off, 4, 3),
+        predict::walk_forward_p2(&p2ds, predict::P2_B5_COLS, predict::P2Control::Off, 4, 3),
+    ) {
+        (Some(b3), Some(b5)) => Some((b3, b5)),
+        _ => None,
+    };
+
     // N4: persist the per-fold weights and the exact OOS probability
     // ledger under experiments/<run>/ next to the other exports, so
     // the evaluation can be reconstructed from disk alone.
@@ -678,6 +716,15 @@ fn export_session(
             "n_folds": r.n_folds, "brier": r.brier,
             "log_loss": r.log_loss,
             "per_fold": r.per_fold,
+        })).unwrap_or(serde_json::Value::Null),
+        "p2": p2_summary.as_ref().map(|(b3, b5)| serde_json::json!({
+            "feature_version": predict::P2_FEATURE_VERSION,
+            "b3_accuracy": b3.accuracy, "b3_baseline": b3.baseline,
+            "b3_brier": b3.brier, "b3_log_loss": b3.log_loss,
+            "b5_accuracy": b5.accuracy, "b5_baseline": b5.baseline,
+            "b5_brier": b5.brier, "b5_log_loss": b5.log_loss,
+            "delta_accuracy": b5.accuracy - b3.accuracy,
+            "n_labeled": b5.n_labeled, "n_oos": b5.n_oos,
         })).unwrap_or(serde_json::Value::Null),
         "mm": mm.as_ref().map(|r| serde_json::json!({
             "pnl_open": r.pnl_open, "pnl_gated": r.pnl_gated,
@@ -863,7 +910,7 @@ mod tests {
     use super::*;
     use toxicflow::metrics::{Quote, Trade};
 
-    /// 15 minutes of synthetic quotes/trades: enough for all export series.
+    /// 20 minutes of synthetic quotes/trades: enough for all export series.
     fn synth_session() -> (Vec<Quote>, Vec<Trade>) {
         let mut quotes = Vec::new();
         let mut trades = Vec::new();
@@ -875,7 +922,7 @@ mod tests {
             s ^= s << 17;
             (s as f64) / (u64::MAX as f64) - 0.5
         };
-        for i in 0..900 {
+        for i in 0..1200 {
             let t = i as i64 * 1000;
             quotes.push(Quote {
                 time_ms: t,
@@ -942,6 +989,11 @@ mod tests {
         assert!(summary["speed"]["response_bps"].as_array().unwrap().len() > 10);
         assert!(summary["predict"]["accuracy"].as_f64().is_some());
         assert!(summary["mm"]["pnl_open"].as_f64().is_some());
+        // P2: the export carries the B3 vs B5 normalized-flow block.
+        assert_eq!(summary["p2"]["feature_version"], "v4");
+        assert!(summary["p2"]["b3_accuracy"].as_f64().is_some());
+        assert!(summary["p2"]["b5_accuracy"].as_f64().is_some());
+        assert!(summary["p2"]["delta_accuracy"].as_f64().is_some());
         // E5: the export carries lambda tail diagnostics.
         assert!(summary["kyle_lambda"]["n_windows"].as_u64().is_some());
         assert!(summary["kyle_lambda"]["n_tail"].as_u64().is_some());
