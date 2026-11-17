@@ -1,0 +1,541 @@
+{
+ "experiment_id": "p2-normalize-flow",
+ "schema_version": "toxicflow.p2-grid/v1",
+ "preregistered": "2026-11-17",
+ "note": "Preregistered before any grid run. The default configuration stays the reported configuration regardless of results; no test outcome is used for parameter selection. The B0-B5 ladder is defined here because no B0-B5 definition exists in the workbook or roadmap text.",
+ "default": "b5-full",
+ "bar_ms": 10000,
+ "horizon_bars": 3,
+ "n_splits": 4,
+ "flow_window_bars": 6,
+ "trail_window_bars": 30,
+ "lag_bars": [
+  3,
+  10
+ ],
+ "shift_lag_bars": 5,
+ "permutation_seed": "0xA5A55A5AF00DBA5E",
+ "baselines": {
+  "B0": "training-majority predictor (no features)",
+  "B1": "OFI only",
+  "B2": "book state: OFI, OFI z-score, imbalance, spread z-score",
+  "B3": "the v3 frame: B2 plus signed trade volume",
+  "B4": "B3 plus the flow-normalization group (signed-flow window, OFI/depth, lagged signed flow and OFI)",
+  "B5": "B4 plus the activity group (quote/trade event rates, trailing realized volatility, microprice displacement): the full v4 frame"
+ },
+ "decision_rule": "Each decision row is fixed by information available at its bar close: the trailing 30-bar feature window must be fully observed, and P2 rows start at bar 29 so every trailing window is full. The label is the sign of the forward mid return over the next 3 bars.",
+ "censoring_rule": "A row is supervised only if every bar feeding its features (trailing 30 bars) and every bar in its forward target window was actually observed. Carried-forward bars are never promoted to fresh observations.",
+ "selection_rule": "No test outcome is used for parameter selection. The default configuration stays the reported configuration regardless of results. Every grid cell is reported.",
+ "absent": [
+  "VPIN as a feature: deferred to P3, which tests whether VPIN adds independent information once confounds are controlled.",
+  "Depth beyond the touch: unavailable in archived data; only touch-accessible fields are used.",
+  "Deeper-book imbalance and queue imbalance: not recorded in the archive."
+ ],
+ "configs": [
+  {
+   "id": "b0-majority",
+   "kind": "baseline",
+   "cols": [],
+   "control": "none"
+  },
+  {
+   "id": "b1-ofi",
+   "kind": "baseline",
+   "cols": [
+    "ofi"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "b2-book",
+   "kind": "baseline",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "b3-v3",
+   "kind": "baseline",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "b4-flow",
+   "kind": "baseline",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "b5-full",
+   "kind": "default",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-signed_flow_w",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-ofi_depth",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "ofi_depth"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-signed_flow_lag3",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_lag3"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-signed_flow_lag10",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_lag10"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-ofi_lag3",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "ofi_lag3"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-ofi_lag10",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "ofi_lag10"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-quote_rate",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "quote_rate"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-trade_rate",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "trade_rate"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-realized_vol",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "realized_vol"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "add-micro_disp",
+   "kind": "add-one",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-signed_flow_w",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-ofi_depth",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-signed_flow_lag3",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-signed_flow_lag10",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-ofi_lag3",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-ofi_lag10",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-quote_rate",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-trade_rate",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-realized_vol",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "micro_disp"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "drop-micro_disp",
+   "kind": "leave-one-out",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol"
+   ],
+   "control": "none"
+  },
+  {
+   "id": "b5-permute",
+   "kind": "control",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "permute"
+  },
+  {
+   "id": "b5-shift5",
+   "kind": "control",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10",
+    "quote_rate",
+    "trade_rate",
+    "realized_vol",
+    "micro_disp"
+   ],
+   "control": "shift5"
+  },
+  {
+   "id": "b4-permute",
+   "kind": "control",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10"
+   ],
+   "control": "permute"
+  },
+  {
+   "id": "b4-shift5",
+   "kind": "control",
+   "cols": [
+    "ofi",
+    "ofi_z",
+    "imbalance",
+    "spread_z",
+    "signed_vol",
+    "signed_flow_w",
+    "ofi_depth",
+    "signed_flow_lag3",
+    "signed_flow_lag10",
+    "ofi_lag3",
+    "ofi_lag10"
+   ],
+   "control": "shift5"
+  }
+ ],
+ "test_sessions": [
+  "session-20261111-163501-utc",
+  "session-20261111-203511-utc",
+  "session-20261112-003521-utc",
+  "session-20261112-043531-utc",
+  "session-20261112-083541-utc",
+  "session-20261112-123552-utc"
+ ]
+}
