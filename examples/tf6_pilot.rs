@@ -29,7 +29,8 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("{dir}: {e}"))?;
         let trades = storage::read_trades(&format!("{dir}/trades.parquet"))
             .map_err(|e| format!("{dir}: {e}"))?;
-        let bars = predict::build_dataset(&quotes, &trades, 10_000, 3);
+        let bars =
+            predict::build_dataset(&quotes, &trades, 10_000, 3).map_err(|e| e.to_string())?;
         let label = dir
             .trim_end_matches('/')
             .rsplit('/')

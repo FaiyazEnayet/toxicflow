@@ -174,7 +174,12 @@ pub fn build_hazard_dataset(quotes: &[Quote], bar_ms: i64, cutoff_bars: usize) -
         return empty(0);
     }
     let events = ofi_events(quotes);
-    let bars = ofi_bars(quotes, &events, bar_ms);
+    // H4: an invalid bar grid yields no decision rows, the same
+    // thin-data outcome as before.
+    let bars = match ofi_bars(quotes, &events, bar_ms) {
+        Ok(b) => b,
+        Err(_) => return empty(0),
+    };
     if bars.len() < 40 {
         return empty(bars.len());
     }

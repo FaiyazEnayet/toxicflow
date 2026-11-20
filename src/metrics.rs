@@ -407,6 +407,66 @@ pub fn ofi_events(quotes: &[Quote]) -> Vec<f64> {
     out
 }
 
+/// One OFI bar: (bar start ms, OFI sum, last mid, last spread, last
+/// imbalance).
+pub type OfiBar = (i64, f64, f64, f64, f64);
+
+/// What went wrong while building fixed-length OFI bars. Invalid
+/// configuration or input is a typed error, never a silently empty
+/// frame: an empty frame and a failed frame used to be
+/// indistinguishable, so callers could not tell thin data from a
+/// bad bar size or a broken quote stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BarError {
+    /// No quotes were supplied, so no bar grid exists.
+    EmptyInput,
+    /// The bar size must be positive; zero or negative sizes cannot
+    /// partition time.
+    InvalidBarSize { bar_ms: i64 },
+    /// One OFI event per quote is required; a shorter or longer
+    /// event slice cannot be aligned to the quotes.
+    MismatchedEvents { quotes: usize, events: usize },
+    /// Quote timestamps must be nondecreasing. A later quote earlier
+    /// than its predecessor puts its bar offset before the grid
+    /// start, which previously cast silently to `usize`.
+    NonMonotonic {
+        index: usize,
+        previous: i64,
+        current: i64,
+    },
+    /// A bar timestamp could not be computed without overflowing or
+    /// underflowing i64.
+    TimestampOverflow { time_ms: i64 },
+}
+
+impl std::fmt::Display for BarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BarError::EmptyInput => write!(f, "no quotes supplied for OFI bars"),
+            BarError::InvalidBarSize { bar_ms } => {
+                write!(f, "bar size must be positive, got {bar_ms} ms")
+            }
+            BarError::MismatchedEvents { quotes, events } => write!(
+                f,
+                "OFI event count {events} does not match quote count {quotes}"
+            ),
+            BarError::NonMonotonic {
+                index,
+                previous,
+                current,
+            } => write!(
+                f,
+                "quote timestamps are not nondecreasing at index {index}: {previous} then {current}"
+            ),
+            BarError::TimestampOverflow { time_ms } => {
+                write!(f, "bar timestamp overflows i64 near {time_ms}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BarError {}
+
 /// Aggregate per-event OFI into fixed-length bars (bar_ms milliseconds).
 /// Returns (bar start ms, ofi sum, last mid, last spread, last imbalance).
 ///
@@ -414,24 +474,53 @@ pub fn ofi_events(quotes: &[Quote]) -> Vec<f64> {
 /// mid, spread and imbalance with zero OFI. The incoming quote is never
 /// used to backfill bars it arrived after, so prefix bars are unaffected
 /// by quotes appended later.
-pub fn ofi_bars(quotes: &[Quote], events: &[f64], bar_ms: i64) -> Vec<(i64, f64, f64, f64, f64)> {
-    if quotes.is_empty() || bar_ms <= 0 {
-        return Vec::new();
+///
+/// Returns `Err` on empty input, a non-positive bar size, an event
+/// slice whose length differs from the quotes, non-monotonic quote
+/// timestamps, or a bar timestamp that would overflow i64.
+pub fn ofi_bars(quotes: &[Quote], events: &[f64], bar_ms: i64) -> Result<Vec<OfiBar>, BarError> {
+    if quotes.is_empty() {
+        return Err(BarError::EmptyInput);
+    }
+    if bar_ms <= 0 {
+        return Err(BarError::InvalidBarSize { bar_ms });
+    }
+    if events.len() != quotes.len() {
+        return Err(BarError::MismatchedEvents {
+            quotes: quotes.len(),
+            events: events.len(),
+        });
+    }
+    for (i, w) in quotes.windows(2).enumerate() {
+        if w[1].time_ms < w[0].time_ms {
+            return Err(BarError::NonMonotonic {
+                index: i + 1,
+                previous: w[0].time_ms,
+                current: w[1].time_ms,
+            });
+        }
     }
     let t0 = quotes[0].time_ms / bar_ms * bar_ms;
-    let mut bars: Vec<(i64, f64, f64, f64, f64)> = Vec::new();
+    let mut bars: Vec<OfiBar> = Vec::new();
     let mut prev = &quotes[0];
     for (q, e) in quotes.iter().zip(events.iter()) {
-        let b = q.time_ms / bar_ms * bar_ms - t0;
-        let idx = b as usize / bar_ms as usize;
+        let bar_start = q.time_ms / bar_ms * bar_ms;
+        let offset = bar_start
+            .checked_sub(t0)
+            .ok_or(BarError::TimestampOverflow { time_ms: q.time_ms })?;
+        if offset < 0 {
+            return Err(BarError::TimestampOverflow { time_ms: q.time_ms });
+        }
+        let idx = (offset / bar_ms) as usize;
         while bars.len() <= idx {
-            bars.push((
-                t0 + bars.len() as i64 * bar_ms,
-                0.0,
-                prev.mid(),
-                prev.spread(),
-                prev.imbalance(),
-            ));
+            let bar_time = t0
+                .checked_add(
+                    (bars.len() as i64)
+                        .checked_mul(bar_ms)
+                        .ok_or(BarError::TimestampOverflow { time_ms: q.time_ms })?,
+                )
+                .ok_or(BarError::TimestampOverflow { time_ms: q.time_ms })?;
+            bars.push((bar_time, 0.0, prev.mid(), prev.spread(), prev.imbalance()));
         }
         let row = &mut bars[idx];
         row.1 += e;
@@ -440,7 +529,7 @@ pub fn ofi_bars(quotes: &[Quote], events: &[f64], bar_ms: i64) -> Vec<(i64, f64,
         row.4 = q.imbalance();
         prev = q;
     }
-    bars
+    Ok(bars)
 }
 
 /// Per-bar touch statistics on the `ofi_bars` grid (same `t0`
@@ -705,7 +794,7 @@ mod tests {
             .map(|i| q(i * 1000, 100.0, 5.0, 100.1, 4.0))
             .collect();
         let e = ofi_events(&qs);
-        let bars = ofi_bars(&qs, &e, 10_000);
+        let bars = ofi_bars(&qs, &e, 10_000).expect("valid fixture");
         assert_eq!(bars.len(), 10);
         assert!(bars.iter().all(|b| b.1.abs() < 1e-9));
     }
@@ -719,7 +808,7 @@ mod tests {
             q(30_000, 109.9, 3.0, 110.1, 7.0),
         ];
         let e = ofi_events(&qs);
-        let bars = ofi_bars(&qs, &e, 10_000);
+        let bars = ofi_bars(&qs, &e, 10_000).expect("valid fixture");
         assert_eq!(bars.len(), 4);
         for b in &bars[1..3] {
             assert!(
@@ -756,8 +845,8 @@ mod tests {
             q(60_000, 119.95, 2.0, 120.05, 8.0),
         ];
         let e = ofi_events(&qs);
-        let before = ofi_bars(&qs[..2], &e[..2], 10_000);
-        let after = ofi_bars(&qs, &e, 10_000);
+        let before = ofi_bars(&qs[..2], &e[..2], 10_000).expect("valid fixture");
+        let after = ofi_bars(&qs, &e, 10_000).expect("valid fixture");
         assert_eq!(before.len(), 4);
         assert_eq!(before, after[..4]);
     }
@@ -772,7 +861,7 @@ mod tests {
             q(40_000, 104.95, 2.0, 105.05, 8.0),
         ];
         let e = ofi_events(&qs);
-        let bars = ofi_bars(&qs, &e, 10_000);
+        let bars = ofi_bars(&qs, &e, 10_000).expect("valid fixture");
         assert_eq!(bars.len(), 5);
         for b in &bars[2..4] {
             assert!(

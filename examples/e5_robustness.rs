@@ -210,7 +210,7 @@ fn run() -> Result<(), String> {
                 let lam = kyle_lambda_robust(&bars, 60);
                 let lam_sum = lambda_tail_summary(&lam);
                 let events = ofi_events(&s.quotes);
-                let ob = ofi_bars(&s.quotes, &events, bar_ms);
+                let ob = ofi_bars(&s.quotes, &events, bar_ms).unwrap_or_default();
                 if ob.is_empty() {
                     bar_diags.push(serde_json::json!({
                         "bar_ms": bar_ms,
@@ -416,7 +416,8 @@ fn run() -> Result<(), String> {
     // alongside the grid, never used to pick a configuration.
     let mut walk_forward = Vec::new();
     for s in &test_sessions {
-        let ds = predict::build_dataset(&s.quotes, &s.trades, 10_000, 3);
+        let ds =
+            predict::build_dataset(&s.quotes, &s.trades, 10_000, 3).map_err(|e| e.to_string())?;
         match predict::walk_forward_detailed(&ds, 4, 3) {
             Some(detail) => walk_forward.push(serde_json::json!({
                 "session": s.name,

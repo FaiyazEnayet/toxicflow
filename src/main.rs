@@ -226,7 +226,7 @@ fn analyze(
 
     // OFI
     let ev = ofi_events(&quotes);
-    let ob = ofi_bars(&quotes, &ev, 10_000);
+    let ob = ofi_bars(&quotes, &ev, 10_000)?;
     let ofis: Vec<f64> = ob.iter().map(|b| b.1).collect();
     let m = ofis.iter().sum::<f64>() / ofis.len() as f64;
     let sd = (ofis.iter().map(|x| (x - m).powi(2)).sum::<f64>() / ofis.len() as f64).sqrt();
@@ -273,7 +273,7 @@ fn analyze(
 
     // prediction
     println!("\nshort-horizon prediction (10s bars, 30s horizon):");
-    let ds = predict::build_dataset(&quotes, &trades, 10_000, 3);
+    let ds = predict::build_dataset(&quotes, &trades, 10_000, 3)?;
     match predict::walk_forward(&ds, 4, 3) {
         Some(rep) => {
             // E4: the headline spread is inter-fold variability, not
@@ -543,7 +543,7 @@ fn export_session(
 
     // OFI bars with forward 30s mid returns (for the OFI-vs-return plot)
     let ev = ofi_events(&quotes);
-    let ob = ofi_bars(&quotes, &ev, 10_000);
+    let ob = ofi_bars(&quotes, &ev, 10_000)?;
     let t0 = ob[0].0;
     let mut signed = vec![0.0; ob.len()];
     for t in &trades {
@@ -593,7 +593,7 @@ fn export_session(
     }
 
     // prediction calibration
-    let ds = predict::build_dataset(&quotes, &trades, 10_000, 3);
+    let ds = predict::build_dataset(&quotes, &trades, 10_000, 3)?;
     let detail = predict::walk_forward_detailed(&ds, 4, 3);
     let rep = detail.as_ref().map(|d| &d.report);
 

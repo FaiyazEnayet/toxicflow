@@ -78,7 +78,7 @@ fn full_pipeline_toxic_second_half() {
 
     // OFI bars exist and Kyle's lambda is computable
     let ev = ofi_events(&quotes);
-    let bars = ofi_bars(&quotes, &ev, 10_000);
+    let bars = ofi_bars(&quotes, &ev, 10_000).expect("valid fixture");
     assert_eq!(bars.len(), 120);
     let fb: Vec<FlowBar> = bars
         .windows(2)
@@ -94,7 +94,7 @@ fn full_pipeline_toxic_second_half() {
 
     // prediction runs end to end and returns a sane report
     // (directional edge is covered by the unit tests on cleaner synthetics)
-    let ds = predict::build_dataset(&quotes, &trades, 10_000, 2);
+    let ds = predict::build_dataset(&quotes, &trades, 10_000, 2).expect("valid fixture");
     let rep = predict::walk_forward(&ds, 3, 2).expect("eval");
     assert!((0.3..=1.0).contains(&rep.accuracy));
     assert!((0.0..=1.0).contains(&rep.baseline));
