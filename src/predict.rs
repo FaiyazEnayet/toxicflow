@@ -61,7 +61,9 @@
 //! concrete future mid observation; censored rows are counted per
 //! track and per reason, never dropped silently.
 
-use crate::metrics::{ofi_bars, ofi_events, touch_bars, volume_buckets_sized, vpin, Quote, Trade};
+use crate::metrics::{
+    ofi_bars, ofi_events, touch_bars, volume_buckets_sized, vpin, BarError, Quote, Trade,
+};
 
 pub const N_FEATURES: usize = 5;
 
@@ -179,12 +181,98 @@ fn rolling_mean_sd(xs: &[f64], window: usize) -> (Vec<f64>, Vec<f64>) {
     (mean, sd)
 }
 
-/// Build the feature/target frame. Returns empty vec when data is thin.
-pub fn build_dataset(quotes: &[Quote], trades: &[Trade], bar_ms: i64, horizon: usize) -> Vec<Bar> {
+/// Trailing bars behind every rolling feature window in
+/// `build_dataset` (30 bars = 300 s on the 10 s grid). Nonzero by
+/// construction: a zero window would leave every rolling statistic
+/// undefined.
+pub const ROLLING_WINDOW_BARS: usize = 30;
+
+/// What went wrong while building the feature/target frame. Invalid
+/// configuration or input is a typed error, never a silently empty
+/// frame. Thin data (fewer than 40 bars) is not an error: it still
+/// yields `Ok` with no rows, as before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatasetError {
+    /// The underlying bar grid could not be built.
+    Bars(BarError),
+    /// The prediction horizon is the forward lookback window; zero
+    /// bars ahead is not a prediction.
+    InvalidHorizon { horizon: usize },
+    /// Trade timestamps must be nondecreasing.
+    NonMonotonicTrades {
+        index: usize,
+        previous: i64,
+        current: i64,
+    },
+    /// A trade falls before the first bar start, so its bar index
+    /// would be negative. It previously cast silently to `usize`
+    /// and vanished from the frame with no trace.
+    TradeBeforeStart {
+        index: usize,
+        time_ms: i64,
+        bar_start: i64,
+    },
+    /// A trade timestamp could not be placed on the bar grid
+    /// without overflowing or underflowing i64.
+    TimestampOverflow { time_ms: i64 },
+}
+
+impl From<BarError> for DatasetError {
+    fn from(e: BarError) -> Self {
+        DatasetError::Bars(e)
+    }
+}
+
+impl std::fmt::Display for DatasetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DatasetError::Bars(e) => write!(f, "{e}"),
+            DatasetError::InvalidHorizon { horizon } => {
+                write!(f, "prediction horizon must be nonzero, got {horizon}")
+            }
+            DatasetError::NonMonotonicTrades {
+                index,
+                previous,
+                current,
+            } => write!(
+                f,
+                "trade timestamps are not nondecreasing at index {index}: {previous} then {current}"
+            ),
+            DatasetError::TradeBeforeStart {
+                index,
+                time_ms,
+                bar_start,
+            } => write!(
+                f,
+                "trade {index} at {time_ms} falls before the first bar start {bar_start}"
+            ),
+            DatasetError::TimestampOverflow { time_ms } => {
+                write!(f, "trade timestamp overflows i64 near {time_ms}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DatasetError {}
+
+/// Build the feature/target frame. Thin data (fewer than 40 bars)
+/// yields `Ok` with no rows. Returns `Err` on an invalid bar grid
+/// (see `BarError`), a zero prediction horizon, non-monotonic trades,
+/// a trade before the first bar start, or a trade timestamp that
+/// underflows i64 when placed on the grid.
+pub fn build_dataset(
+    quotes: &[Quote],
+    trades: &[Trade],
+    bar_ms: i64,
+    horizon: usize,
+) -> Result<Vec<Bar>, DatasetError> {
+    if horizon == 0 {
+        return Err(DatasetError::InvalidHorizon { horizon });
+    }
     let events = ofi_events(quotes);
-    let bars = ofi_bars(quotes, &events, bar_ms);
+    let bars = ofi_bars(quotes, &events, bar_ms)?;
     if bars.len() < 40 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let n = bars.len();
     let ofi: Vec<f64> = bars.iter().map(|b| b.1).collect();
@@ -192,18 +280,44 @@ pub fn build_dataset(quotes: &[Quote], trades: &[Trade], bar_ms: i64, horizon: u
     let spreads: Vec<f64> = bars.iter().map(|b| b.3).collect();
     let imbs: Vec<f64> = bars.iter().map(|b| b.4).collect();
 
-    // signed trade volume per bar
+    // signed trade volume per bar. Trades must arrive in
+    // nondecreasing time order and on or after the first bar start:
+    // a negative bar index is an error here, never a silent `usize`
+    // cast. Trades after the last bar have no bar to land in and
+    // are dropped, as before.
     let t0 = bars[0].0;
     let mut signed = vec![0.0; n];
-    for t in trades {
-        let idx = ((t.time_ms - t0) / bar_ms) as usize;
+    let mut prev_trade: Option<i64> = None;
+    for (i, t) in trades.iter().enumerate() {
+        if let Some(prev) = prev_trade {
+            if t.time_ms < prev {
+                return Err(DatasetError::NonMonotonicTrades {
+                    index: i,
+                    previous: prev,
+                    current: t.time_ms,
+                });
+            }
+        }
+        prev_trade = Some(t.time_ms);
+        let offset = t
+            .time_ms
+            .checked_sub(t0)
+            .ok_or(DatasetError::TimestampOverflow { time_ms: t.time_ms })?;
+        if offset < 0 {
+            return Err(DatasetError::TradeBeforeStart {
+                index: i,
+                time_ms: t.time_ms,
+                bar_start: t0,
+            });
+        }
+        let idx = (offset / bar_ms) as usize;
         if idx < n {
             signed[idx] += t.signed_qty();
         }
     }
 
-    let (ofi_m, ofi_s) = rolling_mean_sd(&ofi, 30);
-    let (sp_m, sp_s) = rolling_mean_sd(&spreads, 30);
+    let (ofi_m, ofi_s) = rolling_mean_sd(&ofi, ROLLING_WINDOW_BARS);
+    let (sp_m, sp_s) = rolling_mean_sd(&spreads, ROLLING_WINDOW_BARS);
     // N2 gap censoring: a row is supervised only if every bar feeding
     // its features (trailing 30-bar rolling windows) and every bar in
     // its forward target window was actually observed. Carried-forward
@@ -215,7 +329,7 @@ pub fn build_dataset(quotes: &[Quote], trades: &[Trade], bar_ms: i64, horizon: u
             continue;
         }
         if status.len() == n {
-            let lo = i.saturating_sub(29);
+            let lo = i.saturating_sub(ROLLING_WINDOW_BARS - 1);
             let features_observed = status[lo..=i].iter().all(|s| s.observed);
             let target_observed = status[i + 1..=i + horizon].iter().all(|s| s.observed);
             if !features_observed || !target_observed {
@@ -242,7 +356,7 @@ pub fn build_dataset(quotes: &[Quote], trades: &[Trade], bar_ms: i64, horizon: u
             target: u8::from(fwd > 0.0),
         });
     }
-    out
+    Ok(out)
 }
 
 // ---- P2: normalized flow features (feature frame v4) ------------
@@ -390,8 +504,16 @@ pub fn build_p2_dataset(
     bar_ms: i64,
     horizon: usize,
 ) -> Vec<P2Bar> {
+    // H4: `ofi_bars` requires time-ordered quotes. Sort stably so a
+    // delayed message still lands in its own bar, keeping its arrival
+    // order inside the bar; already-ordered input is unchanged.
+    let mut ordered: Vec<Quote> = quotes.to_vec();
+    ordered.sort_by_key(|q| q.time_ms);
+    let quotes = &ordered[..];
     let events = ofi_events(quotes);
-    let bars = ofi_bars(quotes, &events, bar_ms);
+    // H4: an invalid bar grid yields no rows here, the same thin-data
+    // outcome as before; `ofi_bars` itself now reports the cause.
+    let bars = ofi_bars(quotes, &events, bar_ms).unwrap_or_default();
     if bars.len() < 40 {
         return Vec::new();
     }
@@ -2746,8 +2868,16 @@ pub fn build_p3_dataset(
     bar_ms: i64,
     horizon: usize,
 ) -> Vec<P3Bar> {
+    // H4: `ofi_bars` requires time-ordered quotes. Sort stably so a
+    // delayed message still lands in its own bar, keeping its arrival
+    // order inside the bar; already-ordered input is unchanged.
+    let mut ordered: Vec<Quote> = quotes.to_vec();
+    ordered.sort_by_key(|q| q.time_ms);
+    let quotes = &ordered[..];
     let events = ofi_events(quotes);
-    let bars = ofi_bars(quotes, &events, bar_ms);
+    // H4: an invalid bar grid yields no rows here, the same thin-data
+    // outcome as before; `ofi_bars` itself now reports the cause.
+    let bars = ofi_bars(quotes, &events, bar_ms).unwrap_or_default();
     if bars.len() < 40 {
         return Vec::new();
     }
@@ -3587,8 +3717,16 @@ pub fn build_p1_dataset(
         cutoff_bars,
         feature_version: FEATURE_VERSION,
     };
+    // H4: `ofi_bars` requires time-ordered quotes. Sort stably so a
+    // delayed message still lands in its own bar, keeping its arrival
+    // order inside the bar; already-ordered input is unchanged.
+    let mut ordered: Vec<Quote> = quotes.to_vec();
+    ordered.sort_by_key(|q| q.time_ms);
+    let quotes = &ordered[..];
     let events = ofi_events(quotes);
-    let bars = ofi_bars(quotes, &events, bar_ms);
+    // H4: an invalid bar grid yields no rows here, the same thin-data
+    // outcome as before; `ofi_bars` itself now reports the cause.
+    let bars = ofi_bars(quotes, &events, bar_ms).unwrap_or_default();
     if bars.len() < 40 {
         return empty(bars.len());
     }
@@ -4152,7 +4290,7 @@ mod tests {
     #[test]
     fn beats_coin_on_predictable_flow() {
         let (q, t) = synth_quotes(1200, true);
-        let bars = build_dataset(&q, &t, 10_000, 2);
+        let bars = build_dataset(&q, &t, 10_000, 2).expect("valid fixture");
         assert!(bars.len() > 60, "only {} bars", bars.len());
         let rep = walk_forward(&bars, 4, 2).expect("eval failed");
         assert!(
@@ -4166,7 +4304,7 @@ mod tests {
     #[test]
     fn coin_on_noise() {
         let (q, t) = synth_quotes(1200, false);
-        let bars = build_dataset(&q, &t, 10_000, 2);
+        let bars = build_dataset(&q, &t, 10_000, 2).expect("valid fixture");
         let rep = walk_forward(&bars, 4, 2).expect("eval failed");
         assert!(
             (rep.accuracy - rep.baseline).abs() < 0.08,
@@ -4202,8 +4340,8 @@ mod tests {
             ask_sz: 8.0,
         });
         let trades: Vec<Trade> = Vec::new();
-        let ds_prefix = build_dataset(&prefix, &trades, 10_000, 2);
-        let ds_full = build_dataset(&quotes, &trades, 10_000, 2);
+        let ds_prefix = build_dataset(&prefix, &trades, 10_000, 2).expect("valid fixture");
+        let ds_full = build_dataset(&quotes, &trades, 10_000, 2).expect("valid fixture");
         assert!(ds_prefix.len() >= 40, "only {} rows", ds_prefix.len());
         // N2: the appended quote sits after a 10-bar hole (bars 50..=59
         // unobserved), so it adds no supervised rows: every candidate
@@ -4326,7 +4464,7 @@ mod tests {
         // of two rounding residues. 2000 bars so any sliding-sum drift in
         // the statistic has room to show up.
         let quotes = n1_quotes(2000, |_| (99.99, 100.01));
-        let ds = build_dataset(&quotes, &[], 10_000, 2);
+        let ds = build_dataset(&quotes, &[], 10_000, 2).expect("valid fixture");
         assert!(ds.len() > 1000, "only {} rows", ds.len());
         for (i, row) in ds.iter().enumerate() {
             assert!(row.spread_z.is_finite(), "row {i}: spread_z not finite");
@@ -4354,7 +4492,7 @@ mod tests {
             }
         });
         let events = ofi_events(&quotes);
-        let bars = ofi_bars(&quotes, &events, 10_000);
+        let bars = ofi_bars(&quotes, &events, 10_000).expect("valid fixture");
         let spreads: Vec<f64> = bars.iter().map(|b| b.3).collect();
         let (m_new, s_new) = rolling_mean_sd(&spreads, 30);
         let (m_old, s_old) = legacy_rolling_mean_sd(&spreads, 30);
@@ -4379,7 +4517,7 @@ mod tests {
         assert_eq!(max_new, 0.0);
         // Dataset level: trailing rows (windows fully in the constant
         // region) are all flagged degenerate with z exactly 0.
-        let ds = build_dataset(&quotes, &[], 10_000, 2);
+        let ds = build_dataset(&quotes, &[], 10_000, 2).expect("valid fixture");
         assert!(ds.len() > 100, "only {} rows", ds.len());
         for (i, row) in ds.iter().enumerate().skip(100) {
             assert!(row.spread_degenerate, "row {i} should be degenerate");
@@ -4399,8 +4537,8 @@ mod tests {
             _ => (99.98, 100.02),
         });
         let prefix = full[..120].to_vec();
-        let ds_pre = build_dataset(&prefix, &[], 10_000, 2);
-        let ds_full = build_dataset(&full, &[], 10_000, 2);
+        let ds_pre = build_dataset(&prefix, &[], 10_000, 2).expect("valid fixture");
+        let ds_full = build_dataset(&full, &[], 10_000, 2).expect("valid fixture");
         assert!(ds_pre.len() > 60, "only {} prefix rows", ds_pre.len());
         assert!(ds_full.len() > ds_pre.len());
         let mut violations = 0;
@@ -4428,8 +4566,8 @@ mod tests {
             _ => (99.98, 100.02),
         });
         let constant = n1_quotes(200, |_| (99.99, 100.01));
-        let mut bars = build_dataset(&varying, &[], 10_000, 2);
-        bars.extend(build_dataset(&constant, &[], 10_000, 2));
+        let mut bars = build_dataset(&varying, &[], 10_000, 2).expect("valid fixture");
+        bars.extend(build_dataset(&constant, &[], 10_000, 2).expect("valid fixture"));
         assert!(bars.len() > 100, "only {} rows", bars.len());
         let xs: Vec<[f64; N_FEATURES]> = bars.iter().map(|b| b.features()).collect();
         let ys: Vec<u8> = bars.iter().map(|b| b.target).collect();
@@ -4502,14 +4640,14 @@ mod tests {
         // B rows before 180 have feature windows reaching back into
         // the 91-bar hole. Any row crossing the hole breaks the count.
         let (quotes, trades) = gap_fixture(1_510_100);
-        let ds = build_dataset(&quotes, &trades, 10_000, 3);
+        let ds = build_dataset(&quotes, &trades, 10_000, 3).expect("valid fixture");
         assert_eq!(ds.len(), 81, "gapped dataset row count");
 
         // Control: identical quotes with the hole closed. 120 bars
         // yield i in 4..=116 (113 rows), so the censor removes exactly
         // the gap-crossing and gap-adjacent rows.
         let (quotes, trades) = gap_fixture(600_000);
-        let ds = build_dataset(&quotes, &trades, 10_000, 3);
+        let ds = build_dataset(&quotes, &trades, 10_000, 3).expect("valid fixture");
         assert_eq!(ds.len(), 113, "control dataset row count");
     }
 
@@ -4546,7 +4684,7 @@ mod tests {
         // the start time of the OFI bar it was built from: on the
         // 10 s grid and strictly increasing in row order.
         let (q, t) = synth_quotes(600, true);
-        let ds = build_dataset(&q, &t, 10_000, 2);
+        let ds = build_dataset(&q, &t, 10_000, 2).expect("valid fixture");
         assert!(ds.len() > 40, "only {} rows", ds.len());
         for (i, row) in ds.iter().enumerate() {
             assert_eq!(row.time_ms % 10_000, 0, "row {i} off the bar grid");
@@ -4565,7 +4703,7 @@ mod tests {
         // that all four walk-forward folds clear the 30-row training
         // minimum, so the standard evaluation yields four fold records.
         let (q, t) = synth_quotes(2400, true);
-        let bars = build_dataset(&q, &t, 10_000, 2);
+        let bars = build_dataset(&q, &t, 10_000, 2).expect("valid fixture");
         let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
         assert_eq!(detail.folds.len(), 4, "expected four fold records");
         assert_eq!(detail.report.n_folds, 4);
@@ -4621,7 +4759,7 @@ mod tests {
     #[test]
     fn n4_ledger_detects_tampering() {
         let (q, t) = synth_quotes(2400, true);
-        let bars = build_dataset(&q, &t, 10_000, 2);
+        let bars = build_dataset(&q, &t, 10_000, 2).expect("valid fixture");
         let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
         let models = build_fold_models_file(&detail, 10_000, 1_700_000_000_000);
         let rows = load_predictions(&predictions_csv(&detail.predictions)).unwrap();
@@ -4651,7 +4789,7 @@ mod tests {
     #[test]
     fn n4_past_coefficients_marked_unrecoverable() {
         let (q, t) = synth_quotes(2400, true);
-        let bars = build_dataset(&q, &t, 10_000, 2);
+        let bars = build_dataset(&q, &t, 10_000, 2).expect("valid fixture");
         let detail = walk_forward_detailed(&bars, 4, 2).expect("detailed eval");
         let models = build_fold_models_file(&detail, 10_000, 1_700_000_000_000);
         assert_eq!(models.past_in_memory_coefficients, "UNRECOVERABLE");
@@ -5755,7 +5893,7 @@ mod tests {
         // `build_dataset` row for row on shared rows, so the v3
         // baseline is preserved exactly inside the new frame.
         let (q, t) = synth_quotes(1200, true);
-        let v3 = build_dataset(&q, &t, 10_000, 3);
+        let v3 = build_dataset(&q, &t, 10_000, 3).expect("valid fixture");
         let p2 = build_p2_dataset(&q, &t, 10_000, 3);
         assert!(!p2.is_empty());
         let mut compared = 0;

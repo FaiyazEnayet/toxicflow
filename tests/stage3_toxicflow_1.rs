@@ -429,7 +429,7 @@ fn stage3_toxicflow_1_baseline_matches_build_dataset() {
     // must be unchanged.
     let quotes = synth_quotes(700);
     let p1 = build_p1_dataset(&quotes, &[], 10_000, config_3(), 10);
-    let base = build_dataset(&quotes, &[], 10_000, 3);
+    let base = build_dataset(&quotes, &[], 10_000, 3).expect("valid fixture");
     let p1_base = p1.baseline_bars();
     assert_eq!(p1_base.len(), base.len());
     for (a, b) in p1_base.iter().zip(base.iter()) {
@@ -455,7 +455,7 @@ fn stage3_toxicflow_1_every_target_traces_to_observed_mid() {
     let quotes = synth_quotes(700);
     let ds = build_p1_dataset(&quotes, &[], 10_000, config_3(), 10);
     let events = ofi_events(&quotes);
-    let bars = ofi_bars(&quotes, &events, 10_000);
+    let bars = ofi_bars(&quotes, &events, 10_000).expect("valid fixture");
     let status = bar_status(&quotes, 10_000);
     assert_eq!(bars.len(), 700);
     let mid_at = |time_ms: i64| bars[(time_ms / 10_000) as usize].2;

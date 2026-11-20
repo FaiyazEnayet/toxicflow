@@ -255,7 +255,9 @@ pub struct BarSeries {
 /// Build the bar series from recorded quotes on the `ofi_bars` grid.
 pub fn build_bar_series(quotes: &[Quote], bar_ms: i64) -> BarSeries {
     let events = ofi_events(quotes);
-    let bars = ofi_bars(quotes, &events, bar_ms);
+    // H4: an invalid bar grid yields an empty series, the same
+    // thin-data outcome as before.
+    let bars = ofi_bars(quotes, &events, bar_ms).unwrap_or_default();
     let status = bar_status(quotes, bar_ms);
     BarSeries {
         mid: bars.iter().map(|b| b.2).collect(),
@@ -4153,7 +4155,9 @@ pub fn build_variant_inputs(
     bar_ms: i64,
 ) -> VariantInputs {
     let events = ofi_events(quotes);
-    let bars = ofi_bars(quotes, &events, bar_ms);
+    // H4: an invalid bar grid yields empty inputs, the same
+    // thin-data outcome as before.
+    let bars = ofi_bars(quotes, &events, bar_ms).unwrap_or_default();
     let status = bar_status(quotes, bar_ms);
     let n = bars.len();
     // Last quote per bar, carried forward, for the microprice.

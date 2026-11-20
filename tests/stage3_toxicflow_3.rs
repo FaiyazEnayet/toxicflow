@@ -703,7 +703,7 @@ fn stage3_toxicflow_3_p3_v3_columns_bit_identical() {
     // bit-identically on shared rows, so the v3 baseline is
     // preserved exactly inside the v5 frame.
     let (quotes, trades) = p3_hand_session();
-    let v3 = build_dataset(&quotes, &trades, 10_000, 3);
+    let v3 = build_dataset(&quotes, &trades, 10_000, 3).expect("valid fixture");
     let p3 = build_p3_dataset(&quotes, &trades, 10_000, 3);
     assert!(!p3.is_empty());
     for row in &p3 {

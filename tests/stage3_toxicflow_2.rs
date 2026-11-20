@@ -184,7 +184,7 @@ fn stage3_toxicflow_2_p2_ablation_runs_on_synthetic_session() {
     // End to end: the v4 frame builds, the B3 and B5 evaluations
     // run on the same rows, and every headline number is finite.
     let (quotes, trades) = p2_synth_session();
-    let v3 = build_dataset(&quotes, &trades, 10_000, 3);
+    let v3 = build_dataset(&quotes, &trades, 10_000, 3).expect("valid fixture");
     let p2 = build_p2_dataset(&quotes, &trades, 10_000, 3);
     assert!(!v3.is_empty() && !p2.is_empty());
     assert!(p2.len() < v3.len(), "v4 rows start at bar 29, v3 earlier");
