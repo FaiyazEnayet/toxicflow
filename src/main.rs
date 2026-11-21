@@ -171,7 +171,10 @@ fn percentile(mut xs: Vec<f64>, p: f64) -> f64 {
         return f64::NAN;
     }
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    xs[(p * (xs.len() - 1) as f64).round() as usize]
+    // Clamp the rounded position into [0, len - 1]: p is a fraction in
+    // [0, 1], but an out-of-range p must never index past the end.
+    let pos = (p * (xs.len() - 1) as f64).round();
+    xs[pos.clamp(0.0, (xs.len() - 1) as f64) as usize]
 }
 
 fn analyze(
@@ -547,7 +550,8 @@ fn export_session(
     let t0 = ob[0].0;
     let mut signed = vec![0.0; ob.len()];
     for t in &trades {
-        let idx = ((t.time_ms - t0) / 10_000) as usize;
+        // A trade before the first OFI bar saturates into bucket 0.
+        let idx = (t.time_ms.saturating_sub(t0) / 10_000) as usize;
         if idx < signed.len() {
             signed[idx] += t.signed_qty();
         }
@@ -618,7 +622,9 @@ fn export_session(
             .unwrap_or_else(|| "session".to_string());
         let created_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            // Current Unix time in ms is ~1.8e12, far below i64::MAX (~9.2e18);
+            // saturate rather than truncate if it ever grew past the range.
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
         predict::write_prediction_ledger(
             &std::path::Path::new(out).join("experiments").join(run),
@@ -1130,5 +1136,14 @@ mod tests {
         let r = storage::read_trades(path.to_str().unwrap());
         assert!(r.is_err(), "wrong-schema parquet should be an Err");
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn percentile_clamps_out_of_range_p() {
+        let xs = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(percentile(xs.clone(), 0.0), 1.0);
+        assert_eq!(percentile(xs.clone(), 1.0), 5.0);
+        assert_eq!(percentile(xs.clone(), 1.5), 5.0);
+        assert_eq!(percentile(xs.clone(), -0.5), 1.0);
     }
 }
