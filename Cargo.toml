@@ -1,6 +1,6 @@
 [package]
 name = "toxicflow"
-version = "0.1.0"
+version = "1.3.0"
 edition = "2021"
 description = "Order-flow toxicity on free crypto data: VPIN, Kyle's lambda, and order flow imbalance from Binance market data."
 license = "MIT"
