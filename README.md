@@ -15,7 +15,10 @@
   <a href="#run-locally"><img src="https://img.shields.io/badge/Run-Locally-202326?style=for-the-badge&labelColor=17191b" alt="Run Locally"></a>
 </p>
 
-Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information, and traces how the mid-price responds to order-flow shocks over the seconds after they land. On the November 2026 campaign's held-out sessions, the direction model beats the training-majority baseline: 0.5428 accuracy against 0.5245. The dashboard presents every result against its baseline, so diagnostics and measured outcomes read side by side.
+Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information, and traces how the mid-price responds to order-flow shocks over the seconds after they land. Every signal is measured on real exchange data, with the full measurement record published alongside it.
+
+
+The dashboard presents every result against its baseline, so diagnostics and measured outcomes read side by side.
 
 
 <p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><img src="docs/demo.gif?v=overview-20261112" alt="Toxicflow demo"></a></p>
@@ -42,7 +45,7 @@ A synchronized local order book feeds VPIN, rolling Kyle lambda and order-flow i
 | Direction-model accuracy | 0.791 versus a 0.786 training-majority baseline on gap-censored rows (walk-forward export; 123 of 1,167 rows censored for touching the session's 920.1 s outage) |
 | Toy market-making PnL | Open -14.51; toxicity-gated -3.58 |
 | Price response to a 1 SD OFI shock | +0.10 bps in the shock bar, +0.22 bps at 60 s, +0.14 bps at 300 s (main session, inclusive baseline); the empirical response curves are the reported result, and no adjustment time constant is claimed for any of the 6 recorded sessions |
-| Conclusion | Results stand as measured in this session; the November 2026 recording campaign (20 x 4 h BTCUSDT sessions) has landed with its response curves reported below, and the registered confirmation study tests the direction question on those campaign slots |
+| Conclusion | Results stand as measured in this session; the November 2026 recording campaign (20 x 4 h BTCUSDT sessions) is reported below, and the registered confirmation study tests the direction question on those campaign slots |
 
 ## Updating this project
 
