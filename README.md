@@ -18,11 +18,9 @@
 Toxicflow records exchange order flow, reconstructs market state and tests whether liquidity signals carry useful short-horizon information, and traces how the mid-price responds to order-flow shocks over the seconds after they land. Every signal is measured on real exchange data, with the full measurement record published alongside it.
 
 
-The dashboard presents every result against its baseline, so diagnostics and measured outcomes read side by side.
-
-
 <p align="center"><a href="https://faiyazenayet.github.io/toxicflow/docs/dashboard.html"><img src="docs/demo.gif?v=overview-20261112" alt="Toxicflow demo"></a></p>
 
+The dashboard presents every result against its baseline, so diagnostics and measured outcomes read side by side.
 
 A toxicity signal earns its place when it arrives early enough to change an execution decision, so price, order flow and VPIN are read on the same clock, alongside calibration and baseline comparisons. The recorded experiment is reported in full, with predictive performance measured against its reference model on every session.
 
