@@ -8,7 +8,7 @@ use toxicflow::metrics::{
     kyle_lambda, ofi_bars, ofi_events, volume_buckets, vpin, FlowBar, LiveVpin, Quote, Trade,
 };
 use toxicflow::robustness::{kyle_lambda_robust, lambda_tail_summary};
-use toxicflow::{evidence, predict, recorder, speed, storage, strategy};
+use toxicflow::{evidence, predict, recorder, replay, speed, storage, strategy};
 
 #[derive(Parser)]
 #[command(name = "toxicflow", about = "Order-flow toxicity on free crypto data")]
@@ -45,6 +45,16 @@ enum Cmd {
     /// fixture in JSON-lines form, so the existing export command can
     /// regenerate the report offline from raw recorded events.
     JournalToSession { journal: String, out: String },
+    /// Replay a journal fixture in JSON-lines form through the typed
+    /// as-of event-sourced engine: print the replay digest, the
+    /// validity at the end, the resync intervals, and every L2
+    /// unavailability. Two clean runs on the same journal print the
+    /// same digest.
+    Replay {
+        /// Fixture journal to replay.
+        #[arg(long)]
+        journal: String,
+    },
     /// Build a versioned evidence manifest for a rebuilt session and
     /// its export: capture interval and chunk edges, endpoints,
     /// software SHA, input hashes, resync and gap accounting,
@@ -139,6 +149,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bucket_btc,
         } => export_session(&dir, &out, buckets, window, bucket_btc)?,
         Cmd::JournalToSession { journal, out } => journal_to_session(&journal, &out)?,
+        Cmd::Replay { journal } => replay_journal(&journal)?,
         Cmd::Evidence {
             journal,
             session,
@@ -444,6 +455,45 @@ fn verify_evidence(manifest: &str, session: &str, export: &str) -> Result<(), Bo
         )
         .into())
     }
+}
+
+/// Replay a journal fixture through the typed as-of engine and print
+/// the replay digest, the end validity, the resync intervals, and the
+/// L2 unavailability log. The digest line is first and stable: two
+/// clean runs on the same journal print the same digest.
+fn replay_journal(journal: &str) -> Result<(), Box<dyn Error>> {
+    let records = storage::load_journal_jsonl(std::path::Path::new(journal))?;
+    let outcome = replay::replay(&records);
+    println!("digest: {}", outcome.digest);
+    println!(
+        "replay: {} records, {} touch features, {} imbalance features, {} trades, {} quotes, {} resync intervals, {} features while invalid, validity: {}",
+        outcome.records_applied,
+        outcome.touches.len(),
+        outcome.imbalances.len(),
+        outcome.trades.len(),
+        outcome.quotes.len(),
+        outcome.resyncs.len(),
+        outcome.features_while_invalid,
+        match &outcome.validity {
+            replay::Validity::Valid => "valid".to_string(),
+            replay::Validity::Invalid(reason) => format!("invalid: {}", reason.describe()),
+        },
+    );
+    for interval in &outcome.resyncs {
+        println!(
+            "resync: seq {} to {} ({})",
+            interval.start_seq,
+            interval
+                .end_seq
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "end of journal".to_string()),
+            interval.reason.describe(),
+        );
+    }
+    for line in &outcome.log {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 /// Rebuild a recorded session directory from a journal fixture: replay
