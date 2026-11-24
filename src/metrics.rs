@@ -13,7 +13,7 @@
 //!       - 1(ask down)*ask_sz + 1(ask up)*prev_ask_sz
 
 /// One aggregated trade.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Trade {
     pub time_ms: i64,
     pub price: f64,
@@ -37,7 +37,7 @@ impl Trade {
 }
 
 /// One touch quote (best bid/ask with sizes).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Quote {
     pub time_ms: i64,
     pub bid_px: f64,
