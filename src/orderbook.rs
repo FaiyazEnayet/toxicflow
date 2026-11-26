@@ -6,10 +6,37 @@
 //!
 //! Prices are stored as integer ticks (price * 1e8) so levels can live in a
 //! `BTreeMap` and best bid/ask are O(log n).
+//!
+//! # The 1e-8 scale is not the tick size
+//!
+//! The internal 1e-8 scale is representation precision only: it is the
+//! finest price the book can store, chosen so that every price with up to
+//! eight decimal places round-trips exactly. It says nothing about which
+//! prices the exchange will actually send for a symbol.
+//!
+//! The exchange tick-size filter is a separate, per-symbol rule: the
+//! minimum price increment the venue accepts (for example 0.01 on
+//! BTCUSDT). A price can be representable at 1e-8 yet invalid for the
+//! symbol: 100.005 stores exactly at the 1e-8 scale but is off-tick for
+//! a 0.01 filter, and the exchange would never send it. `TickFilter`
+//! carries that rule, and `OrderBook::with_tick_filter` applies it.
+//!
+//! Without a filter the book still validates what needs no symbol:
+//! prices must be finite, positive and representable at 1e-8, and
+//! quantities must be finite and nonnegative, before any conversion.
+//! A level that fails validation is never inserted; rejections are
+//! counted and the last one is visible through `OrderBook::validity()`.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 const TICK_SCALE: f64 = 1e8;
+
+/// Largest finite `price * 1e8` that still converts to `i64` exactly.
+/// Beyond 2^53 an `f64` can no longer hold every integer, so a price
+/// whose scaled value reaches it is rejected as overflow rather than
+/// rounded into a neighbouring tick.
+const MAX_SCALED: f64 = 9_007_199_254_740_992.0; // 2^53
 
 fn to_ticks(price: f64) -> i64 {
     (price * TICK_SCALE).round() as i64
@@ -17,6 +44,319 @@ fn to_ticks(price: f64) -> i64 {
 
 fn from_ticks(ticks: i64) -> f64 {
     ticks as f64 / TICK_SCALE
+}
+
+/// True when `scaled` (a price or quantity times 1e8) is within float
+/// noise of an integer tick: the value is representable at the 1e-8
+/// scale. The tolerance is a few ulps of the scaled value (with a
+/// floor), so a price built by float arithmetic a hair off a decimal,
+/// for example best ask + 0.05, still converts, while a value with a
+/// genuine ninth decimal place stays a clear miss: it sits 0.1 tick
+/// units from the nearest integer, far above the tolerance at any
+/// realistic price.
+fn near_integer_tick(scaled: f64) -> bool {
+    let tol = (scaled.abs() * 1.8e-15).max(1e-6);
+    (scaled - scaled.round()).abs() <= tol
+}
+
+/// Convert a filter field (tick size, lot step, minimum quantity) to
+/// internal 1e-8 units. Returns `None` when the value is nonfinite,
+/// nonpositive, too large to convert exactly, or has more than eight
+/// decimal places.
+fn scale_to_ticks(value: f64) -> Option<i64> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let scaled = value * TICK_SCALE;
+    if !scaled.is_finite() || scaled.abs() >= MAX_SCALED {
+        return None;
+    }
+    if !near_integer_tick(scaled) {
+        return None;
+    }
+    Some(to_ticks(value))
+}
+
+/// Why a price or quantity was rejected before conversion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TickError {
+    /// Price is NaN or infinite.
+    NonFinitePrice,
+    /// Price is zero or negative.
+    NonPositivePrice,
+    /// Price is so large its 1e-8 scaled value no longer fits in an
+    /// exact integer (at or beyond 2^53).
+    PriceOverflow,
+    /// Price has more than eight decimal places and cannot be stored
+    /// exactly at the internal 1e-8 scale.
+    UnrepresentablePrice,
+    /// Price is representable at 1e-8 but is not an exact multiple of
+    /// the symbol tick size.
+    OffTick { price: f64, tick_size: f64 },
+    /// Quantity is NaN or infinite.
+    NonFiniteQty,
+    /// Quantity is negative. Zero is allowed: in a diff it removes
+    /// the level.
+    NegativeQty,
+    /// Quantity has more than eight decimal places and cannot be
+    /// stored exactly at the internal 1e-8 scale.
+    UnrepresentableQty,
+    /// Quantity is not an exact multiple of the lot step.
+    OffLotStep { qty: f64, step_size: f64 },
+    /// Quantity is positive but below the minimum quantity.
+    BelowMinQty { qty: f64, min_qty: f64 },
+    /// The filter itself is invalid: a non-positive, nonfinite, or
+    /// unrepresentable tick size, lot step, or minimum quantity.
+    InvalidFilter,
+}
+
+impl fmt::Display for TickError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TickError::NonFinitePrice => write!(f, "price is not finite"),
+            TickError::NonPositivePrice => write!(f, "price is not positive"),
+            TickError::PriceOverflow => {
+                write!(f, "price is too large to convert to ticks exactly")
+            }
+            TickError::UnrepresentablePrice => {
+                write!(f, "price has more than eight decimal places")
+            }
+            TickError::OffTick { price, tick_size } => write!(
+                f,
+                "price {price} is not a multiple of tick size {tick_size}"
+            ),
+            TickError::NonFiniteQty => write!(f, "quantity is not finite"),
+            TickError::NegativeQty => write!(f, "quantity is negative"),
+            TickError::UnrepresentableQty => {
+                write!(f, "quantity has more than eight decimal places")
+            }
+            TickError::OffLotStep { qty, step_size } => write!(
+                f,
+                "quantity {qty} is not a multiple of lot step {step_size}"
+            ),
+            TickError::BelowMinQty { qty, min_qty } => {
+                write!(f, "quantity {qty} is below minimum quantity {min_qty}")
+            }
+            TickError::InvalidFilter => write!(f, "tick filter is invalid"),
+        }
+    }
+}
+
+impl std::error::Error for TickError {}
+
+/// Validate a price with no symbol filter: finite, positive,
+/// representable at 1e-8, and small enough to convert exactly.
+/// Representability means the scaled value sits within float noise of
+/// an integer tick (see `near_integer_tick`); an exact round-trip is
+/// too strict, because a price built by float arithmetic can sit one
+/// ulp off its decimal and still name the same tick.
+fn checked_ticks(price: f64) -> Result<i64, TickError> {
+    if !price.is_finite() {
+        return Err(TickError::NonFinitePrice);
+    }
+    if price <= 0.0 {
+        return Err(TickError::NonPositivePrice);
+    }
+    let scaled = price * TICK_SCALE;
+    if !scaled.is_finite() || scaled.abs() >= MAX_SCALED {
+        return Err(TickError::PriceOverflow);
+    }
+    if !near_integer_tick(scaled) {
+        return Err(TickError::UnrepresentablePrice);
+    }
+    Ok(to_ticks(price))
+}
+
+/// Validate a quantity with no symbol filter: finite and nonnegative.
+fn check_qty_unfiltered(qty: f64) -> Result<(), TickError> {
+    if !qty.is_finite() {
+        return Err(TickError::NonFiniteQty);
+    }
+    if qty < 0.0 {
+        return Err(TickError::NegativeQty);
+    }
+    Ok(())
+}
+
+/// Validate one (price, qty) level and convert its price to ticks,
+/// applying the tick filter when one is attached. A free function so
+/// `apply_diff` can validate while holding a mutable borrow of a side.
+fn convert_with(filter: Option<TickFilter>, price: f64, qty: f64) -> Result<i64, TickError> {
+    match filter {
+        Some(f) => {
+            let ticks = f.to_ticks_checked(price)?;
+            f.check_qty(qty)?;
+            Ok(ticks)
+        }
+        None => {
+            let ticks = checked_ticks(price)?;
+            check_qty_unfiltered(qty)?;
+            Ok(ticks)
+        }
+    }
+}
+
+/// Validate a price only and convert it to ticks, applying the tick
+/// filter when one is attached. Removals carry no quantity, so no lot
+/// rule applies to them.
+fn convert_price_with(filter: Option<TickFilter>, price: f64) -> Result<i64, TickError> {
+    match filter {
+        Some(f) => f.to_ticks_checked(price),
+        None => checked_ticks(price),
+    }
+}
+
+/// Exchange tick-size / lot-size filter for one symbol.
+///
+/// The filter is the venue rule, not the internal representation: the
+/// book stores prices at a 1e-8 scale (see the module docs) while the
+/// filter says which of those prices the symbol may actually trade.
+/// `tick_size` is the minimum price increment, `step_size` the minimum
+/// quantity increment, `min_qty` the smallest positive quantity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TickFilter {
+    pub tick_size: f64,
+    pub step_size: f64,
+    pub min_qty: f64,
+}
+
+impl TickFilter {
+    /// Build a filter. Every field must be finite, positive, and
+    /// representable at the internal 1e-8 scale.
+    pub fn new(tick_size: f64, step_size: f64, min_qty: f64) -> Result<Self, TickError> {
+        for v in [tick_size, step_size, min_qty] {
+            if scale_to_ticks(v).is_none() {
+                return Err(TickError::InvalidFilter);
+            }
+        }
+        Ok(Self {
+            tick_size,
+            step_size,
+            min_qty,
+        })
+    }
+
+    /// Representative Binance-style spot filter for BTCUSDT: 0.01 tick,
+    /// 0.001 lot step, 0.001 minimum quantity. A fixture for tests and
+    /// examples, not live exchange data.
+    pub fn btc_usdt() -> Self {
+        Self {
+            tick_size: 0.01,
+            step_size: 0.001,
+            min_qty: 0.001,
+        }
+    }
+
+    /// Representative Binance-style spot filter for ETHUSDT: 0.01 tick,
+    /// 0.001 lot step, 0.001 minimum quantity. A fixture for tests and
+    /// examples, not live exchange data.
+    pub fn eth_usdt() -> Self {
+        Self {
+            tick_size: 0.01,
+            step_size: 0.001,
+            min_qty: 0.001,
+        }
+    }
+
+    /// Finest filter the 1e-8 scale can express: every representable
+    /// price is on-tick. Pins the boundary between the internal scale
+    /// and the exchange rule.
+    pub fn finest() -> Self {
+        Self {
+            tick_size: 0.00000001,
+            step_size: 0.00000001,
+            min_qty: 0.00000001,
+        }
+    }
+
+    /// Convert a price to internal ticks, enforcing the filter:
+    /// finite, positive, representable at 1e-8, and an exact multiple
+    /// of the tick size, in that order.
+    pub fn to_ticks_checked(&self, price: f64) -> Result<i64, TickError> {
+        let ticks = checked_ticks(price)?;
+        let tick_ticks = scale_to_ticks(self.tick_size).expect("filter validated at construction");
+        if ticks % tick_ticks != 0 {
+            return Err(TickError::OffTick {
+                price,
+                tick_size: self.tick_size,
+            });
+        }
+        Ok(ticks)
+    }
+
+    /// Validate a quantity against the lot rule. Zero is allowed (in a
+    /// diff it removes the level); a positive quantity must be
+    /// representable, an exact multiple of the step, and at least the
+    /// minimum quantity.
+    pub fn check_qty(&self, qty: f64) -> Result<(), TickError> {
+        check_qty_unfiltered(qty)?;
+        if qty == 0.0 {
+            return Ok(());
+        }
+        let step_ticks = scale_to_ticks(self.step_size).expect("filter validated at construction");
+        let scaled = qty * TICK_SCALE;
+        if !scaled.is_finite() || scaled.abs() >= MAX_SCALED || !near_integer_tick(scaled) {
+            return Err(TickError::UnrepresentableQty);
+        }
+        let qty_ticks = scaled.round() as i64;
+        if qty_ticks % step_ticks != 0 {
+            return Err(TickError::OffLotStep {
+                qty,
+                step_size: self.step_size,
+            });
+        }
+        if qty < self.min_qty {
+            return Err(TickError::BelowMinQty {
+                qty,
+                min_qty: self.min_qty,
+            });
+        }
+        Ok(())
+    }
+
+    /// Convert internal ticks back to a decimal price.
+    pub fn from_ticks(ticks: i64) -> f64 {
+        from_ticks(ticks)
+    }
+}
+
+/// Book validity and gap coverage metrics.
+///
+/// `is_crossed()` answers one question; this answers the rest, so
+/// callers do not have to infer book health from a single flag.
+/// Counters are cumulative since the book was constructed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BookValidity {
+    /// Best bid >= best ask with both sides present.
+    pub crossed: bool,
+    /// Best bid == best ask with both sides present.
+    pub locked: bool,
+    /// Exactly one side has levels.
+    pub one_sided: bool,
+    /// Neither side has levels.
+    pub empty: bool,
+    /// Number of bid levels.
+    pub n_bid_levels: usize,
+    /// Number of ask levels.
+    pub n_ask_levels: usize,
+    /// Best ask minus best bid in internal 1e-8 ticks, when both
+    /// sides are present.
+    pub spread_ticks: Option<i64>,
+    /// Levels rejected by validation since construction.
+    pub invalid_rejected: u64,
+    /// Sequence gaps seen since construction.
+    pub gaps_seen: u64,
+    /// Stale events seen since construction.
+    pub stale_seen: u64,
+    /// Events applied since construction.
+    pub applied_events: u64,
+    /// Fraction of update ids actually applied since construction:
+    /// applied / (applied + missed in gaps). 1.0 when nothing was
+    /// missed. The snapshot baseline itself is not counted: coverage
+    /// measures the diff stream after it.
+    pub id_coverage: f64,
+    /// The most recent rejection, if any.
+    pub last_rejection: Option<TickError>,
 }
 
 /// Outcome of applying one depthUpdate event.
@@ -35,6 +375,14 @@ pub struct OrderBook {
     bids: BTreeMap<i64, f64>,
     asks: BTreeMap<i64, f64>,
     pub last_id: i64,
+    filter: Option<TickFilter>,
+    invalid_rejected: u64,
+    gaps_seen: u64,
+    stale_seen: u64,
+    applied_events: u64,
+    ids_applied: u64,
+    ids_missed: u64,
+    last_rejection: Option<TickError>,
 }
 
 impl OrderBook {
@@ -43,26 +391,117 @@ impl OrderBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             last_id: -1,
+            filter: None,
+            invalid_rejected: 0,
+            gaps_seen: 0,
+            stale_seen: 0,
+            applied_events: 0,
+            ids_applied: 0,
+            ids_missed: 0,
+            last_rejection: None,
+        }
+    }
+
+    /// Attach an exchange tick-size / lot-size filter. Levels that
+    /// fail the filter are rejected (counted, never inserted). Without
+    /// a filter the book still validates finiteness, positivity, and
+    /// 1e-8 representability, which need no symbol.
+    pub fn with_tick_filter(mut self, filter: TickFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// The attached tick filter, if any.
+    pub fn tick_filter(&self) -> Option<TickFilter> {
+        self.filter
+    }
+
+    /// Levels rejected by validation since construction.
+    pub fn invalid_rejected(&self) -> u64 {
+        self.invalid_rejected
+    }
+
+    /// The most recent rejection, if any.
+    pub fn last_rejection(&self) -> Option<TickError> {
+        self.last_rejection
+    }
+
+    /// Book validity and gap coverage metrics. See `BookValidity`.
+    pub fn validity(&self) -> BookValidity {
+        let bid_t = self.bids.keys().next_back().copied();
+        let ask_t = self.asks.keys().next().copied();
+        let crossed = matches!((bid_t, ask_t), (Some(b), Some(a)) if b >= a);
+        let locked = matches!((bid_t, ask_t), (Some(b), Some(a)) if b == a);
+        let total = self.ids_applied + self.ids_missed;
+        BookValidity {
+            crossed,
+            locked,
+            one_sided: self.bids.is_empty() != self.asks.is_empty(),
+            empty: self.is_empty(),
+            n_bid_levels: self.bids.len(),
+            n_ask_levels: self.asks.len(),
+            spread_ticks: match (bid_t, ask_t) {
+                (Some(b), Some(a)) => Some(a - b),
+                _ => None,
+            },
+            invalid_rejected: self.invalid_rejected,
+            gaps_seen: self.gaps_seen,
+            stale_seen: self.stale_seen,
+            applied_events: self.applied_events,
+            id_coverage: if total == 0 {
+                1.0
+            } else {
+                self.ids_applied as f64 / total as f64
+            },
+            last_rejection: self.last_rejection,
+        }
+    }
+
+    fn reject(&mut self, e: TickError) {
+        self.invalid_rejected += 1;
+        self.last_rejection = Some(e);
+    }
+
+    /// Validate one (price, qty) level and convert its price to ticks,
+    /// applying the tick filter when one is attached.
+    fn convert(&self, price: f64, qty: f64) -> Result<i64, TickError> {
+        convert_with(self.filter, price, qty)
+    }
+
+    /// Validate one snapshot level and convert its price. Zero
+    /// quantity drops the level silently, as before; any other failure
+    /// is counted and the level is skipped.
+    fn checked_level(&mut self, price: f64, qty: f64) -> Option<(i64, f64)> {
+        if qty == 0.0 {
+            return None;
+        }
+        match self.convert(price, qty) {
+            Ok(ticks) => Some((ticks, qty)),
+            Err(e) => {
+                self.reject(e);
+                None
+            }
         }
     }
 
     /// Load a REST snapshot. `bids`/`asks` are (price, qty) pairs.
+    /// Levels that fail validation are never inserted and are counted;
+    /// see `validity()`.
     pub fn from_snapshot(&mut self, bids: &[(f64, f64)], asks: &[(f64, f64)], last_id: i64) {
         self.bids = bids
             .iter()
-            .filter(|(_, q)| *q > 0.0)
-            .map(|(p, q)| (to_ticks(*p), *q))
+            .filter_map(|(p, q)| self.checked_level(*p, *q))
             .collect();
         self.asks = asks
             .iter()
-            .filter(|(_, q)| *q > 0.0)
-            .map(|(p, q)| (to_ticks(*p), *q))
+            .filter_map(|(p, q)| self.checked_level(*p, *q))
             .collect();
         self.last_id = last_id;
     }
 
     /// Apply one depthUpdate. `bids`/`asks` are (price, qty) level updates;
-    /// a zero quantity removes the level.
+    /// a zero quantity removes the level. Levels that fail validation
+    /// are skipped and counted; the valid remainder still applies.
     pub fn apply_diff(
         &mut self,
         u_first: i64,
@@ -71,21 +510,49 @@ impl OrderBook {
         asks: &[(f64, f64)],
     ) -> SyncResult {
         if u_last < self.last_id {
+            self.stale_seen += 1;
             return SyncResult::Stale;
         }
         if u_first > self.last_id + 1 {
+            self.gaps_seen += 1;
+            self.ids_missed += (u_first - self.last_id - 1) as u64;
             return SyncResult::Gap;
         }
+        // Ids this event covers for the first time: its own span past
+        // the previous baseline, so a redelivery counts nothing twice
+        // and the first event after construction counts only its span.
+        let new_ids = (u_last - self.last_id.max(u_first - 1)).max(0) as u64;
+        // Validate through the free functions (the loop holds a
+        // mutable borrow of each side map) and count rejections after.
+        let filter = self.filter;
+        let mut rejections: Vec<TickError> = Vec::new();
         for (book, levels) in [(&mut self.bids, bids), (&mut self.asks, asks)] {
             for (price, qty) in levels {
-                let t = to_ticks(*price);
                 if *qty == 0.0 {
-                    book.remove(&t);
+                    // Removal: the price still has to name a level.
+                    // An unconvertible price names none, so it is a
+                    // counted rejection rather than a removal.
+                    match convert_price_with(filter, *price) {
+                        Ok(t) => {
+                            book.remove(&t);
+                        }
+                        Err(e) => rejections.push(e),
+                    }
                 } else {
-                    book.insert(t, *qty);
+                    match convert_with(filter, *price, *qty) {
+                        Ok(t) => {
+                            book.insert(t, *qty);
+                        }
+                        Err(e) => rejections.push(e),
+                    }
                 }
             }
         }
+        for e in rejections {
+            self.reject(e);
+        }
+        self.ids_applied += new_ids;
+        self.applied_events += 1;
         self.last_id = u_last;
         SyncResult::Applied
     }
@@ -162,6 +629,8 @@ impl OrderBook {
     ///
     /// A crossed book cannot arise from a correctly synchronized exchange
     /// stream; it signals stale data, a missed update, or a bad snapshot.
+    /// This is one flag only; `validity()` reports the full picture
+    /// (locked, one-sided, empty, spread, rejections, gap coverage).
     pub fn is_crossed(&self) -> bool {
         match (self.best_bid(), self.best_ask()) {
             (Some((b, _)), Some((a, _))) => b >= a,
